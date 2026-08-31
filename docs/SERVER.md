@@ -241,8 +241,68 @@ Single-user auth. There is one password; sessions are per-browser.
   present a valid cookie.)
 - **Login rate limit / lockout:** 5 failed password attempts trip a 60-second lockout
   (further attempts get `429 too_many_attempts`); a success resets the counter.
-- **Auth gate:** every route except the login/setup pages and their POST handlers
-  requires a valid session — HTML navigations redirect to `/login`, API/WS get `401`.
+- **Auth gate:** browser routes other than the login/setup pages and their POST handlers
+  require a valid session — HTML navigations redirect to `/login`, API/WS get `401`. The
+  `/opsapi/` namespace below is intentionally outside this principal and accepts only its own
+  loopback bearer.
+
+### Operator management plane (`/opsapi/`)
+
+The Server Edition has a second, operator-only principal for inspecting and cleaning its durable
+canvas state without weakening agent canvas-control ownership. On boot it loads or creates
+`ops-token` in the Server data dir (default: `~/.nodeterm-server/ops-token`) and enforces mode
+`0600`. The token is restart-stable, never printed, never derived from the browser password, and
+never accepted as `nt_session`. With a custom `NODETERM_DATA_DIR`, the token follows that data dir.
+
+Every `/opsapi/*` request must satisfy both gates:
+
+1. the actual TCP peer is loopback (`127.0.0.0/8` or `::1`) — forwarded headers and proxy trust do
+   not widen this;
+2. `Authorization: Bearer <contents-of-ops-token>` is present.
+
+Keep the bearer out of argv. This shell helper feeds curl's header through stdin:
+
+```bash
+ops_curl() {
+  token_file=${NODETERM_DATA_DIR:-"$HOME/.nodeterm-server"}/ops-token
+  { printf 'header = "Authorization: Bearer '; tr -d '\n' < "$token_file"; printf '"\n'; } |
+    curl --silent --show-error --config - "$@"
+}
+
+ops_curl http://127.0.0.1:8443/opsapi/nodes
+ops_curl -X POST -H 'Content-Type: application/json' \
+  --data '{"dryRun":true}' http://127.0.0.1:8443/opsapi/sweep
+ops_curl -X DELETE http://127.0.0.1:8443/opsapi/nodes/term-example
+ops_curl -X DELETE 'http://127.0.0.1:8443/opsapi/nodes/term-example?force=1'
+ops_curl http://127.0.0.1:8443/opsapi/health
+```
+
+The v1 contract is deliberately narrow:
+
+- `GET /opsapi/nodes` returns `{nodes:[...]}` for every persisted card across every loaded project.
+  Each row includes `id`, `kind`, `title`, `projectId`, `groupId`, `createdAt` (epoch ms recovered
+  from nodeterm's timestamped id, otherwise `null`), `paneState`, `agentStatus`, `lastActivityAt`,
+  and the current-run creator `ownerSession`. Terminal pane state is `alive`, `dead`, or `unknown`;
+  non-terminal cards say `none`. Agent state is normalized to `working`, `idle`, or `blocked` when
+  the hook mirror knows it.
+- `POST /opsapi/sweep` requires exactly `{ "dryRun": true|false }` and returns
+  `{dryRun, affectedIds, scanned}`. It considers local terminal cards only, requires two definitive
+  absent-pane probes, and treats every failed/unreachable probe as `unknown`. Dry-run and the
+  periodic reaper use this same mutation engine.
+- `DELETE /opsapi/nodes/<id>` removes one card. A live pane returns `409 pane_alive`, and an
+  unreadable pane returns `503 pane_state_unknown`; `?force=1` is the explicit operator gate. A
+  forced local terminal deletion confirms backend teardown before saving the card removal. Agents
+  using this operator API by convention must never force a live or unknown target.
+- `GET /opsapi/health` returns boot time/uptime, attached WS client count, whether canvas control
+  initialized, the non-blocking spawn handler snapshot (`idle`/`running`/`wedged`, oldest
+  operation, age, active count, queue), per-target delivery queue depths, and the loaded project
+  list. Health does not enter the handler queue or await the external launches it observes, so a
+  wedged node creation cannot wedge its diagnosis too.
+
+There are no create, send, rename, remote-exposure, or UI verbs here. **Surfaces:** Server Edition:
+full; Desktop: N/A (its operator is the local app/main process); Mobile companion: N/A (the bearer
+namespace is not routed remotely). Shipping this code does not alter a running service; activation
+happens only on a later operator-approved Server restart.
 
 ### Reverse-proxy SSO (header trust)
 
@@ -552,9 +612,12 @@ Node creation persists and publishes the card under the serialized workspace tra
 releases that transaction before starting its PTY or typing the initial command. Those external
 steps have a 15-second total deadline. `launch-timeout` means the durable card remains but startup
 did not settle; the underlying operation cannot be cancelled and may still finish, so do not repeat
-the request. Other creation calls remain available immediately. If the card is explicitly closed
-while creation is unresolved, the factory remembers that cancellation and destroys an eventual
-late backend a second time, so releasing the transaction lock cannot create an orphan session.
+the request. Its `/opsapi/health` ticket remains active until the underlying operation actually
+settles, and parallel launches are counted separately while the oldest is named. Other creation
+calls remain available immediately. If the card is explicitly closed or removed through the
+operator API while creation is unresolved, the factory remembers that cancellation and destroys an
+eventual late backend a second time, so releasing the transaction lock cannot create an orphan
+session.
 Claude CLI capability discovery is
 bounded at five seconds and degrades to no optional flags. Server Codex launches use the edition's
 deliberate no-shared-app-server answer directly and therefore start the ordinary `codex` CLI rather

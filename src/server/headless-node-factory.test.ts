@@ -10,6 +10,7 @@ import { WorkspaceStore } from '../core/workspace-store'
 import type { AgentState } from '../shared/agents/normalize'
 import {
   DEFAULT_SETTINGS,
+  type ClaudeCliCaps,
   type CanvasNodeState,
   type PtyCreateOptions,
   type PtyCreateResult,
@@ -23,6 +24,7 @@ import {
   type HeadlessNodeOwnership,
   type HeadlessPty
 } from './headless-node-factory'
+import { SpawnHandlerState } from './spawn-handler-state'
 
 class FakePty implements HeadlessPty {
   readonly creates: PtyCreateOptions[] = []
@@ -97,6 +99,9 @@ describe('HeadlessNodeFactory', () => {
   let factoryDeps: HeadlessNodeFactoryDeps
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
+  let cliCaps: () => Promise<ClaudeCliCaps>
+  let handlerNow: number
+  let spawnHandlerState: SpawnHandlerState
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -117,6 +122,17 @@ describe('HeadlessNodeFactory', () => {
     removed = []
     publishedProjects = []
     codexSharedIdentity = false
+    cliCaps = async () => ({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      sessionIdFlag: false
+    })
+    handlerNow = 1_000
+    spawnHandlerState = new SpawnHandlerState({
+      now: () => handlerNow,
+      wedgeAfterMs: 100
+    })
     ownership = createHeadlessNodeOwnership()
     ownership.record('term-upstream', {
       sourceNodeId: 'term-source',
@@ -151,14 +167,10 @@ describe('HeadlessNodeFactory', () => {
       workspaceStore: store,
       ptyManager: pty,
       settings,
-      cliCaps: async () => ({
-        version: null,
-        autoPermissionMode: false,
-        fullscreenTui: false,
-        sessionIdFlag: false
-      }),
+      cliCaps: () => cliCaps(),
       codexSharedIdentity: async () => codexSharedIdentity,
       ownership,
+      spawnHandlerState,
       stateOf: (id) => states[id],
       publishNode: (_projectId, node) => published.push(node),
       publishRemoval: (_projectId, nodeId) => removed.push(nodeId),
@@ -231,6 +243,13 @@ describe('HeadlessNodeFactory', () => {
       new Promise<typeof wedged>((resolve) => setTimeout(() => resolve(wedged), 500))
     ])
 
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-terminal:launch',
+      active: 1,
+      queued: 0
+    })
+
     // Always release/consume both requests so the red pre-fix run leaves no background promise.
     releaseFirst({ sessionId: 'pty-first', fresh: true, persistent: true })
     await first
@@ -274,6 +293,34 @@ describe('HeadlessNodeFactory', () => {
     expect(workspace.projects[0].nodes.some((node) => node.id === nodeId)).toBe(false)
   })
 
+  it('kills a backend that appears after operator removal forgets an in-flight card', async () => {
+    let releaseCreate!: (result: PtyCreateResult) => void
+    let markCreateEntered!: () => void
+    const createEntered = new Promise<void>((resolve) => (markCreateEntered = resolve))
+    vi.spyOn(pty, 'createHeadless').mockImplementationOnce((options) => {
+      pty.creates.push(options)
+      markCreateEntered()
+      return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
+    })
+
+    const opening = factory.openTerminal('term-source', {}, true)
+    await createEntered
+    const nodeId = pty.creates[0].persistKey as string
+    // ServerNodeOps force removal kills first, persists the card removal, then calls forgetNodes.
+    await pty.destroySession(null, nodeId, { everySocket: true })
+    factory.forgetNodes([nodeId])
+
+    pty.live.add(nodeId)
+    releaseCreate({ sessionId: `pty-${nodeId}`, fresh: true, persistent: true })
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-failed')
+    })
+    expect(pty.live.has(nodeId)).toBe(false)
+    expect(pty.destroys.filter((entry) => entry.nodeId === nodeId)).toHaveLength(2)
+    expect(pty.destroys.at(-1)).toMatchObject({ nodeId, wasLive: true })
+  })
+
   it('bounds a hung launch with a named timeout and leaves later creations available', async () => {
     factory.stop()
     factory = new HeadlessNodeFactory({
@@ -299,9 +346,28 @@ describe('HeadlessNodeFactory', () => {
     })
     expect(timedOut.error).toContain('later creations remain available')
     expect(timedOut.error).toContain('do not repeat')
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-terminal:launch',
+      active: 1,
+      queued: 0
+    })
+    handlerNow += 101
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-terminal:launch',
+      activeForMs: 101,
+      active: 1
+    })
 
     await expect(factory.openTerminal('term-source', {}, true)).resolves.toMatchObject({ ok: true })
     expect(pty.creates).toHaveLength(2)
+    // The timed-out underlying create remains visible while the successful later launch settles.
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-terminal:launch',
+      active: 1
+    })
   })
 
   it('bounds a missing Codex capability answer and degrades to the ordinary CLI', async () => {
@@ -323,6 +389,38 @@ describe('HeadlessNodeFactory', () => {
       "codex 'bounded preflight' --ask-for-approval untrusted"
     )
     await expect(factory.openTerminal('term-source', {}, true)).resolves.toMatchObject({ ok: true })
+  })
+
+  it('reports the real serialized creation handler as wedged without waiting behind it', async () => {
+    let releaseCaps!: (caps: ClaudeCliCaps) => void
+    const pendingCaps = new Promise<ClaudeCliCaps>((resolve) => {
+      releaseCaps = resolve
+    })
+    cliCaps = () => pendingCaps
+    const first = factory.openAgent('term-source', { agent: 'claude' }, true)
+    await Promise.resolve()
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-agent',
+      queued: 0
+    })
+
+    const second = factory.openTerminal('term-source', {}, true)
+    handlerNow += 101
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-agent',
+      activeForMs: 101,
+      queued: 1
+    })
+
+    releaseCaps({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      sessionIdFlag: false
+    })
+    await Promise.all([first, second])
   })
 
   it('re-grants an exact saved local project after a Server restart before cross-project open', async () => {

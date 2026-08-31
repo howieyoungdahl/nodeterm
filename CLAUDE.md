@@ -107,6 +107,15 @@ The codebase is split by Electron process boundary — keep code on the correct 
   and runs a serialized `HeadlessNodeFactory`; disabled remains the default. (The SDK **chat node**
   — once listed here as deferred — was removed entirely, 2026-07; see the chat-node note in the
   node-kinds list.)
+  **Operator management is separate from canvas control:** the always-wired `/opsapi/` REST
+  namespace accepts only the `0600` data-dir `ops-token` bearer from a real loopback TCP peer —
+  never the UI password/cookie, trusted-proxy header, or an agent node token. `ServerNodeOps` owns
+  inventory, the single-delete force gate, and the one conservative dead-card sweep engine that
+  the periodic reaper also calls. Operator and agent read/modify/save transactions share one
+  `WorkspaceMutationQueue`, so neither can publish a stale snapshot over the other.
+  `SpawnHandlerState` synchronously observes both serialized preparation and parallel external
+  launches, so health remains readable while its oldest operation is wedged. No operator verb
+  creates, sends, or renames, and the surface is Server-only (Desktop/Mobile N/A).
 - **`src/preload/`** — the only bridge. `index.ts` uses `contextBridge` to expose a
   narrow API on `window.nodeTerminal` (typed in `index.d.ts`). `contextIsolation` is on,
   `nodeIntegration` off.
@@ -1298,13 +1307,22 @@ else, and its context links must keep classifying across restarts).
   delivery run outside it behind one 15s deadline, so an unresponsive tmux/session-host operation
   answers `launch-timeout` without wedging later workspace mutations. The backend call cannot be
   cancelled; its card stays durable and the response says not to repeat because it may finish late.
-  A concurrent close/Server stop marks an in-flight node cancelled; if the non-cancellable create
-  resolves after the first destroy already found nothing, launch cleanup destroys the exact backend
-  again. Keep this two-pass guard when moving work outside the lock or closed cards leak tmux husks.
+  Its health ticket stays active until that underlying call actually settles, even after the
+  timeout response; parallel launches have separate tickets and health names the oldest one.
+  A concurrent close, operator removal, or Server stop marks an in-flight node cancelled; if the
+  non-cancellable create resolves after the first destroy already found nothing, launch cleanup
+  destroys the exact backend again. Keep this two-pass guard when moving work outside the lock or
+  removed cards leak tmux husks.
   Capability preflight is separately bounded at 5s. In particular, Server canvas control must use
   its direct `shared:false` Codex answer: `codexIdentityCaps()` waits for the desktop-only
   `refreshCodexIdentityCaps()` initializer and caused the first Codex open to hold the old global
   lock forever while message verbs, which bypassed the factory, kept answering.
+  **Do not widen this for operators.** The Server operator plane is a separate loopback bearer
+  principal in `src/server/ops-api.ts`; its ability to inventory or remove any persisted card is
+  not authority an agent `/control/*` request inherits. Pane probe errors remain `unknown`, and
+  only two definitive misses enter the shared sweep deletion set. A forced live delete confirms
+  local PTY teardown before the durable card is removed. The health read snapshots the factory's
+  tracker directly and must never enqueue behind it.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
   the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
   `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim
