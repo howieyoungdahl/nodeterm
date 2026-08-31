@@ -104,7 +104,12 @@ The codebase is split by Electron process boundary — keep code on the correct 
   channels (`registerTranscriptIpc` — the ⌘M chat view + the find-bar's transcript index; see the
   ⌘M bullet under Agent support). **Canvas control is opt-in**
   (`NODETERM_SERVER_CANVAS_CONTROL=1` / `--canvas-control`): the Server shell installs its own shim
-  and runs a serialized `HeadlessNodeFactory`; disabled remains the default. (The SDK **chat node**
+  and runs a serialized `HeadlessNodeFactory`; disabled remains the default. The factory schedules
+  a 30-minute dead-card pass by default (`NODETERM_DEAD_CARD_REAP_MINUTES`, `0` disables only the
+  timer), but removes a local terminal card only after two definitive absent-session probes;
+  unreadable probes and SSH-project cards are preserved. The same conservative pass is available
+  to any verified saved session as `sweep-dead-cards`, outside creator ownership because
+  a proven-absent backend is inert. (The SDK **chat node**
   — once listed here as deferred — was removed entirely, 2026-07; see the chat-node note in the
   node-kinds list.)
 - **`src/preload/`** — the only bridge. `index.ts` uses `contextBridge` to expose a

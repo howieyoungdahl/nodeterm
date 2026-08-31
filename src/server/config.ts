@@ -42,6 +42,11 @@ export type ServerConfig = {
    */
   canvasControl?: boolean
   /**
+   * How often enabled Server canvas control removes terminal cards whose local backend is proven
+   * absent. Default 30 minutes; zero disables the periodic pass while keeping the manual verb.
+   */
+  deadCardReapMinutes?: number
+  /**
    * Reverse-proxy SSO trust (issue #29): requests whose TCP peer is inside `nets` and
    * which carry `header` (non-empty) are authenticated without a session cookie.
    * Absent = feature off (default). See src/server/proxy-trust.ts and docs/SERVER.md.
@@ -115,6 +120,20 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     args['canvas-control'] !== undefined
       ? truthy(args['canvas-control'])
       : truthy(env.NODETERM_SERVER_CANVAS_CONTROL)
+  const rawDeadCardReapMinutes = pick(
+    'dead-card-reap-minutes',
+    'NODETERM_DEAD_CARD_REAP_MINUTES',
+    '30'
+  ).trim()
+  const parsedDeadCardReapMinutes = Number(rawDeadCardReapMinutes)
+  // Hand-edited service env must degrade to the safe documented default, never to a tighter or
+  // disabled cleanup policy by accident. Cap at one week so a typo cannot effectively turn it off.
+  const deadCardReapMinutes =
+    rawDeadCardReapMinutes !== '' &&
+    Number.isFinite(parsedDeadCardReapMinutes) &&
+    parsedDeadCardReapMinutes >= 0
+      ? Math.min(parsedDeadCardReapMinutes, 7 * 24 * 60)
+      : 30
 
   // Headless binds nothing, so the "plain HTTP on a public interface" hazard the loopback refusal
   // guards against does not apply — a stray NODETERM_HOST must not fail a headless boot.
@@ -155,6 +174,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     passwordSeed,
     trustProxy,
     headless,
-    canvasControl
+    canvasControl,
+    deadCardReapMinutes
   }
 }

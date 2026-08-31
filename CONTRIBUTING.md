@@ -130,9 +130,12 @@ creator ledger is process-local and must never be rebuilt from `.nodeterm/projec
 hook history, or a surviving tmux name: all are writable or stale. A restart therefore clears
 ownership, performs no node/session adoption, and leaves durable queued launches dormant. Metadata
 mutations and message delivery validate every target before writing anything; missing proof is a
-named refusal. Validate Server upgrades against a disposable data directory and port. Restarting a
-shared live service is
-an explicit operator action, never a test or an automatic repair step.
+named refusal. The only ownership exception is dead-card cleanup: any verified
+Server session may request `sweep-dead-cards`, and the periodic pass uses the same path. Both skip
+SSH projects and remove a local terminal card only after two definitive absent-session probes;
+failed or unreadable probes preserve it. Validate Server upgrades against a disposable data
+directory and port. Restarting a shared live service is an explicit operator action, never a test
+or an automatic repair step.
 
 **A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
 a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no

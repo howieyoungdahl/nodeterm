@@ -48,6 +48,8 @@ export interface ServerCanvasControlDeps {
   codexSharedIdentity?: () => Promise<boolean>
   /** The server's installHooks gate. False keeps every real agent config directory untouched. */
   installAgentIntegrations?: boolean
+  /** Zero disables only the periodic dead-card pass; the manual sweep verb remains available. */
+  deadCardReapIntervalMs?: number
 }
 
 export interface ServerCanvasControl {
@@ -147,7 +149,8 @@ export async function initServerCanvasControl(
       deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
-    publishProject: (project: Project) => platform().broadcast(IPC.workspaceExternalChange, project)
+    publishProject: (project: Project) => platform().broadcast(IPC.workspaceExternalChange, project),
+    deadCardReapIntervalMs: deps.deadCardReapIntervalMs
   })
 
   const messaging: AgentMessagingDeps = {
@@ -178,6 +181,8 @@ export async function initServerCanvasControl(
       factory.openTerminal(sourceNodeId, args, verified),
     openAgent: (sourceNodeId, args, verified) => factory.openAgent(sourceNodeId, args, verified),
     close: (sourceNodeId, args, verified) => factory.close(sourceNodeId, args, verified),
+    sweepDeadCards: (sourceNodeId, verified) =>
+      factory.sweepDeadCards(sourceNodeId, verified),
     link: (sourceNodeId, args, verified) => factory.link(sourceNodeId, args, verified),
     group: (sourceNodeId, args) => factory.group(sourceNodeId, args),
     rename: (sourceNodeId, args) => factory.rename(sourceNodeId, args),

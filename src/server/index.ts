@@ -589,6 +589,7 @@ export async function startServer(
         ptyManager,
         settings: () => settingsStore.get(),
         boardLog,
+        deadCardReapIntervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
         installAgentIntegrations: config.installHooks !== false
       })
       hookServer.setControlHandler(canvasControl.handler)
