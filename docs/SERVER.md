@@ -67,6 +67,8 @@ Precedence: **CLI flag > environment variable > default.**
 | `--renderer-dir <path>` | `NODETERM_RENDERER_DIR` | `out/renderer` (resolved from cwd) | Directory of the built renderer (`index.html` + hashed assets). |
 | `--insecure-http` | — | off | Acknowledge serving plain HTTP directly on a non-loopback interface (see below). |
 | — | `NODETERM_SERVER_PASSWORD` | — | Seed the password headlessly on first boot (see above). |
+| `--canvas-control` | `NODETERM_SERVER_CANVAS_CONTROL` | off | Enable the bounded Server-local `/control/*` surface. |
+| `--dead-card-reap-minutes <n>` | `NODETERM_DEAD_CARD_REAP_MINUTES` | `30` | Interval for conservative local dead-card cleanup; `0` disables the timer but leaves `/opsapi/sweep` available. |
 | `--trust-proxy-header <name>` | `NODETERM_TRUST_PROXY_HEADER` | — (off) | Reverse-proxy SSO trust: identity header asserted by your proxy (see [Reverse-proxy SSO](#reverse-proxy-sso-header-trust)). |
 | `--trust-proxy-nets <list>` | `NODETERM_TRUST_PROXY_NETS` | `127.0.0.0/8, ::1/128` | Comma-separated IPs/CIDRs (IPv4+IPv6) whose requests may use the trust header. Only meaningful with the header set. |
 
@@ -604,6 +606,14 @@ or terminal-session adoption: it does not attach-or-create missing backends and 
 persisted queued command even when a tmux backend survived. A later explicit owner open or browser
 view is the only cold-spawn path. Plain terminals carry no agent identity or canvas-control grant;
 missing `agentId` never means Claude.
+
+Dead-card cleanup is not an agent creator-ownership exception. The separately authenticated
+operator endpoint `POST /opsapi/sweep` and the 30-minute periodic pass call the same
+`ServerNodeOps.sweep` engine. It scans only local terminal cards and removes one only after the PTY
+layer twice proves its session absent. Unreadable or failed probes preserve the card, SSH-project
+cards are never probed, and cleanup does not kill a session. Set
+`NODETERM_DEAD_CARD_REAP_MINUTES=0` (or pass `--dead-card-reap-minutes 0`) to disable only the
+periodic trigger; the operator endpoint remains available.
 
 Validate upgrades with a disposable `NODETERM_DATA_DIR` and port. Restarting a shared live Server
 service is an explicit operator action; it is not part of a test, repair, or boot-rescue flow.
