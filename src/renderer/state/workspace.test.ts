@@ -4,6 +4,7 @@ import {
   alignNodes,
   arrangeNodes,
   commonParentId,
+  canvasControlNodeGeometry,
   createAccountLoginNode,
   createCodexAccountLoginNode,
   createAgentNode,
@@ -15,10 +16,12 @@ import {
   groupSelectedNodes,
   nodeStatesToFlow,
   nodeSshFor,
+  normalizeLegacyServerControlSpawnMutation,
   reorderGroupWithinParent,
   reorderNodeBefore,
   reparentNode,
   resolveNewNodeAccount,
+  resizeTerminalNodeGeometry,
   selectedRootIds,
   ungroupNodes
 } from './workspace'
@@ -623,6 +626,93 @@ describe('model on agent node factory', () => {
     const node = createAgentNode('gemini', 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'gemini-2.5')
     expect(node.data.agentModel).toBe('gemini-2.5')
     expect(node.data.initialCommand).not.toContain('--model')
+  })
+})
+
+describe('canvas-control agent geometry', () => {
+  it('keeps manual factories normal-sized while persisting the compact control override', () => {
+    const manual = createAgentNode('claude', 0)
+    expect({ width: manual.width, height: manual.height }).toEqual({ width: 640, height: 440 })
+
+    const compact = canvasControlNodeGeometry()
+    expect(compact).toEqual({ name: 'compact', size: { width: 440, height: 320 } })
+    const controlled = createAgentNode(
+      'claude',
+      1,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      compact ?? undefined
+    )
+    expect({ width: controlled.width, height: controlled.height }).toEqual(compact?.size)
+    expect(controlled.data.controlSize).toBe('compact')
+    expect(flowToNodeStates([controlled])[0]).toMatchObject({
+      size: compact?.size,
+      controlSize: 'compact'
+    })
+  })
+
+  it('drops stale measurements so a resize survives serialization', () => {
+    const node = createAgentNode('claude', 0)
+    node.measured = { width: 640, height: 440 }
+    const resized = resizeTerminalNodeGeometry(node, {
+      name: 'compact',
+      size: { width: 440, height: 320 }
+    })
+
+    expect(resized.measured).toBeUndefined()
+    expect({ width: resized.width, height: resized.height }).toEqual({ width: 440, height: 320 })
+    expect(resized.style).toMatchObject({ width: 440, height: 320 })
+    expect(flowToNodeStates([resized])[0]).toMatchObject({
+      size: { width: 440, height: 320 },
+      controlSize: 'compact'
+    })
+  })
+
+  it('keeps a collapsed node at header height while changing its persisted expanded size', () => {
+    const node = createAgentNode('claude', 0)
+    node.data = { ...node.data, collapsed: true, expandedHeight: 440 }
+    node.height = 40
+    node.style = { ...node.style, height: 40 }
+    const resized = resizeTerminalNodeGeometry(node, {
+      name: 'compact',
+      size: { width: 440, height: 320 }
+    })
+
+    expect(resized.height).toBe(40)
+    expect(resized.data.expandedHeight).toBe(320)
+    expect(flowToNodeStates([resized])[0].size).toEqual({ width: 440, height: 320 })
+  })
+
+  it('compacts only a new source-less legacy Server spawn and stamps the durable choice', () => {
+    const legacyNode = flowToNodeStates([createAgentNode('claude', 0)])[0]
+    const legacy = { op: 'upsert' as const, node: legacyNode, seq: 1 }
+    const migrated = normalizeLegacyServerControlSpawnMutation(legacy, false)
+
+    expect(migrated).toMatchObject({
+      op: 'upsert',
+      node: { size: { width: 440, height: 320 }, controlSize: 'compact' }
+    })
+    expect(normalizeLegacyServerControlSpawnMutation({ ...legacy, src: 'browser-a' }, false))
+      .toEqual({ ...legacy, src: 'browser-a' })
+    expect(normalizeLegacyServerControlSpawnMutation(legacy, true)).toBe(legacy)
+
+    const plainTerminal = {
+      ...legacy,
+      node: { ...legacyNode, agentId: undefined }
+    }
+    expect(normalizeLegacyServerControlSpawnMutation(plainTerminal, false)).toBe(plainTerminal)
+
+    const explicitNormal = {
+      ...legacy,
+      node: { ...legacyNode, controlSize: 'normal' as const }
+    }
+    expect(normalizeLegacyServerControlSpawnMutation(explicitNormal, false)).toBe(explicitNormal)
   })
 })
 

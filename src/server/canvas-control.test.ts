@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -11,6 +12,14 @@ import {
 import { resetMessageFlow } from '../core/agents/agent-message-flow'
 import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-trace'
 import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
+import {
+  refreshCodexIdentityCaps,
+  resetCodexIdentityCapsForTests
+} from '../core/codex-identity-caps'
+import {
+  resetCodexThreadIdentityAuthSecret,
+  setCodexThreadIdentityAuthSecret
+} from '../core/codex-identity-proxy'
 import {
   resetNodeTokenFilesForTests,
   writeNodeTokenFile
@@ -39,6 +48,8 @@ describe('initServerCanvasControl', () => {
     resetAgentMessageTraceForTests()
     resetAgentStatusMirrorForTests()
     resetNodeTokenFilesForTests()
+    resetCodexIdentityCapsForTests()
+    resetCodexThreadIdentityAuthSecret()
   })
 
   afterEach(() => {
@@ -47,11 +58,13 @@ describe('initServerCanvasControl', () => {
     resetPaneOwnershipForTests()
     resetAgentStatusMirrorForTests()
     resetNodeTokenFilesForTests()
+    resetCodexIdentityCapsForTests()
+    resetCodexThreadIdentityAuthSecret()
     resetPlatformForTests()
     fs.rmSync(dataDir, { recursive: true, force: true })
   })
 
-  it('installs only under temp data when integrations are gated, and enforces messaging switch off', async () => {
+  it('gates installs/messaging and consumes the boot-populated Server Codex capability', async () => {
     const workspace: Workspace = {
       version: 2,
       activeProjectId: 'p1',
@@ -115,7 +128,8 @@ describe('initServerCanvasControl', () => {
         version: null,
         autoPermissionMode: false,
         fullscreenTui: false,
-        sessionIdFlag: false
+        sessionIdFlag: false,
+        remoteControlFlag: false
       }),
       codexSharedIdentity: async () => true,
       installAgentIntegrations: false
@@ -172,6 +186,44 @@ describe('initServerCanvasControl', () => {
     })
     expect(paneOwner).not.toHaveBeenCalled()
     expect(sendEnvelope).not.toHaveBeenCalled()
+
+    // Production Server refreshes this shared capability after arming its identity secret. Drive
+    // that same core answer, then use the default (non-injected) canvas-control dependency. The
+    // bounded factory await must both avoid the old wedge and retain the managed launcher.
+    runtime.stop()
+    setCodexThreadIdentityAuthSecret(randomBytes(32))
+    await refreshCodexIdentityCaps(async () => true, async () => true)
+    runtime = await initServerCanvasControl({
+      workspaceStore: store,
+      ptyManager: pty,
+      settings,
+      boardLog: { append: async () => false },
+      cliCaps: async () => ({
+        version: null,
+        autoPermissionMode: false,
+        fullscreenTui: false,
+        sessionIdFlag: false,
+        remoteControlFlag: false
+      }),
+      installAgentIntegrations: false
+    })
+    sendText.mockClear()
+    const deadline = Symbol('Server Codex capability did not settle')
+    const managedOpen = runtime.handler({
+      verb: 'open-agent',
+      nodeId: 'source',
+      args: { agent: 'codex', prompt: 'must not wedge' },
+      verified: true
+    })
+    const managedReply = await Promise.race([
+      managedOpen,
+      new Promise<typeof deadline>((resolve) => setTimeout(() => resolve(deadline), 1_000))
+    ])
+    expect(managedReply).not.toBe(deadline)
+    expect(managedReply).toMatchObject({ ok: true })
+    expect(sendText.mock.calls.at(-1)?.[1]).toBe(
+      "nodeterm-codex 'must not wedge' --ask-for-approval on-request"
+    )
   })
 
   it('wires permitted delivery through paste-settle-submit on the first fresh pane message', async () => {
@@ -220,23 +272,29 @@ describe('initServerCanvasControl', () => {
     } as unknown as WorkspaceStore
     const writes: Array<{ text: string; enter: boolean | undefined }> = []
     let pasted = ''
+    let submitted = false
     const legacySendEnvelope = vi.fn(async () => true)
     const pty = {
       createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
       captureSession: vi.fn(async () =>
-        pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer'),
+        submitted
+          ? 'Claude working'
+          : pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer'),
       sendText: vi.fn(async (nodeId: string, text: string, opts?: { enter?: boolean }) => {
         writes.push({ text, enter: opts?.enter })
         if (text) pasted = text
-        else queueMicrotask(() => runtime?.onAgentEvent({
-          nodeId,
-          agentId: 'claude',
-          kind: 'state',
-          state: 'working',
-          newTurn: true,
-          verified: true,
-          clientRevision: MANAGED_SCRIPT_REVISION
-        } as never))
+        else {
+          submitted = true
+          queueMicrotask(() => runtime?.onAgentEvent({
+            nodeId,
+            agentId: 'claude',
+            kind: 'state',
+            state: 'working',
+            newTurn: true,
+            verified: true,
+            clientRevision: MANAGED_SCRIPT_REVISION
+          } as never))
+        }
         return true
       }),
       destroySession: vi.fn(async () => undefined),
@@ -270,6 +328,7 @@ describe('initServerCanvasControl', () => {
     const targetId = (opened.result as { id: string }).id
     writes.length = 0
     pasted = ''
+    submitted = false
     recordFreshSpawnOwner(targetId, 'p1')
     expect(writeNodeTokenFile(targetId, 'token')).toBe(true)
     recordAgentEvent({

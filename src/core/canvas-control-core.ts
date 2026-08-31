@@ -12,6 +12,7 @@ import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from './agents/agent-message-fl
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from './browser-outcomes'
 import { BROWSER_KEYS, BROWSER_TIMEOUT_DEFAULT_MS, BROWSER_TIMEOUT_MAX_MS } from './browser-verb'
 import { NODE_COLORS } from '@shared/node-colors'
+import { controlNodeSizeError, isControlNodeSizeName } from '@shared/control-node-size'
 import { codexThreadIdentityResolverSh } from './codex-thread-identity-sh'
 
 /**
@@ -117,6 +118,7 @@ export type ControlVerb =
   | 'close-worktree'
   | 'branch'
   | 'rename'
+  | 'resize'
   | 'color'
   | 'write'
   | 'close'
@@ -155,6 +157,7 @@ const VERBS: ControlVerb[] = [
   'close-worktree',
   'branch',
   'rename',
+  'resize',
   'color',
   'write',
   'close',
@@ -208,6 +211,14 @@ export function parseControlRequest(
   }
   if (v === 'open-browser' && !args.url) return { error: 'open-browser requires --url' }
   if (v === 'open-agent' && !args.agent) return { error: 'open-agent requires --agent <id>' }
+  if (args['remote-control'] !== undefined && (v !== 'open-agent' || args.agent !== 'claude')) {
+    return { error: '--remote-control is supported only by open-agent --agent claude' }
+  }
+  if (
+    (v === 'open-agent' || v === 'open-claude') &&
+    args.size !== undefined &&
+    !isControlNodeSizeName(args.size)
+  ) return { error: controlNodeSizeError(v) }
   if ((v === 'group' || v === 'arrange') && !args.nodes) return { error: `${v} requires --nodes <id,id>` }
   if (v === 'ungroup' && !args.group) return { error: 'ungroup requires --group <id>' }
   if (v === 'move' && !args.nodes) return { error: 'move requires --nodes <id,id>' }
@@ -222,6 +233,13 @@ export function parseControlRequest(
   if (v === 'branch' && !args.node) return { error: 'branch requires --node <id>' }
   if (v === 'rename' && !args.node) return { error: 'rename requires --node <id>' }
   if (v === 'rename' && !args.title) return { error: 'rename requires --title' }
+  if (v === 'resize' && !args.node) return { error: 'resize requires --node <id>' }
+  if (v === 'resize' && args.size === undefined) {
+    return { error: 'resize requires --size compact|normal' }
+  }
+  if (v === 'resize' && !isControlNodeSizeName(args.size)) {
+    return { error: controlNodeSizeError(v) }
+  }
   if (v === 'color' && !args.node) return { error: 'color requires --node <id,id>' }
   if (v === 'color' && args.color === undefined) return { error: 'color requires --color' }
   if ((v === 'send' || v === 'reply') && !args.node) return { error: `${v} requires --node <id>` }
@@ -301,9 +319,11 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
     '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
-    '- `open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
-    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
-    '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
+    '- `open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--remote-control[=NAME]] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
+    '  any agent CLI. Canvas-control agent nodes default to `compact` (440×320, half the stock',
+    '  640×440 footprint); pass `--size normal` to use the configured manual-open size instead.',
+    '  Manual UI opens remain normal-sized. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
     '  their work when it wakes — use it for "B needs what A produced" instead of polling. Only',
@@ -327,6 +347,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  and copilot (and custom agents based on them); any other agent ignores it and launches',
     '  exactly as it would without the flag. The id is passed to the CLI as-is, so a name that',
     '  agent does not recognise fails inside the session, not at open time — name a model you know.',
+    '  On Server Edition, `launch-timeout` means the card is durable but its PTY or initial command',
+    '  did not settle. Later creations remain available; do not repeat the timed-out open because',
+    '  its non-cancellable launch may still finish.',
+    '  Server Edition also accepts `--remote-control[=NAME]` for `--agent claude` only. It emits',
+    '  the launch flag only when the installed Claude CLI advertises support; otherwise it refuses',
+    '  before creating a node. Desktop control refuses this Server-only option. In either case,',
+    '  open Claude normally and run `/rc [name]` inside the session as the manual fallback.',
     '- `open-project --cwd </abs/path> [--name N] [--color C]` — register (or find) the project for a',
     '  local directory; the reply carries `{ projectId, name, cwd, created }`. Idempotent: the same',
     '  cwd always returns the same project, never a duplicate. Creating/adding asks the user to',
@@ -366,6 +393,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  the user to confirm deletion.',
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
+    '- `resize --node <id> --size compact|normal` — resize a terminal node without respawning it.',
+    '  Server Edition accepts only nodes this caller opened during the current server run.',
     `- \`color --node <id,id> --color C\` — recolor nodes, frames, or stickies. C is one of: ${NODE_COLORS.join(', ')}.`,
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
     '  Desktop asks the user to confirm both. `denied by user` is FINAL; `no answer within 120s`',
@@ -698,8 +727,11 @@ Verbs:
 - \`help\` — print the verb list. The shim answers this itself, without reaching the app, so it
   is also what to run when you are unsure whether the control endpoint is alive.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]\` — open N plain terminals (default 1).
-- \`open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
+- \`open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--remote-control[=NAME]] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
+  Canvas-control agent nodes default to \`compact\` (440×320, exactly half the stock 640×440
+  footprint). Pass \`--size normal\` to use the configured manual-open dimensions instead. Nodes
+  opened manually in the UI remain normal-sized.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
@@ -738,6 +770,13 @@ Verbs:
   as it would have — the flag is never an error, so a mixed fan-out needs no special-casing. The
   id goes to the CLI verbatim: an unknown name fails inside the session on its first turn, not at
   open time, so name a model you know that CLI accepts rather than guessing.
+  On Server Edition, \`launch-timeout\` means the card is durable but its PTY or initial command did
+  not settle. Later creations remain available; do not repeat the timed-out open because its
+  non-cancellable launch may still finish.
+  Server Edition also accepts \`--remote-control[=NAME]\` for \`--agent claude\` only. It emits
+  the launch flag only when the installed Claude CLI advertises support; otherwise it refuses
+  before creating a node. Desktop control refuses this Server-only option. In either case, open
+  Claude normally and run \`/rc [name]\` inside the session as the manual fallback.
 - \`open-project --cwd </abs/path> [--name N] [--color C]\` — register (or find) the project for a
   local directory; the reply carries \`{ projectId, name, cwd, created }\`. Idempotent: the same
   cwd always returns the same project, never a duplicate — and \`--name\`/\`--color\` apply only
@@ -802,11 +841,13 @@ Verbs:
 - \`branch --node <id>\` — branch a Claude node's conversation: the node stays on the new
   branch and a new node opens resuming the original. Target must be a Claude agent node.
 - \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).
+- \`resize --node <id> --size compact|normal\` — resize a terminal node without respawning it.
+  Server Edition accepts only nodes this caller opened during the current server run.
 - \`color --node <id,id> --color C\` — recolor nodes, frames, or stickies. C is one of: ${NODE_COLORS.join(', ')}.
 - \`write --node <id> --text "..."\` — type text into a terminal node. (Asks the user to confirm.)
 - \`close --node <id>\` — close a node. Desktop asks the user to confirm. Server Edition closes
   only nodes this caller opened during the current server run, without a dialog. Its other
-  node-mutating verbs (link/group/rename/color/sticky update) likewise accept only current-run
+  node-mutating verbs (link/group/rename/resize/color/sticky update) likewise accept only current-run
   creations, and refuse the whole request before any partial mutation.
 - \`send --node <id> --text "..."\` — deliver a message INTO an agent node the caller opened during
   this server run, in this project only. No confirm dialog; instead it is verified-only, gated by the project's

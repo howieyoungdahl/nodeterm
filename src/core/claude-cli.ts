@@ -1,7 +1,6 @@
-// Capability probe for the LOCAL Claude CLI. Today it answers exactly one question — does this
-// CLI accept `--permission-mode auto`? (Claude Code >= 2.1.71; older CLIs exit 1 on the value, see
-// AUTO_PERMISSION_MODE_MIN_VERSION) — but it is shaped as a caps bag so the next version-gated
-// flag lands here instead of growing another probe.
+// Capability probe for the LOCAL Claude CLI. Version-gated behavior (`--permission-mode auto`,
+// fullscreen TUI hooks) and help-advertised launch flags (`--session-id`, `--remote-control`) live
+// in one memoized caps bag so callers never guess whether the installed binary accepts an option.
 //
 // Lives in core (not main) so the Server Edition boots it through the same CorePlatform seam.
 // The remote (SSH) CLI is probed separately on its own host — see SshProjectManager.
@@ -21,11 +20,10 @@ export { UNKNOWN_CLAUDE_CLI_CAPS, type ClaudeCliCaps }
 /**
  * Pure: probe output → caps. The impure probe below is just plumbing around it.
  *
- * `--session-id` is FEATURE-detected from `--help` rather than gated on a version, because the
- * release it first appeared in is not documented anywhere this repo can verify. Guessing a floor
- * is uniquely dangerous for this flag: an unrecognised flag makes the CLI exit, so a floor set too
- * low would kill every claude launch on the machines below it. Reading the help text asks the CLI
- * in front of us what it actually accepts. Absent help output ⇒ false ⇒ no flag ⇒ today's command.
+ * Launch flags are FEATURE-detected from `--help` rather than gated on a version. Guessing a floor
+ * is uniquely dangerous for these flags: an unrecognised flag makes the CLI exit, so a floor set
+ * too low would kill the launch on machines below it. Reading help asks the binary in front of us
+ * what it accepts. Absent help output ⇒ false ⇒ no optional flag.
  */
 export function claudeCliCapsFrom(
   versionOutput: string | null | undefined,
@@ -36,9 +34,10 @@ export function claudeCliCapsFrom(
     version,
     autoPermissionMode: supportsAutoPermissionMode(version),
     fullscreenTui: supportsFullscreenTui(version),
-    // Anchored on a word boundary so `--session-id-file` or prose mentioning the flag inside
-    // another option's description cannot answer yes for it.
-    sessionIdFlag: /(^|\s)--session-id(\s|=|$)/m.test(helpOutput ?? '')
+    // Exact option-token boundaries keep a longer option such as `--session-id-file` or
+    // `--remote-control-session-name-prefix` from answering yes for the shorter flag.
+    sessionIdFlag: /(^|\s)--session-id(\s|=|$)/m.test(helpOutput ?? ''),
+    remoteControlFlag: /(^|\s)--remote-control(\s|=|$)/m.test(helpOutput ?? '')
   }
 }
 
@@ -53,7 +52,7 @@ async function probe(): Promise<ClaudeCliCaps> {
     const { stdout } = await execFileP(bin, ['--version'], { timeout: PROBE_TIMEOUT_MS })
     // `--help` is a second spawn, paid once per process (this whole probe is memoized). Its
     // failure must not cost us the version answer, so it degrades on its own: no help text just
-    // means no minted session ids.
+    // means no help-advertised optional launch flags.
     const help = await execFileP(bin, ['--help'], { timeout: PROBE_TIMEOUT_MS })
       .then((r) => r.stdout)
       .catch(() => null)

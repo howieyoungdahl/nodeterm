@@ -10,6 +10,11 @@ import {
   NODE_COLORS,
   type NodeColor
 } from '../shared/node-colors'
+import {
+  controlNodeSizeError,
+  resolveControlNodeSize,
+  resolveControlNodeSizeName
+} from '../shared/control-node-size'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../shared/sticky-write'
 import type { WorkspaceStore } from '../core/workspace-store'
 import {
@@ -36,6 +41,8 @@ import type {
   Settings,
   Workspace
 } from '../shared/types'
+import { SpawnHandlerState, type SpawnHandlerSnapshot } from './spawn-handler-state'
+import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 export interface ServerControlReply {
   ok: boolean
@@ -77,6 +84,14 @@ export interface HeadlessNodeFactoryDeps {
   publishProject?: (project: Project) => void
   schedule?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearSchedule?: (timer: ReturnType<typeof setTimeout>) => void
+  /** Test seam for the bounded CLI-capability preflight. Production uses 5 seconds. */
+  capabilityTimeoutMs?: number
+  /** Test seam for the bounded PTY + initial-command launch. Production uses 15 seconds. */
+  launchTimeoutMs?: number
+  /** Shared health observer. Omitted in unit tests that do not inspect handler liveness. */
+  spawnHandlerState?: SpawnHandlerState
+  /** Shared with operator mutations so two stale workspace snapshots cannot overwrite each other. */
+  mutationQueue?: WorkspaceMutationQueue
   /** Injectable only so tests can seed creator facts; production uses a fresh process-local ledger. */
   ownership?: HeadlessNodeOwnership
 }
@@ -120,7 +135,54 @@ const GROUP_PAD = 28
 const GROUP_HEADER = 34
 const AFTER_RETRY_MS = 500
 const AFTER_RETRY_LIMIT = 5
+export const SERVER_CAPABILITY_TIMEOUT_MS = 5_000
+export const SERVER_LAUNCH_TIMEOUT_MS = 15_000
 const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini'])
+
+type DeadlineResult<T> =
+  | { kind: 'settled'; value: T }
+  | { kind: 'rejected' }
+  | { kind: 'timeout' }
+
+interface PreparedNodeLaunch {
+  project: Project
+  created: CanvasNodeState[]
+  commands: Map<string, string>
+  after: string[]
+  verb: 'open-terminal' | 'open-agent'
+  agentId?: BuiltinAgentId
+}
+
+/**
+ * Observe a promise behind a bounded deadline without abandoning its rejection handler. The
+ * underlying PTY operation is not cancellable, so a timeout reports uncertainty while this
+ * observer keeps consuming a late resolve/reject; otherwise a late rejection would become an
+ * unhandled process error after the control request had already answered.
+ */
+function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<DeadlineResult<T>> {
+  return new Promise((resolve) => {
+    let answered = false
+    const timer = setTimeout(() => {
+      if (answered) return
+      answered = true
+      resolve({ kind: 'timeout' })
+    }, Math.max(1, timeoutMs))
+    void promise.then(
+      (value) => {
+        if (answered) return
+        answered = true
+        clearTimeout(timer)
+        resolve({ kind: 'settled', value })
+      },
+      () => {
+        if (answered) return
+        answered = true
+        clearTimeout(timer)
+        resolve({ kind: 'rejected' })
+      }
+    )
+  })
+}
 
 function token(): string {
   return randomBytes(4).toString('hex')
@@ -475,17 +537,26 @@ function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
  * Every workspace read/modify/save transaction is serialized. That is important even on one
  * Node event loop: WorkspaceStore.load/save both await filesystem operations, so two simultaneous
  * `/control/open-agent` calls would otherwise read the same snapshot and the later save would
- * erase the earlier node. PTY creation happens after the node is durable, matching the renderer's
- * recoverable failure direction: a spawn error leaves a visible, reopenable node instead of an
- * invisible tmux session.
+ * erase the earlier node. PTY creation happens after the node is durable AND outside that
+ * transaction queue, matching the renderer's recoverable failure direction: a spawn error leaves
+ * a visible, reopenable node instead of an invisible tmux session, while a stalled backend cannot
+ * prevent an unrelated workspace transaction from starting.
  */
 export class HeadlessNodeFactory {
-  private serial: Promise<unknown> = Promise.resolve()
+  private readonly spawnHandlerState: SpawnHandlerState
+  private readonly mutationQueue: WorkspaceMutationQueue
   private attached = new Set<string>()
   /** Process-local proof that a caller created a node during THIS Server Edition run. */
   private ownership: HeadlessNodeOwnership
   /** Fresh server-spawned agents that have not emitted their first real working turn yet. */
   private awaitingFirstWorking = new Set<string>()
+  /** Agent launches now outside the workspace lock; remember a working hook that wins that race. */
+  private launchingAgents = new Set<string>()
+  private workingSeenDuringLaunch = new Set<string>()
+  /** Durable cards whose external PTY/command phase has not conclusively ended. */
+  private launchesInFlight = new Set<string>()
+  /** A close/stop that wins the race: a late backend must be killed, never orphaned. */
+  private cancelledLaunches = new Set<string>()
   /**
    * Server-local `open-project` grants. The browser shell's grant ledger is process-local too,
    * but Server Edition has its own process and handler. A service restart deliberately clears
@@ -499,15 +570,46 @@ export class HeadlessNodeFactory {
 
   constructor(private readonly deps: HeadlessNodeFactoryDeps) {
     this.ownership = deps.ownership ?? createHeadlessNodeOwnership()
+    this.spawnHandlerState = deps.spawnHandlerState ?? new SpawnHandlerState({ now: deps.now })
+    this.mutationQueue = deps.mutationQueue ?? new WorkspaceMutationQueue()
   }
 
-  private runExclusive<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.serial.then(work, work)
-    this.serial = run.then(
-      () => undefined,
-      () => undefined
-    )
-    return run
+  private runExclusive<T>(operation: string, work: () => Promise<T>): Promise<T> {
+    const ticket = this.spawnHandlerState.enqueue(operation)
+    const tracked = async (): Promise<T> => {
+      ticket.start()
+      try {
+        const value = await work()
+        ticket.finish()
+        return value
+      } catch (error) {
+        ticket.finish(error)
+        throw error
+      }
+    }
+    return this.mutationQueue.run(tracked)
+  }
+
+  /** Synchronous, non-blocking snapshot used by `/opsapi/health`. */
+  spawnHandlerSnapshot(): SpawnHandlerSnapshot {
+    return this.spawnHandlerState.snapshot()
+  }
+
+  /** Clear process-local state for cards the operator management plane removed. */
+  forgetNodes(nodeIds: readonly string[]): void {
+    for (const id of nodeIds) {
+      // Operator removal can win the same race as agent close: its pre-persist destroy may observe
+      // no backend while a non-cancellable create is still in flight. Preserve the cancellation
+      // marker until launch cleanup can destroy any backend that appears late.
+      if (this.launchesInFlight.has(id)) this.cancelledLaunches.add(id)
+      this.ownership.forget(id)
+      this.attached.delete(id)
+      this.awaitingFirstWorking.delete(id)
+      this.retryCount.delete(id)
+      const timer = this.retryTimers.get(id)
+      if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
+      this.retryTimers.delete(id)
+    }
   }
 
   private publishChangeSet(
@@ -644,7 +746,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('open-project', async () => {
       const flagError = unsupportedFlags(args, new Set(['cwd']))
       if (flagError) return { ok: false, error: `open-project: ${flagError}` }
       if (!verified) {
@@ -720,7 +822,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('close', async () => {
       const flagError = unsupportedFlags(args, new Set(['node']))
       if (flagError) return { ok: false, error: `close: ${flagError}` }
       if (!verified) {
@@ -766,6 +868,9 @@ export class HeadlessNodeFactory {
       // Kill terminal panes first: the durable canvas must never lose a session whose outcome is
       // unknown. Frames have no PTY; closing one is the desktop `ungroup` transform followed by
       // removal of the frame alone, regardless of who owns its members.
+      for (const id of ids) {
+        if (!frameIds.has(id) && this.launchesInFlight.has(id)) this.cancelledLaunches.add(id)
+      }
       await Promise.all(
         ids
           .filter((id) => !frameIds.has(id))
@@ -810,15 +915,7 @@ export class HeadlessNodeFactory {
         }
       }
 
-      for (const id of ids) {
-        this.ownership.forget(id)
-        this.attached.delete(id)
-        this.awaitingFirstWorking.delete(id)
-        this.retryCount.delete(id)
-        const timer = this.retryTimers.get(id)
-        if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
-        this.retryTimers.delete(id)
-      }
+      this.forgetNodes(ids)
       return {
         ok: true,
         message: `closed ${ids.length} owned node(s): ${ids.join(', ')}`,
@@ -832,7 +929,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('link', async () => {
       const flagError = unsupportedFlags(args, new Set(['from', 'to']))
       if (flagError) return { ok: false, error: `link: ${flagError}` }
       if (!verified) {
@@ -907,7 +1004,7 @@ export class HeadlessNodeFactory {
   }
 
   group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('group', async () => {
       const flagError = unsupportedFlags(args, new Set(['nodes', 'label', 'color']))
       if (flagError) return { ok: false, error: `group: ${flagError}` }
       let color: NodeColor | undefined
@@ -962,7 +1059,7 @@ export class HeadlessNodeFactory {
   }
 
   rename(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('rename', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'title']))
       if (flagError) return { ok: false, error: `rename: ${flagError}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -998,8 +1095,67 @@ export class HeadlessNodeFactory {
     })
   }
 
+  resize(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply> {
+    return this.runExclusive('resize', async () => {
+      const flagError = unsupportedFlags(args, new Set(['node', 'size']))
+      if (flagError) return { ok: false, error: `resize: ${flagError}` }
+      if (!verified) {
+        return {
+          ok: false,
+          error: 'resize-identity-refused: Server Edition resize requires verified node identity'
+        }
+      }
+      if (args.size === undefined) {
+        return { ok: false, error: 'resize requires --size compact|normal' }
+      }
+      const sizeName = resolveControlNodeSizeName(args.size)
+      const size = resolveControlNodeSize(args.size, terminalSize(this.deps.settings()))
+      if (!sizeName || !size) return { ok: false, error: controlNodeSizeError('resize') }
+
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const source = sourceProject(workspace, sourceNodeId)
+      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
+      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+        return { ok: false, error: 'source node is not a control-capable agent' }
+      }
+
+      const id = (args.node ?? '').trim()
+      const projects = nodeProjects(workspace, id)
+      if (projects.length && (projects.length !== 1 || projects[0].id !== source.project.id)) {
+        return {
+          ok: false,
+          error: `resize-project-refused: ${id} is not exclusively in the caller's project`
+        }
+      }
+      const target = source.project.nodes.find((node) => node.id === id)
+      if (!target) return { ok: false, error: `resize: no node with id ${id}` }
+      if (!this.ownsMutation(sourceNodeId, id)) {
+        return this.ownershipRefusal('resize', sourceNodeId, id)
+      }
+      if (target.kind !== 'terminal') {
+        return { ok: false, error: 'resize: target must be a terminal node' }
+      }
+
+      const resized = { ...target, size, controlSize: sizeName }
+      source.project.nodes = source.project.nodes.map((node) =>
+        node.id === id ? resized : node
+      )
+      await this.deps.workspaceStore.save(workspace)
+      this.publish(source.project, [resized])
+      return {
+        ok: true,
+        message: `resized ${id} to ${sizeName} (${size.width}×${size.height})`,
+        result: { id, size }
+      }
+    })
+  }
+
   color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('color', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'color']))
       if (flagError) return { ok: false, error: `color: ${flagError}` }
       if (!isNodeColor(args.color)) return { ok: false, error: invalidNodeColorMessage() }
@@ -1035,18 +1191,28 @@ export class HeadlessNodeFactory {
     })
   }
 
-  private open(
+  private async open(
     sourceNodeId: string,
     verb: 'open-terminal' | 'open-agent',
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    const prepare = async (): Promise<ServerControlReply | PreparedNodeLaunch> => {
       const flagError = unsupportedFlags(
         args,
         verb === 'open-terminal'
           ? new Set(['count', 'cwd', 'cmd', 'after', 'project'])
-          : new Set(['agent', 'count', 'cwd', 'prompt', 'after', 'project', 'model'])
+          : new Set([
+              'agent',
+              'count',
+              'cwd',
+              'prompt',
+              'after',
+              'project',
+              'model',
+              'remote-control',
+              'size'
+            ])
       )
       if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
       if (!verified) {
@@ -1070,8 +1236,28 @@ export class HeadlessNodeFactory {
       if (unownedAfter) return this.ownershipRefusal(verb, sourceNodeId, unownedAfter)
 
       const settings = this.deps.settings()
-      const nodeSize = terminalSize(settings)
-      const caps = verb === 'open-agent' ? await this.deps.cliCaps() : null
+      const normalNodeSize = terminalSize(settings)
+      const nodeSizeName = verb === 'open-agent'
+        ? resolveControlNodeSizeName(args.size)
+        : undefined
+      const nodeSize = verb === 'open-agent'
+        ? resolveControlNodeSize(args.size, normalNodeSize)
+        : normalNodeSize
+      if (!nodeSize || (verb === 'open-agent' && !nodeSizeName)) {
+        return { ok: false, error: controlNodeSizeError(verb) }
+      }
+      const capabilityTimeout =
+        this.deps.capabilityTimeoutMs ?? SERVER_CAPABILITY_TIMEOUT_MS
+      const capsAttempt =
+        verb === 'open-agent'
+          ? await settleWithin(
+              Promise.resolve().then(() => this.deps.cliCaps()),
+              capabilityTimeout
+            )
+          : null
+      // Optional flags always degrade to absent. A stalled CLI probe may cost this bounded wait,
+      // but can neither kill the launch with a guessed flag nor monopolize the transaction queue.
+      const caps = capsAttempt?.kind === 'settled' ? capsAttempt.value : null
       const agentId = args.agent as BuiltinAgentId | undefined
       if (verb === 'open-agent' && (!agentId || !SERVER_AGENTS.has(agentId))) {
         return {
@@ -1079,12 +1265,30 @@ export class HeadlessNodeFactory {
           error: 'open-agent: Server Edition v1 supports --agent claude|codex|gemini'
         }
       }
+      const remoteControl = args['remote-control']
+      if (remoteControl !== undefined && agentId !== 'claude') {
+        return {
+          ok: false,
+          error: 'remote-control-agent-refused: --remote-control requires --agent claude'
+        }
+      }
+      if (remoteControl !== undefined && caps?.remoteControlFlag !== true) {
+        return {
+          ok: false,
+          error:
+            'remote-control-unsupported: the installed Claude CLI does not advertise ' +
+            '`--remote-control`; open Claude normally and run `/rc [name]` inside the session'
+        }
+      }
       // The Server shell owns the same shared Codex app-server spine as desktop. Ask its boot-time
       // capability probe at the launch boundary: true routes through `nodeterm-codex`; every
       // unavailable/failed case stays on the safe bare command supplied by the shared assembler.
       const codexSharedIdentity =
         verb === 'open-agent' && agentId === 'codex'
-          ? await this.deps.codexSharedIdentity().catch(() => false)
+          ? await settleWithin(
+              Promise.resolve().then(() => this.deps.codexSharedIdentity()),
+              capabilityTimeout
+            ).then((result) => result.kind === 'settled' && result.value)
           : false
 
       const count = parseCount(args.count, verb === 'open-terminal' ? TERMINAL_LIMIT : AGENT_LIMIT)
@@ -1136,7 +1340,8 @@ export class HeadlessNodeFactory {
               sessionIdFlagSupported,
               launchCmdOverride: settings.agentLaunchCommands?.[agentId as BuiltinAgentId],
               sharedIdentity: codexSharedIdentity,
-              model: args.model
+              model: args.model,
+              remoteControl
             },
             this.deps.env ?? process.env
           ).command
@@ -1158,6 +1363,7 @@ export class HeadlessNodeFactory {
           kind: 'terminal',
           position: placeRight(target, source.node, nodeSize, created),
           size: { ...nodeSize },
+          ...(nodeSizeName ? { controlSize: nodeSizeName } : {}),
           title,
           ...(verb === 'open-agent' ? { titleAuto: true } : {}),
           color,
@@ -1197,48 +1403,163 @@ export class HeadlessNodeFactory {
       await this.deps.workspaceStore.save(workspace)
       for (const node of created) {
         this.ownership.record(node.id, { sourceNodeId, projectId: target.id })
+        this.launchesInFlight.add(node.id)
       }
       this.publish(target, created)
+      return { project: target, created, commands, after, verb, agentId }
+    }
+    const prepared = await this.runExclusive(verb, prepare)
 
-      const failed: string[] = []
-      for (const node of created) {
+    if ('ok' in prepared) return prepared
+    return this.launchPrepared(prepared)
+  }
+
+  /**
+   * Start durable nodes OUTSIDE the workspace transaction queue. PTY creation and command
+   * delivery cross process boundaries and are not cancellable; putting either behind `serial`
+   * meant one lost callback wedged every later canvas mutation for the life of the Server. The
+   * node is already persisted and published here, so a timeout can answer honestly without
+   * rolling back a backend whose eventual outcome is unknowable.
+   */
+  private async launchPrepared(plan: PreparedNodeLaunch): Promise<ServerControlReply> {
+    const ids = plan.created.map((node) => node.id)
+    const failed = new Set<string>()
+    const completed = new Set<string>()
+    const started = new Set<string>()
+    let expired = false
+
+    const launch = async (): Promise<void> => {
+      for (const node of plan.created) {
+        if (expired) break
+        if (this.cancelledLaunches.has(node.id)) {
+          failed.add(node.id)
+          completed.add(node.id)
+          this.cancelledLaunches.delete(node.id)
+          this.launchesInFlight.delete(node.id)
+          continue
+        }
+        started.add(node.id)
+        if (plan.verb === 'open-agent') this.launchingAgents.add(node.id)
         try {
-          const result = await this.attach(target, node)
+          const result = await this.attach(plan.project, node)
+          // The deadline cannot cancel a tmux/session-host request already in flight. If it later
+          // answers, keep the attached index honest but never type a command after reporting an
+          // unknown launch outcome to the caller.
+          if (expired) break
           if (!result.sessionId) {
-            failed.push(node.id)
+            failed.add(node.id)
+            completed.add(node.id)
             continue
           }
-          if (verb === 'open-agent' && result.fresh) this.awaitingFirstWorking.add(node.id)
-          const command = commands.get(node.id)
-          if (command && !(await this.deps.ptyManager.sendText(node.id, command))) failed.push(node.id)
+          if (
+            plan.verb === 'open-agent' &&
+            result.fresh &&
+            !this.workingSeenDuringLaunch.has(node.id)
+          ) {
+            this.awaitingFirstWorking.add(node.id)
+          }
+          const command = plan.commands.get(node.id)
+          if (command && !(await this.deps.ptyManager.sendText(node.id, command))) {
+            failed.add(node.id)
+          }
+          completed.add(node.id)
         } catch {
-          failed.push(node.id)
+          failed.add(node.id)
+          completed.add(node.id)
+        } finally {
+          // A close/stop can race either the attach or command await. Its first destroy may have
+          // run before this non-cancellable create established a backend, so repeat the exact-id
+          // destroy after the late operation settles. PtyManager coalesces concurrent destroys.
+          if (this.cancelledLaunches.has(node.id)) {
+            await this.deps.ptyManager
+              .destroySession(null, node.id, { everySocket: true })
+              .catch(() => undefined)
+            failed.add(node.id)
+            this.attached.delete(node.id)
+            this.cancelledLaunches.delete(node.id)
+          }
+          this.launchesInFlight.delete(node.id)
+          this.launchingAgents.delete(node.id)
+          this.workingSeenDuringLaunch.delete(node.id)
         }
       }
+    }
 
-      const ids = created.map((node) => node.id)
-      if (failed.length) {
-        return {
-          ok: false,
-          error:
-            `launch-failed: node(s) ${failed.join(', ')} were persisted but their PTY or initial ` +
-            'command could not be started; do not repeat the open request',
-          result: { ids, id: ids[0], after, failed }
-        }
+    const timeoutMs = this.deps.launchTimeoutMs ?? SERVER_LAUNCH_TIMEOUT_MS
+    // The serialized preparation ticket ends before this external phase starts. Keep the actual
+    // non-cancellable launch observable until its underlying promise settles, even if the caller
+    // has already received `launch-timeout`. Parallel opens produce parallel tickets; the health
+    // snapshot reports the oldest one without waiting on any of them.
+    const launchTicket = this.spawnHandlerState.enqueue(`${plan.verb}:launch`)
+    launchTicket.start()
+    const launchPromise = launch()
+    void launchPromise.then(
+      () => launchTicket.finish(),
+      (error) => launchTicket.finish(error)
+    )
+    const outcome = await settleWithin(launchPromise, timeoutMs)
+    if (outcome.kind === 'timeout') {
+      expired = true
+      const timedOut = ids.filter((id) => !completed.has(id))
+      for (const id of timedOut) {
+        // The one operation already started may still settle and needs its late-close guard. Nodes
+        // not yet reached by the sequential loop have no backend future and need no reservation.
+        if (!started.has(id)) this.launchesInFlight.delete(id)
+        this.launchingAgents.delete(id)
+        this.workingSeenDuringLaunch.delete(id)
       }
       return {
-        ok: true,
-        message:
-          `opened ${count} ${verb === 'open-agent' ? `${agentId} session` : 'terminal'}(s): ` +
-          ids.join(', ') +
-          (after.length ? `; waiting for ${after.join(', ')} before running` : ''),
-        result: { ids, id: ids[0], after }
+        ok: false,
+        error:
+          `launch-timeout: node(s) ${timedOut.join(', ')} were persisted, but their PTY or ` +
+          `initial command did not settle within ${timeoutMs}ms; later creations remain ` +
+          'available, but this launch may still finish — do not repeat the open request',
+        result: {
+          ids,
+          id: ids[0],
+          after: plan.after,
+          failed: [...new Set([...failed, ...timedOut])],
+          timedOut
+        }
       }
-    })
+    }
+
+    // `launch` catches per-node failures. This is only a defensive guard around a future edit
+    // that throws outside that loop; it must still answer by name rather than reject the socket.
+    if (outcome.kind === 'rejected') {
+      for (const id of ids) if (!started.has(id)) this.launchesInFlight.delete(id)
+      return {
+        ok: false,
+        error:
+          `launch-failed: node(s) ${ids.join(', ')} were persisted but their launch handler ` +
+          'failed; do not repeat the open request',
+        result: { ids, id: ids[0], after: plan.after, failed: ids }
+      }
+    }
+
+    if (failed.size) {
+      return {
+        ok: false,
+        error:
+          `launch-failed: node(s) ${[...failed].join(', ')} were persisted but their PTY or ` +
+          'initial command could not be started; do not repeat the open request',
+        result: { ids, id: ids[0], after: plan.after, failed: [...failed] }
+      }
+    }
+    return {
+      ok: true,
+      message:
+        `opened ${ids.length} ${
+          plan.verb === 'open-agent' ? `${plan.agentId} session` : 'terminal'
+        }(s): ` +
+        ids.join(', ') +
+        (plan.after.length ? `; waiting for ${plan.after.join(', ')} before running` : ''),
+      result: { ids, id: ids[0], after: plan.after }
+    }
   }
 
   sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('sticky', async () => {
       const parsed = parseStickyArgs(args)
       if ('error' in parsed) return { ok: false, error: `sticky: ${parsed.error}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -1315,12 +1636,15 @@ export class HeadlessNodeFactory {
 
   onAgentEvent(event: Pick<NormalizedAgentEvent, 'nodeId' | 'state'>): void {
     if (this.stopped || !event?.nodeId) return
-    if (event.state === 'working') this.awaitingFirstWorking.delete(event.nodeId)
+    if (event.state === 'working') {
+      if (this.launchingAgents.has(event.nodeId)) this.workingSeenDuringLaunch.add(event.nodeId)
+      this.awaitingFirstWorking.delete(event.nodeId)
+    }
     if (event.state === 'working' || event.state === 'done') void this.refreshArmed(event)
   }
 
   refreshArmed(observed?: Pick<NormalizedAgentEvent, 'nodeId' | 'state'>): Promise<void> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('refresh-armed', async () => {
       if (this.stopped) return
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
       const changedByProject = new Map<Project, CanvasNodeState[]>()
@@ -1403,6 +1727,7 @@ export class HeadlessNodeFactory {
 
   stop(): void {
     this.stopped = true
+    for (const id of this.launchesInFlight) this.cancelledLaunches.add(id)
     for (const timer of this.retryTimers.values()) (this.deps.clearSchedule ?? clearTimeout)(timer)
     this.retryTimers.clear()
     this.ownership.clear()

@@ -77,7 +77,8 @@ vi.mock('child_process', () => {
     const ok = (stdout: string): void => cb?.(null, { stdout, stderr: '' })
     if (args.includes('has-session')) {
       const target = args[args.indexOf('-t') + 1]
-      if (liveTmuxSessions.has(target)) ok('')
+      const exact = target.startsWith('=') ? target.slice(1) : target
+      if (liveTmuxSessions.has(exact)) ok('')
       else cb?.(Object.assign(new Error('no such session'), { code: 1 }))
     } else if (args[0] === '-ilc') {
       ok('__NT_PATH_START__/usr/bin:/bin__NT_PATH_END__')

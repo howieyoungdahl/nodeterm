@@ -7,13 +7,15 @@
  * render the unique envelope footer (or become stably different from its baseline), then submit in
  * a second write.
  *
- * The boolean deliberately means "the envelope reached the pane", not "Enter was observed". Once
- * the paste succeeds, a capture or submit failure returns true so the unchanged receipt watcher can
- * report `stalled`; returning false would misreport a partially delivered message as `targetGone`.
+ * Delivery is not complete merely because Enter was written. After each submit, capture the pane
+ * until the composed snapshot visibly advances. If the first Enter was swallowed, send exactly one
+ * more and verify again. The boolean still means "the envelope reached the pane": the verified hook
+ * receipt remains the final proof of consumption and reports `stalled` when the retry did not land.
  */
 
 export const ENVELOPE_SETTLE_POLL_MS = 40
 export const ENVELOPE_SETTLE_POLLS = 15
+export const ENVELOPE_SUBMIT_ATTEMPTS = 2
 
 export interface SettledEnvelopePty {
   captureSession(nodeId: string): Promise<string>
@@ -45,6 +47,21 @@ async function capture(pty: SettledEnvelopePty, nodeId: string): Promise<string 
   }
 }
 
+async function waitForAdvance(
+  pty: SettledEnvelopePty,
+  nodeId: string,
+  composed: string,
+  wait: (ms: number) => Promise<void>,
+  polls: number
+): Promise<boolean> {
+  for (let i = 0; i < polls; i++) {
+    if (i > 0) await wait(ENVELOPE_SETTLE_POLL_MS)
+    const current = await capture(pty, nodeId)
+    if (current !== null && current !== composed) return true
+  }
+  return false
+}
+
 /** Paste one complete envelope and submit only after the target pane has visibly settled. */
 export async function sendSettledEnvelope(
   pty: SettledEnvelopePty,
@@ -66,6 +83,7 @@ export async function sendSettledEnvelope(
   const wait = options.wait ?? delay
   const polls = Math.max(1, options.polls ?? ENVELOPE_SETTLE_POLLS)
   let priorChanged: string | null = null
+  let composed: string | null = null
   let settled = false
 
   for (let i = 0; i < polls; i++) {
@@ -74,11 +92,13 @@ export async function sendSettledEnvelope(
     if (current === null) continue
     if (footer && compact(current).includes(footer)) {
       settled = true
+      composed = current
       break
     }
     if (current && current !== before) {
       if (current === priorChanged) {
         settled = true
+        composed = current
         break
       }
       priorChanged = current
@@ -87,13 +107,19 @@ export async function sendSettledEnvelope(
     }
   }
 
-  if (!settled) return true
-  try {
-    // False here is intentionally still a successful paste. No receipt follows, so shared
-    // agent-messaging reports the existing non-retryable `stalled` outcome after its deadline.
-    await pty.sendText(nodeId, '', { enter: true })
-  } catch {
-    // Same partial-delivery contract as a false return from the bare Enter.
+  if (!settled || composed === null) return true
+
+  for (let attempt = 0; attempt < ENVELOPE_SUBMIT_ATTEMPTS; attempt++) {
+    try {
+      // A false return is not proof the key missed the pane: a transport can fail after a partial
+      // write. Re-capture either way, and retry once only when the composer did not advance.
+      await pty.sendText(nodeId, '', { enter: true })
+    } catch {
+      // Same partial-delivery contract: verification, not the transport's throw, decides.
+    }
+    if (await waitForAdvance(pty, nodeId, composed, wait, polls)) {
+      return true
+    }
   }
   return true
 }

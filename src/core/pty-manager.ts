@@ -134,6 +134,9 @@ import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './proje
 // runs on detach; the interval covers an ungraceful power loss between detaches.
 const SCROLLBACK_SNAPSHOT_MS = 15_000
 
+/** Truthful backend probe for operator inventory. `unknown` must never be treated as absence. */
+export type SessionPresence = 'alive' | 'dead' | 'unknown'
+
 // Async exec for tmux side-calls (capture / send-keys / kill-session) so they never block
 // the main event loop — a synchronous capture-pane of a large scrollback would stall every
 // other session's PTY streaming and all IPC for its duration.
@@ -802,6 +805,12 @@ export class PtyManager {
    *  ACROSS the awaits inside a spawn (see create()), not just after them. Entries are removed
    *  as soon as the spawn settles, success or failure. */
   private inflight = new Map<string, Promise<PtyCreateResult>>()
+  /**
+   * Server boot policy for cards that predate this process. A surviving backend is attach-only;
+   * an absent backend is an inert dead card. The map is deliberately process-local: it is runtime
+   * provenance, not project content, and new nodes created during this run are absent from it.
+   */
+  private bootPersisted = new Map<string, 'tmux' | 'session-host' | 'dead'>()
   /** sessionId → exact generation whose persistent backend is being ended by the awaited profile
    * switch path. A backend can emit exit before its kill response arrives; callbacks for this
    * generation are deferred so no local state changes before acknowledgement. */
@@ -1977,7 +1986,9 @@ export class PtyManager {
     // AFTER the in-flight barrier so a create racing the owner's own respawn joins it instead.
     const tomb = this.liveTombstone(key)
     if (tomb && tomb.by !== clientId) return { sessionId: '', fresh: false, closed: { by: tomb.by } }
-    const spawn = this.spawnNew(clientId, options)
+    const bootBackend = this.bootPersisted.get(key)
+    if (bootBackend === 'dead') return { sessionId: '', fresh: false, deadCard: true }
+    const spawn = this.spawnNew(clientId, options, bootBackend)
     this.inflight.set(key, spawn)
     // Clear on settle — INCLUDING on failure, or a single failed spawn would leave a rejected
     // promise in the map and make the node permanently unopenable.
@@ -2082,8 +2093,12 @@ export class PtyManager {
     )
   }
 
-  /** Spawn a brand-new session for this client (the non-co-attach path). */
-  private async spawnNew(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
+  /** Spawn a brand-new session, or attach-only for a card protected by Server boot policy. */
+  private async spawnNew(
+    clientId: ClientId,
+    options: PtyCreateOptions,
+    bootBackend?: 'tmux' | 'session-host'
+  ): Promise<PtyCreateResult> {
     // This node runs on a remote host and we cannot reach it: spawn NOTHING. Everything below
     // (and `spawnSession`'s program resolution) falls through to the LOCAL tmux/plain branches
     // when `sshRemote` is absent or `ssh` is missing — a silent local shell wearing a remote
@@ -2116,11 +2131,21 @@ export class PtyManager {
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
     // to decide whether to replay the persisted scrollback and re-launch a resumable agent.
-    // The Windows-profile warm-backend probe (attach-only reattach of a proven session-host or
-    // tmux generation, decided ahead of trusted profile resolution) lands with the
-    // windows-terminal-profiles phase; until then nothing assigns this and every create takes the
-    // ordinary attach-or-create path below.
-    let warmWindowsBackend: 'session-host' | 'tmux' | undefined
+    // Server cards that predate this process are attach-only. The same internal seam is also used
+    // by the Windows-profile warm-backend path: neither may fall through to attach-or-create.
+    let warmWindowsBackend: 'session-host' | 'tmux' | undefined = bootBackend
+    if (warmWindowsBackend && options.persistKey) {
+      let exists = false
+      if (warmWindowsBackend === 'tmux') {
+        exists = await this.confirmedTmuxSessionExists(options.persistKey)
+      } else {
+        exists = await sessionHostHasSession(sessionName(options.persistKey))
+      }
+      if (!exists) {
+        this.bootPersisted.set(options.persistKey, 'dead')
+        return { sessionId: '', fresh: false, deadCard: true }
+      }
+    }
     const tmuxBacked = !!this.tmuxPath && this.getSettings().tmuxEnabled && !!options.persistKey
     // For an SSH-project node, "fresh" is decided by the REMOTE tmux server (over the project's
     // ControlMaster), not the local one. The remote `has-session` is a full network round-trip,
@@ -2208,6 +2233,10 @@ export class PtyManager {
       if (!stillExists || !spawned || this.sessions.get(sessionId) !== spawned) {
         if (spawned && this.sessions.get(sessionId) === spawned)
           this.discardFailedSpawn(sessionId, spawned)
+        if (bootBackend && options.persistKey) {
+          this.bootPersisted.set(options.persistKey, 'dead')
+          return { sessionId: '', fresh: false, deadCard: true }
+        }
         throw new Error('The existing terminal session disappeared before it could be reattached.')
       }
     }
@@ -2374,33 +2403,105 @@ export class PtyManager {
    * the caller treats it as a warm join and types nothing into it.
    */
   async sessionExists(persistKey: string): Promise<boolean> {
-    if (this.liveSessionForPersistKey(persistKey)) return true
-    const probes: Promise<boolean>[] = []
-    if (this.tmuxPath) probes.push(this.tmuxSessionExists(persistKey))
+    return (await this.sessionPresence(persistKey)) !== 'dead'
+  }
+
+  /**
+   * Tri-state sibling of `sessionExists` for diagnostics and destructive cleanup. Warm-attach
+   * callers keep using the boolean method above, where unknown deliberately means "possibly
+   * alive"; operator inventory needs to expose that uncertainty instead of calling it alive.
+   */
+  async sessionPresence(persistKey: string): Promise<SessionPresence> {
+    if (this.liveSessionForPersistKey(persistKey)) return 'alive'
+    const probes: Promise<SessionPresence>[] = []
+    if (this.tmuxPath) probes.push(this.tmuxSessionPresence(persistKey))
     if (this.getSettings().tmuxEnabled && sessionHostSupported()) {
-      // A failed host read is not evidence of absence. This mirrors tmuxSessionExists' fail-safe
-      // direction and prevents a reconnect blip from being mistaken for a cold generation.
-      probes.push(sessionHostHasSession(sessionName(persistKey)).catch(() => true))
+      probes.push(
+        sessionHostHasSession(sessionName(persistKey)).then(
+          (exists): SessionPresence => exists ? 'alive' : 'dead',
+          (): SessionPresence => 'unknown'
+        )
+      )
     }
-    if (probes.length === 0) return false
-    return (await Promise.all(probes)).some(Boolean)
+    if (probes.length === 0) return 'dead'
+    const answers = await Promise.all(probes)
+    if (answers.includes('alive')) return 'alive'
+    if (answers.includes('unknown')) return 'unknown'
+    return 'dead'
+  }
+
+  /**
+   * Protect local terminal cards that existed before a Server process began serving.
+   *
+   * A definitively missing backend is marked dead immediately. A live or unreadable backend is
+   * guarded by the matching attach-only primitive, so even a race after this probe can never turn
+   * the saved card into a new shell. Call once after the Server workspace load and before listen().
+   */
+  async protectPersistedSessionsAtBoot(
+    persistKeys: readonly string[]
+  ): Promise<{ dead: string[]; guarded: string[] }> {
+    const keys = [...new Set(persistKeys)]
+    const dead: string[] = []
+    const guarded: string[] = []
+    const settings = this.getSettings()
+
+    await Promise.all(
+      keys.map(async (persistKey) => {
+        if (this.tmuxPath && settings.tmuxEnabled) {
+          try {
+            if (await this.confirmedTmuxSessionExists(persistKey)) {
+              this.bootPersisted.set(persistKey, 'tmux')
+              guarded.push(persistKey)
+              return
+            }
+          } catch {
+            // Unknown is not absence. Guard with attach-session, which cannot create.
+            this.bootPersisted.set(persistKey, 'tmux')
+            guarded.push(persistKey)
+            return
+          }
+        }
+        if (settings.tmuxEnabled && sessionHostSupported()) {
+          try {
+            if (await sessionHostHasSession(sessionName(persistKey))) {
+              this.bootPersisted.set(persistKey, 'session-host')
+              guarded.push(persistKey)
+              return
+            }
+          } catch {
+            // Same safe direction: the host's attach-existing RPC cannot create.
+            this.bootPersisted.set(persistKey, 'session-host')
+            guarded.push(persistKey)
+            return
+          }
+        }
+        this.bootPersisted.set(persistKey, 'dead')
+        dead.push(persistKey)
+      })
+    )
+    return { dead, guarded }
   }
 
   /** Whether a tmux session for this node id currently exists (server alive + session present).
    *  Async like the remote probe: a bulk project load fires one `create()` per terminal node,
    *  and a synchronous subprocess per probe would serialize on the main event loop. */
   private async tmuxSessionExists(persistKey: string): Promise<boolean> {
-    if (!this.tmuxPath) return false
+    return (await this.tmuxSessionPresence(persistKey)) !== 'dead'
+  }
+
+  /** Tri-state tmux probe; the boolean wrapper above preserves warm-attach's fail-safe direction. */
+  private async tmuxSessionPresence(persistKey: string): Promise<SessionPresence> {
+    if (!this.tmuxPath) return 'dead'
     try {
-      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)], {
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', `=${sessionName(persistKey)}`], {
         timeout: PROBE_TIMEOUT_MS
       })
-      return true
+      return 'alive'
     } catch (e) {
       // Same discrimination as the remote probe: tmux's exit 1 (no session / no server —
       // the reboot case) is absence; a spawn failure (EAGAIN under a bulk project load) is
       // not, and cold-restoring on it would type into a live session.
-      return !probeSaysAbsent(e)
+      return probeSaysAbsent(e) ? 'dead' : 'unknown'
     }
   }
 
@@ -2413,7 +2514,7 @@ export class PtyManager {
     try {
       await this.confirmedProcessRun(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)],
+        ['-L', TMUX_SOCKET, 'has-session', '-t', `=${sessionName(persistKey)}`],
         { timeout: PROBE_TIMEOUT_MS }
       )
       return true
@@ -2989,7 +3090,7 @@ export class PtyManager {
           'attach-session',
           ...(sinks ? [] : ['-d']),
           '-t',
-          sessionName(options.persistKey)
+          `=${sessionName(options.persistKey)}`
         ]
       } else {
       // The hook-server env (port/token/node id/agent id) is passed explicitly via `-e`

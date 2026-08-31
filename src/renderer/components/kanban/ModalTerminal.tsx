@@ -302,6 +302,12 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
         sshRemote,
         requireRemote: spawn.sshRemoteTmux
       })
+      if (res.deadCard) {
+        term.write(
+          '\r\n\x1b[90m[session backend did not survive the server restart — this dead card was not respawned]\x1b[0m\r\n'
+        )
+        return
+      }
       // Refused core-side (the master died inside our round-trip, or `ssh` is missing).
       if (res.unavailable) {
         term.write('\r\n\x1b[90m[not connected — nothing was started locally]\x1b[0m\r\n')

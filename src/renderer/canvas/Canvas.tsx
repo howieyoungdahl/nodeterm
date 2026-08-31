@@ -442,6 +442,7 @@ import {
   applyCanvasMutation,
   applyMutationToFlow,
   agentLaunchOverride,
+  canvasControlNodeGeometry,
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   alignNodes,
@@ -472,12 +473,14 @@ import {
   addSelectionToGroup,
   groupSelectedNodes,
   nodeStatesToFlow,
+  normalizeLegacyServerControlSpawnMutation,
   reorderGroupWithinParent,
   reorderNodeBefore,
   reparentNode,
   selectedRootIds,
   resolveNewNodeAccount,
   resolveNewNodeAgent,
+  resizeTerminalNodeGeometry,
   accountsForProject,
   sshAccountsHint,
   ungroupNodes,
@@ -2723,34 +2726,41 @@ export function Canvas() {
     // tab switch tears down + re-binds both together (and a local→local switch does neither).
     return activeSession.api.canvas.onMutation((projectId, mutation) => {
       hasPeersRef.current = true // proof of a peer, whatever the presence table says
-      if (!orderRef.current?.accept(mutation)) return
-      if (projectId !== useProjects.getState().activeProjectId) {
+      const projects = useProjects.getState()
+      const activeProjectId = projects.activeProjectId
+      const nodeId = mutation.op === 'upsert' ? mutation.node.id : mutation.id
+      const nodeAlreadyExists = projectId === activeProjectId
+        ? nodesRef.current.some((node) => node.id === nodeId)
+        : projects.getProject(projectId)?.nodes.some((node) => node.id === nodeId) ?? false
+      const incoming = normalizeLegacyServerControlSpawnMutation(mutation, nodeAlreadyExists)
+      if (!orderRef.current?.accept(incoming)) return
+      if (projectId !== activeProjectId) {
         // Not on screen (a parked / background project): no terminal is mounted, but one may be
         // PARKED from a recent project switch — dispose it, as an active-project remove does.
-        if (mutation.op === 'remove') {
-          disposeTerminalOnUnmount(sessionForProject(projectId).id, mutation.id)
+        if (incoming.op === 'remove') {
+          disposeTerminalOnUnmount(sessionForProject(projectId).id, incoming.id)
           // ...and its keep-alive ghost: a background webview node a peer deleted must not keep
           // its page running invisibly until the next switch.
-          useWebviewKeepAlive.getState().drop(mutation.id)
+          useWebviewKeepAlive.getState().drop(incoming.id)
         }
-        if (useProjects.getState().applyNodeMutation(projectId, mutation)) markDirty()
+        if (projects.applyNodeMutation(projectId, incoming)) markDirty()
         return
       }
       // PATCH THE LIVE ARRAY — do not round-trip the canvas through the (lossy) serializers. That
       // wiped your selection, deleted your relay-remote nodes and re-rendered every node component,
       // ~20 times a second while a teammate dragged. See applyMutationToFlow.
-      const flow = applyMutationToFlow(nodesRef.current, mutation)
+      const flow = applyMutationToFlow(nodesRef.current, incoming)
       if (flow === nodesRef.current) return // nothing to do (a remove for a node we do not have)
-      if (mutation.op === 'remove') {
+      if (incoming.op === 'remove') {
         // The peer's delete must also dispose OUR terminal co-state for that node — otherwise the
         // module-level state survives the node, and if the owner UNDOES the delete we are left
         // holding a node that reads "closed by another user" while its session is alive again.
-        const gone = nodesRef.current.find((n) => n.id === mutation.id)
+        const gone = nodesRef.current.find((n) => n.id === incoming.id)
         if (gone?.type === 'terminal')
           disposeTerminalOnUnmount(sessionForProject(projectId).id, gone.id)
         // A removed webview node's keep-alive entry ends with it (see handleNodesChange's remove
         // branch for the local twin of this).
-        useWebviewKeepAlive.getState().drop(mutation.id)
+        useWebviewKeepAlive.getState().drop(incoming.id)
       }
       // Keep the ref in step immediately: a burst (a peer's bulk delete) arrives within one tick,
       // before React re-renders, and each mutation must build on the previous one.
@@ -2762,7 +2772,7 @@ export function Canvas() {
       // undo debounce was silently dropped from the undo stack whenever a peer's mutation landed
       // first (i.e. constantly, while anyone else was dragging). Rebasing keeps the difference that
       // IS yours, and adds nothing that is theirs.
-      committedRef.current = applyMutationToFlow(committedRef.current, mutation)
+      committedRef.current = applyMutationToFlow(committedRef.current, incoming)
       setNodes(flow)
       markDirty()
     })
@@ -8068,6 +8078,19 @@ export function Canvas() {
         return
       }
 
+      // `--remote-control` is a Server Edition launch option. The shared parser admits it so the
+      // headless factory can feature-detect the host CLI; desktop must answer explicitly instead
+      // of silently opening an ordinary Claude session while claiming the option was honored.
+      if (args['remote-control'] !== undefined) {
+        reply({
+          ok: false,
+          error:
+            'remote-control-server-only: open-agent --remote-control is available from Server ' +
+            'Edition canvas control; on desktop open Claude normally and run `/rc [name]` inside it'
+        })
+        return
+      }
+
       // ── `--project` targeted opens (issue #338 Task 2.3) — the three open verbs, early ──────
       // Main's gateProjectTarget already enforced own-or-granted BEFORE forwarding (spec §3):
       // the renderer never sees an unauthorized target — the checks below are belt, not the
@@ -8142,6 +8165,11 @@ export function Canvas() {
             ? undefined
             : resolveNewNodeAccount(undefined, target, useSettings.getState().settings.claudeAccounts)
           const tgMode = tgIsTerminal ? undefined : projectPermissionMode(target, tgAgentId)
+          const tgGeometry = tgIsTerminal ? undefined : canvasControlNodeGeometry(args.size)
+          if (!tgIsTerminal && !tgGeometry) {
+            reply({ ok: false, error: `${verb}: --size must be compact or normal` })
+            return
+          }
           const tgActive = target.id === tgStore.activeProjectId
           // Placement: below the lowest existing node in the TARGET (placeBelow(src) is
           // meaningless in a project that does not contain the source). The live canvas is the
@@ -8164,7 +8192,9 @@ export function Canvas() {
                   tgMode,
                   // The TARGET project: its `.nodeterm/settings.json` launch override applies to
                   // what runs in it, not the caller's.
-                  target.id
+                  target.id,
+                  undefined,
+                  tgGeometry ?? undefined
                 )
             const w = (node.width as number) ?? 640
             const h = (node.height as number) ?? 440
@@ -8624,6 +8654,11 @@ export function Canvas() {
             // agent id — resolveAgent is the single registry/base-harness resolver for both.
             const agentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
             const count = Math.max(1, Math.min(5, parseInt(args.count || '1', 10) || 1))
+            const geometry = canvasControlNodeGeometry(args.size)
+            if (!geometry) {
+              reply({ ok: false, error: `${verb}: --size must be compact or normal` })
+              return
+            }
             // --group parents the new node(s) into an existing group frame; a worktree-bound
             // group also hands its worktree path down as the cwd (same inheritance as
             // UI-created nodes — cwdForNewNodeIn is the one resolver for that).
@@ -8660,7 +8695,8 @@ export function Canvas() {
                   // `--model` is a pass-through: `withAgentModel` re-validates the value at the
                   // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
                   // so an unsupported agent's command line stays byte-identical.
-                  args.model
+                  args.model,
+                  geometry
                 ),
                 after ?? [],
                 undefined,
@@ -9345,6 +9381,37 @@ export function Canvas() {
               void pushSessionRename(api.pty, id, title)
             }
             reply({ ok: true, message: `renamed ${id} to "${title}"` })
+            return
+          }
+          case 'resize': {
+            const id = args.node ?? ''
+            const target = nodesRef.current.find((node) => node.id === id)
+            if (!target) {
+              reply({ ok: false, error: `resize: no node with id ${id}` })
+              return
+            }
+            if ((target.type ?? 'terminal') !== 'terminal') {
+              reply({ ok: false, error: 'resize: target must be a terminal node' })
+              return
+            }
+            const geometry = canvasControlNodeGeometry(args.size)
+            if (!geometry) {
+              reply({ ok: false, error: 'resize: --size must be compact or normal' })
+              return
+            }
+            setNodes((nodes) =>
+              nodes.map((node) =>
+                node.id === id ? resizeTerminalNodeGeometry(node, geometry) : node
+              )
+            )
+            markDirty()
+            reply({
+              ok: true,
+              message:
+                `resized ${id} to ${geometry.name} ` +
+                `(${geometry.size.width}×${geometry.size.height})`,
+              result: { id, size: geometry.size }
+            })
             return
           }
           case 'color': {

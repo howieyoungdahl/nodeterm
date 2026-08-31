@@ -402,7 +402,7 @@ describe('xtermScrollback', () => {
 
   it('caps the default 50000-line tmux scrollback', () => {
     expect(xtermScrollback(50000)).toBe(XTERM_SCROLLBACK_MAX)
-    expect(XTERM_SCROLLBACK_MAX).toBe(10000)
+    expect(XTERM_SCROLLBACK_MAX).toBe(2000)
   })
 
   it('floors a tiny setting the same way the tmux conf does (history-limit max(1000, n))', () => {

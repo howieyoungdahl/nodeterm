@@ -128,11 +128,34 @@ default, never something more destructive than the default.
 **A Server Edition agent owns only nodes it freshly opened in this server run.** The
 creator ledger is process-local and must never be rebuilt from `.nodeterm/project.json`, titles,
 hook history, or a surviving tmux name: all are writable or stale. A restart therefore clears
-ownership, performs no node/session adoption, and leaves durable queued launches dormant. Metadata
+ownership and leaves durable queued launches dormant. Before listening, Server boot classifies
+every saved local terminal id. A definitively absent backend becomes an inert dead card; a live or
+unreadable backend may be reached only through an attach-only primitive. Neither branch may
+attach-or-create, and only node ids created during the current Server run may fresh-spawn. Metadata
 mutations and message delivery validate every target before writing anything; missing proof is a
-named refusal. Validate Server upgrades against a disposable data directory and port. Restarting a
-shared live service is
-an explicit operator action, never a test or an automatic repair step.
+ named refusal. There is no agent ownership exception for global dead-card cleanup. The separately
+authenticated operator API and its periodic reaper share one engine; it skips SSH projects and
+removes a local terminal card only after two definitive absent-session probes. Failed or unreadable
+probes preserve it. Validate Server upgrades against a disposable data directory and port.
+Restarting a shared live service is an explicit operator action, never a test or an automatic
+repair step.
+
+**The Server operator API is a different principal, not an agent escape hatch.** `/opsapi/*` is
+TCP-loopback-only and authenticates only the `0600` `ops-token` bearer; browser cookies, the
+operator password, proxy headers, and node tokens never substitute for it. Keep agent
+canvas-control creator ownership strict. A dead-card sweep requires two definitive absent-pane
+probes, preserves `unknown` on every read failure, and shares one mutation engine with the periodic
+reaper. Server-owned operator and agent workspace transactions also share one FIFO; separate
+load/save queues can overwrite each other with stale snapshots. `/opsapi/health` must snapshot
+spawn-handler state without awaiting the preparation or parallel external launches it diagnoses;
+timed-out non-cancellable launches remain visible until they actually settle. Credentials still
+never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
+
+**A Server Edition message is not submitted just because tmux accepted Enter.** A fresh agent
+composer can render a pasted envelope before it is ready to consume the submit key. Capture the
+composed pane after Enter; if it did not advance, send one bounded retry and capture again. The
+target's verified next-turn hook remains the delivery receipt. Never report the paste as delivered
+ from a successful tmux command alone, and never loop Enter against somebody else's composer.
 
 **A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
 a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
@@ -144,6 +167,14 @@ come from git-shared JSON and can end up interpolated into a shell command line.
 **Test generated shell for real.** If you generate a shell command, run it under an actual
 `/bin/sh` against a fixture tree. A composed fixture will not tell you that `echo ##MEM` prints an
 empty line because `#` starts a comment.
+
+**A shared agent daemon is live-session infrastructure.** Codex's app-server control socket is
+shared by every `--remote` TUI in an account scope, so stopping or replacing one daemon disconnects
+every attached canvas node. A managed launcher must keep the already-bound thread under a bounded
+supervisor: resume only when protocol health failed or the known socket generation changed, never
+loop an unrelated client error, and never replay the original prompt after reconnect. Probe a
+responsive daemon before invoking lifecycle repair; stale PID bookkeeping is not permission to kill
+working sessions. See `docs/shared-codex-node-identity.md`.
 
 **Credentials never ride argv — local or SSH.** Not a tmux `-e` pair, not `curl -H`, not a remote
 command string. `/proc/<pid>/cmdline` is mode 444 on a stock Linux, and a remote command line is argv
@@ -161,6 +192,11 @@ three times.
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.
 
+**Keep renderer terminal memory separate from tmux history.** tmux may retain 50,000 operator-
+scrollable lines outside the browser process; each mounted xterm is capped at 2,000 lines and an
+offscreen xterm is released after one minute by default. Raising the renderer cap multiplies across
+every terminal card on the active canvas; do not couple it back to tmux's retention setting.
+
 **A spawn-env write does not reach a tmux session on its own.** The shared tmux server takes each
 new session's env from its own GLOBAL env (inherited from whichever client *started* the server) —
 the creating client's process env only matters for names listed in `update-environment` (or passed
@@ -170,6 +206,15 @@ worse, leaks the server-starter's value into everyone else) after that. That is 
 shipped: managed-account `CLAUDE_CONFIG_DIR` leaked into system-account sessions. New per-session
 env either joins `ACCOUNT_SCOPE_UPDATE_ENV` / the gateway list, or rides `-e` — and gets a
 real-tmux test (`account-env.realtmux.test.ts` is the pattern).
+
+**Do not hold a workspace transaction lock across PTY or subprocess work.** Save and publish the
+durable node while serialized, release the lock, then start external work behind a bounded deadline.
+PTY creation is not cancellable: a timeout must preserve the card, report that the operation may
+finish late, and tell the caller not to repeat. Any capability promise used on this path needs its
+own bounded fail-safe; an edition-specific `false` answer must not be replaced with a getter whose
+initializer that edition never runs. When close can race the unlocked external phase, retain a
+per-node cancellation until the late operation settles and destroy its exact backend again; the
+first destroy may have run before anything existed.
 
 **A new keyboard chord has to survive the shells, not just the renderer.** The application menu is
 ours (`buildAppMenu` in `main/index.ts`), but its command-style accelerators — ⌘Q, ⌘M, ⌘W, ⌘0, ⌘⇧B,
@@ -213,6 +258,12 @@ latch the writer off — `installLogSink` (`src/core/log-sink.ts`) is the worked
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and
 let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and
 eventually drifts.
+
+**Never guess a local CLI launch flag from its version.** Probe the installed CLI's help once,
+carry the answer through the shared capability bag, and refuse before node creation when a requested
+option is absent. Keep the command assembler, both generated canvas-control instruction bodies, and
+the operator-facing edition docs in the same PR. Capability tests must inspect help and command
+assembly without starting an externally visible provider session.
 
 ## Testing
 

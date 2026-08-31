@@ -123,7 +123,42 @@ describe('parseControlRequest', () => {
       verb: 'open-agent',
       args: { agent: 'codex' }
     })
+    expect(parseControlRequest('open-agent', { agent: 'codex', size: 'normal' })).toEqual({
+      verb: 'open-agent',
+      args: { agent: 'codex', size: 'normal' }
+    })
+    expect(parseControlRequest('open-agent', { agent: 'codex', size: 'small' })).toEqual({
+      error: 'open-agent: --size must be compact or normal'
+    })
     expect(isDestructiveVerb('open-agent')).toBe(false)
+  })
+
+  it('accepts Remote Control only on open-agent --agent claude', () => {
+    expect(parseControlRequest('open-agent', { agent: 'claude', 'remote-control': '' })).toEqual({
+      verb: 'open-agent',
+      args: { agent: 'claude', 'remote-control': '' }
+    })
+    expect(parseControlRequest('open-agent', { agent: 'codex', 'remote-control': '' })).toEqual({
+      error: '--remote-control is supported only by open-agent --agent claude'
+    })
+    expect(parseControlRequest('open-claude', { 'remote-control': '' })).toEqual({
+      error: '--remote-control is supported only by open-agent --agent claude'
+    })
+  })
+
+  it('resize requires one node and a named compact or normal size', () => {
+    expect(parseControlRequest('resize', {})).toEqual({ error: 'resize requires --node <id>' })
+    expect(parseControlRequest('resize', { node: 'n1' })).toEqual({
+      error: 'resize requires --size compact|normal'
+    })
+    expect(parseControlRequest('resize', { node: 'n1', size: 'wide' })).toEqual({
+      error: 'resize: --size must be compact or normal'
+    })
+    expect(parseControlRequest('resize', { node: 'n1', size: 'compact' })).toEqual({
+      verb: 'resize',
+      args: { node: 'n1', size: 'compact' }
+    })
+    expect(isDestructiveVerb('resize')).toBe(false)
   })
 
   it('open-worktree requires --branch, close-worktree requires --group; neither destructive', () => {
@@ -221,14 +256,18 @@ describe('parseControlRequest', () => {
 
   it('instructions cover the verb set and the confirm caveat', () => {
     const body = buildCanvasControlInstructions('/tmp/nodeterm.sh')
-    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'ungroup', 'move', 'arrange', 'rename', 'color', 'write', 'close', 'board', 'assign']) {
+    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'ungroup', 'move', 'arrange', 'rename', 'resize', 'color', 'write', 'close', 'board', 'assign']) {
       expect(body).toContain(verb)
     }
     expect(body).toContain('group --nodes <id,id> [--label L] [--color C]')
     expect(body).toContain('color --node <id,id> --color C')
+    expect(body).toContain('resize --node <id> --size compact|normal')
+    expect(body).toContain('440×320')
     const skill = buildCanvasSkillBody('/tmp/nodeterm.sh')
     expect(skill).toContain('group --nodes <id,id> [--label "Frontend Team"] [--color C]')
     expect(skill).toContain('color --node <id,id> --color C')
+    expect(skill).toContain('resize --node <id> --size compact|normal')
+    expect(skill).toContain('440×320')
     expect(body.toLowerCase()).toContain('confirm')
   })
 
@@ -344,6 +383,25 @@ describe('parseControlRequest', () => {
       expect(body.toLowerCase()).toContain('ignore')
       // Per-role model is what lets ONE spawn-team call mix tiers; the JSON example must show it.
       expect(body).toContain('"model"')
+    }
+  })
+
+  it('both agent-facing texts document the Server launch-timeout contract', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('`launch-timeout`')
+      expect(body).toContain('Later creations remain available')
+      expect(body).toContain('do not repeat')
+      expect(body).toContain('may still finish')
+    }
+  })
+
+  it('both agent-facing texts document the feature-detected Remote Control launch and fallback', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('--remote-control[=NAME]')
+      expect(body).toContain('--agent claude')
+      expect(body).toContain('installed Claude CLI advertises support')
+      expect(body).toContain('/rc [name]')
+      expect(body).toContain('before creating a node')
     }
   })
 

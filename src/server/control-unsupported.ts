@@ -91,6 +91,11 @@ export interface ServerEditionControlActions {
   ): Promise<ServerControlReply>
   group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
   rename(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  resize(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
   color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
   sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
   deliver(input: {
@@ -109,6 +114,7 @@ const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
   'link',
   'group',
   'rename',
+  'resize',
   'color',
   'send',
   'reply',
@@ -172,6 +178,8 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
         return actions.group(nodeId, command.args)
       case 'rename':
         return actions.rename(nodeId, command.args)
+      case 'resize':
+        return actions.resize(nodeId, command.args, verified)
       case 'color':
         return actions.color(nodeId, command.args)
       case 'sticky':

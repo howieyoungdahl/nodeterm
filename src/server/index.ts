@@ -49,8 +49,16 @@ import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
 import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
+import { createHeadlessNodeOwnership } from './headless-node-factory'
+import { ServerNodeOps } from './node-ops'
+import { ServerDeadCardReaper } from './dead-card-reaper'
+import { createOpsApiHandler } from './ops-api'
+import { loadOrCreateOpsToken, OPS_TOKEN_FILE } from './ops-token'
+import { SpawnHandlerState } from './spawn-handler-state'
+import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 import { refreshNodeTokens } from '../core/agents/node-token-service'
 import { armServerNodeIdentity } from './node-identity-arm'
+import { wireServerCodexSharedIdentity } from './codex-shared-identity'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -73,7 +81,10 @@ import {
   type MirrorServer,
   setNodeSessionName,
   sessionNameSweepEntries,
-  nodeSessionName
+  nodeSessionName,
+  mirrorEntry,
+  nodeLastActivityAt,
+  clearNode
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -85,7 +96,7 @@ import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
-import { initCanvasSync } from '../core/canvas-sync'
+import { initCanvasSync, publishCanvasMutation } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
 import { initServerContextLink } from './context-link'
 import { createServerWorkspaceWatcher } from './workspace-external-watch'
@@ -153,7 +164,12 @@ function readInstallMeta(dataDir: string): MirrorServer | undefined {
 export async function startServer(
   config: ServerConfig
 ): Promise<{ port: number; close(): Promise<void> }> {
+  const startedAt = Date.now()
   fs.mkdirSync(config.dataDir, { recursive: true })
+  // The default dataDir is ~/.nodeterm-server, yielding the designed ~/.nodeterm-server/ops-token.
+  // This credential is its own principal: it is never printed, derived from the UI password, or
+  // accepted as a browser cookie. A custom dataDir keeps all Server state together by design.
+  const opsToken = loadOrCreateOpsToken(path.join(config.dataDir, OPS_TOKEN_FILE))
 
   // Core platform boundary — must be initialized before any core service registers handlers.
   const platform = new ServerPlatform({
@@ -184,6 +200,9 @@ export async function startServer(
   const settingsStore = new SettingsStore()
   const ptyManager = new PtyManager()
   const workspaceStore = new WorkspaceStore()
+  const nodeOwnership = createHeadlessNodeOwnership()
+  const spawnHandlerState = new SpawnHandlerState()
+  const workspaceMutationQueue = new WorkspaceMutationQueue()
 
   settingsStore.init()
   const gatewayCredentials = new ModelGatewayCredentialService(
@@ -411,6 +430,32 @@ export async function startServer(
   // Set after the initial workspace load when the opt-in flag is on. The status listener is wired
   // now so the runtime, once present, consumes the exact same normalized stream as the UI/mirror.
   let canvasControl: ServerCanvasControl | null = null
+  const nodeOps = new ServerNodeOps({
+    workspaceStore,
+    sessionPresence: (nodeId) => ptyManager.sessionPresence(nodeId),
+    destroySession: (nodeId) =>
+      ptyManager.destroySession(null, nodeId, { everySocket: true }),
+    statusOf: (nodeId) => {
+      const entry = mirrorEntry(nodeId)
+      const updatedAt = nodeLastActivityAt(nodeId)
+      return entry || updatedAt !== undefined
+        ? { state: entry?.state, updatedAt: updatedAt ?? entry!.updatedAt }
+        : undefined
+    },
+    ownerOf: (nodeId) => nodeOwnership.ownerOf(nodeId),
+    onRemoved: (nodeIds) => {
+      for (const nodeId of nodeIds) clearNode(nodeId)
+      canvasControl?.forgetNodes(nodeIds)
+    },
+    publishProject: (project) => platform.broadcast(IPC.workspaceExternalChange, project),
+    publishRemoval: (projectId, nodeId) =>
+      publishCanvasMutation(projectId, { op: 'remove', id: nodeId }),
+    mutationQueue: workspaceMutationQueue
+  })
+  const deadCardReaper = new ServerDeadCardReaper({
+    intervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
+    sweep: (dryRun) => nodeOps.sweep(dryRun)
+  })
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
@@ -555,6 +600,15 @@ export async function startServer(
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }
 
+  // The Server Edition has the same local app-server, signed node tokens, and persistent canvas
+  // store as Electron. Wire the shared-thread spine after those secrets exist, so its Codex panes
+  // get the same daemon-reset supervisor instead of bypassing it through bare `codex`.
+  void wireServerCodexSharedIdentity(
+    hookServer,
+    workspaceStore,
+    (channel, event) => platform.broadcast(channel, event)
+  ).catch((error) => console.warn('[codex-identity] shared identity unavailable:', error))
+
   // Context Link: core owns the whole feature (read handler, shim, skill, instruction blocks) and
   // writes everything under `dataDir`; what it needs from a shell is the link map. The desktop's
   // renderer pushes it from the live canvas — headless there may be no browser attached at all, so
@@ -578,9 +632,26 @@ export async function startServer(
   // and this shell may never have one. Read it once so links are live before any browser connects.
   // Read-only: boot must not sideline a conflict-marked project.json (that stays a renderer/probe
   // decision). The onPersist above turns this load into the initial refresh.
-  await workspaceStore.load({ sideline: false }).catch((e) => {
+  const bootWorkspace = await workspaceStore.load({ sideline: false }).catch((e) => {
     console.warn('[nodeterm-server] context-link initial workspace load failed', e)
+    return undefined
   })
+  if (bootWorkspace) {
+    const persistedLocalTerminals = bootWorkspace.projects.flatMap((project) =>
+      project.ssh
+        ? []
+        : project.nodes.filter((node) => node.kind === 'terminal').map((node) => node.id)
+    )
+    const protectedSessions = await ptyManager.protectPersistedSessionsAtBoot(
+      persistedLocalTerminals
+    )
+    if (protectedSessions.dead.length) {
+      console.info(
+        `[nodeterm-server] marked ${protectedSessions.dead.length} persisted terminal card(s) dead; no backend was respawned`
+      )
+    }
+  }
+  deadCardReaper.start()
 
   if (config.canvasControl === true) {
     try {
@@ -589,6 +660,9 @@ export async function startServer(
         ptyManager,
         settings: () => settingsStore.get(),
         boardLog,
+        ownership: nodeOwnership,
+        spawnHandlerState,
+        mutationQueue: workspaceMutationQueue,
         installAgentIntegrations: config.installHooks !== false
       })
       hookServer.setControlHandler(canvasControl.handler)
@@ -700,6 +774,7 @@ export async function startServer(
         projectSetupService.disposeAll()
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
+        deadCardReaper.stop()
         pressure.stop()
         ptyPressure.stop()
         canvasControl?.stop()
@@ -718,12 +793,31 @@ export async function startServer(
     }
   }
 
+  const opsApi = createOpsApiHandler({
+    token: opsToken,
+    nodes: () => nodeOps.list(),
+    sweep: (dryRun) => nodeOps.sweep(dryRun),
+    remove: (nodeId, force) => nodeOps.remove(nodeId, force),
+    health: () => ({
+      startedAt,
+      uptimeMs: Math.max(0, Date.now() - startedAt),
+      wsClientCount: platform.clientIds().length,
+      canvasControlEnabled: canvasControl !== null,
+      spawnHandler: spawnHandlerState.snapshot(),
+      deliveryQueueDepths: canvasControl?.deliveryQueueDepths() ?? {},
+      projects: workspaceStore.persistedCanvases().map((project) => ({
+        id: project.id,
+        nodeCount: project.nodes.length
+      }))
+    })
+  })
   const server = http.createServer(
     createHttpHandler({
       auth,
       rendererDir: config.rendererDir,
       trustProxy: config.trustProxy,
-      downloadTickets
+      downloadTickets,
+      opsApi
     })
   )
   // A closed browser tab is the NORMAL way to leave the Server Edition and sends no `pty:kill`,
@@ -757,6 +851,7 @@ export async function startServer(
       projectSetupService.disposeAll()
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
+      deadCardReaper.stop()
       pressure.stop()
       ptyPressure.stop()
       canvasControl?.stop()

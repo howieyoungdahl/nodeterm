@@ -10,6 +10,7 @@ import { WorkspaceStore } from '../core/workspace-store'
 import type { AgentState } from '../shared/agents/normalize'
 import {
   DEFAULT_SETTINGS,
+  type ClaudeCliCaps,
   type CanvasNodeState,
   type PtyCreateOptions,
   type PtyCreateResult,
@@ -19,9 +20,11 @@ import {
 import {
   createHeadlessNodeOwnership,
   HeadlessNodeFactory,
+  type HeadlessNodeFactoryDeps,
   type HeadlessNodeOwnership,
   type HeadlessPty
 } from './headless-node-factory'
+import { SpawnHandlerState } from './spawn-handler-state'
 
 class FakePty implements HeadlessPty {
   readonly creates: PtyCreateOptions[] = []
@@ -93,8 +96,13 @@ describe('HeadlessNodeFactory', () => {
   let removed: string[]
   let publishedProjects: Workspace['projects']
   let factory: HeadlessNodeFactory
+  let factoryDeps: HeadlessNodeFactoryDeps
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
+  let cliCaps: () => Promise<ClaudeCliCaps>
+  let handlerNow: number
+  let spawnHandlerState: SpawnHandlerState
+  let remoteControlFlag: boolean
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -115,6 +123,19 @@ describe('HeadlessNodeFactory', () => {
     removed = []
     publishedProjects = []
     codexSharedIdentity = false
+    remoteControlFlag = false
+    cliCaps = async () => ({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      sessionIdFlag: false,
+      remoteControlFlag
+    })
+    handlerNow = 1_000
+    spawnHandlerState = new SpawnHandlerState({
+      now: () => handlerNow,
+      wedgeAfterMs: 100
+    })
     ownership = createHeadlessNodeOwnership()
     ownership.record('term-upstream', {
       sourceNodeId: 'term-source',
@@ -145,23 +166,20 @@ describe('HeadlessNodeFactory', () => {
       ]
     }
     await store.save(initial)
-    factory = new HeadlessNodeFactory({
+    factoryDeps = {
       workspaceStore: store,
       ptyManager: pty,
       settings,
-      cliCaps: async () => ({
-        version: null,
-        autoPermissionMode: false,
-        fullscreenTui: false,
-        sessionIdFlag: false
-      }),
+      cliCaps: () => cliCaps(),
       codexSharedIdentity: async () => codexSharedIdentity,
       ownership,
+      spawnHandlerState,
       stateOf: (id) => states[id],
       publishNode: (_projectId, node) => published.push(node),
       publishRemoval: (_projectId, nodeId) => removed.push(nodeId),
       publishProject: (project) => publishedProjects.push(structuredClone(project))
-    })
+    }
+    factory = new HeadlessNodeFactory(factoryDeps)
   })
 
   afterEach(() => {
@@ -204,6 +222,286 @@ describe('HeadlessNodeFactory', () => {
     expect(reloaded.projects[0].nodes.find((node) => node.id === id)).toMatchObject({
       cwd: projectDir
     })
+  })
+
+  it('does not let one hung PTY creation block a later node creation', async () => {
+    let releaseFirst!: (result: PtyCreateResult) => void
+    let markFirstEntered!: () => void
+    const firstEntered = new Promise<void>((resolve) => (markFirstEntered = resolve))
+    const createNormally = pty.createHeadless.bind(pty)
+    vi.spyOn(pty, 'createHeadless')
+      .mockImplementationOnce((options) => {
+        pty.creates.push(options)
+        markFirstEntered()
+        return new Promise<PtyCreateResult>((resolve) => (releaseFirst = resolve))
+      })
+      .mockImplementation(createNormally)
+
+    const first = factory.openTerminal('term-source', {}, true)
+    await firstEntered
+    const second = factory.openTerminal('term-source', {}, true)
+    const wedged = Symbol('creation remained behind the first PTY')
+    const observed = await Promise.race([
+      second,
+      new Promise<typeof wedged>((resolve) => setTimeout(() => resolve(wedged), 500))
+    ])
+
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-terminal:launch',
+      active: 1,
+      queued: 0
+    })
+
+    // Always release/consume both requests so the red pre-fix run leaves no background promise.
+    releaseFirst({ sessionId: 'pty-first', fresh: true, persistent: true })
+    await first
+    const secondReply = observed === wedged ? await second : observed
+
+    expect(observed).not.toBe(wedged)
+    expect(secondReply).toMatchObject({ ok: true })
+    expect(pty.creates).toHaveLength(2)
+  })
+
+  it('kills a backend that appears after its in-flight card was closed', async () => {
+    let releaseCreate!: (result: PtyCreateResult) => void
+    let markCreateEntered!: () => void
+    const createEntered = new Promise<void>((resolve) => (markCreateEntered = resolve))
+    vi.spyOn(pty, 'createHeadless').mockImplementationOnce((options) => {
+      pty.creates.push(options)
+      markCreateEntered()
+      return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
+    })
+
+    const opening = factory.openTerminal('term-source', {}, true)
+    await createEntered
+    const nodeId = pty.creates[0].persistKey as string
+    await expect(factory.close('term-source', { node: nodeId }, true)).resolves.toMatchObject({
+      ok: true
+    })
+
+    // The non-cancellable create resolves AFTER close's first absent-backend destroy. The launch
+    // guard must issue an exact second destroy instead of leaving this late backend orphaned.
+    pty.live.add(nodeId)
+    releaseCreate({ sessionId: `pty-${nodeId}`, fresh: true, persistent: true })
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-failed')
+    })
+    expect(pty.sends).toEqual([])
+    expect(pty.live.has(nodeId)).toBe(false)
+    expect(pty.destroys.filter((entry) => entry.nodeId === nodeId)).toHaveLength(2)
+    expect(pty.destroys.at(-1)).toMatchObject({ nodeId, wasLive: true })
+    const workspace = await store.load({ sideline: false })
+    expect(workspace.projects[0].nodes.some((node) => node.id === nodeId)).toBe(false)
+  })
+
+  it('kills a backend that appears after operator removal forgets an in-flight card', async () => {
+    let releaseCreate!: (result: PtyCreateResult) => void
+    let markCreateEntered!: () => void
+    const createEntered = new Promise<void>((resolve) => (markCreateEntered = resolve))
+    vi.spyOn(pty, 'createHeadless').mockImplementationOnce((options) => {
+      pty.creates.push(options)
+      markCreateEntered()
+      return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
+    })
+
+    const opening = factory.openTerminal('term-source', {}, true)
+    await createEntered
+    const nodeId = pty.creates[0].persistKey as string
+    // ServerNodeOps force removal kills first, persists the card removal, then calls forgetNodes.
+    await pty.destroySession(null, nodeId, { everySocket: true })
+    factory.forgetNodes([nodeId])
+
+    pty.live.add(nodeId)
+    releaseCreate({ sessionId: `pty-${nodeId}`, fresh: true, persistent: true })
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-failed')
+    })
+    expect(pty.live.has(nodeId)).toBe(false)
+    expect(pty.destroys.filter((entry) => entry.nodeId === nodeId)).toHaveLength(2)
+    expect(pty.destroys.at(-1)).toMatchObject({ nodeId, wasLive: true })
+  })
+
+  it('bounds a hung launch with a named timeout and leaves later creations available', async () => {
+    factory.stop()
+    factory = new HeadlessNodeFactory({
+      ...factoryDeps,
+      ownership: createHeadlessNodeOwnership(),
+      launchTimeoutMs: 25
+    })
+    const createNormally = pty.createHeadless.bind(pty)
+    vi.spyOn(pty, 'createHeadless')
+      .mockImplementationOnce((options) => {
+        pty.creates.push(options)
+        return new Promise<PtyCreateResult>(() => {})
+      })
+      .mockImplementation(createNormally)
+
+    const timedOut = await factory.openTerminal('term-source', {}, true)
+    expect(timedOut).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-timeout'),
+      result: {
+        timedOut: [expect.stringMatching(/^term-/)]
+      }
+    })
+    expect(timedOut.error).toContain('later creations remain available')
+    expect(timedOut.error).toContain('do not repeat')
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-terminal:launch',
+      active: 1,
+      queued: 0
+    })
+    handlerNow += 101
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-terminal:launch',
+      activeForMs: 101,
+      active: 1
+    })
+
+    await expect(factory.openTerminal('term-source', {}, true)).resolves.toMatchObject({ ok: true })
+    expect(pty.creates).toHaveLength(2)
+    // The timed-out underlying create remains visible while the successful later launch settles.
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-terminal:launch',
+      active: 1
+    })
+  })
+
+  it('bounds a missing Codex capability answer and degrades to the ordinary CLI', async () => {
+    factory.stop()
+    factory = new HeadlessNodeFactory({
+      ...factoryDeps,
+      ownership: createHeadlessNodeOwnership(),
+      capabilityTimeoutMs: 25,
+      codexSharedIdentity: () => new Promise<boolean>(() => {})
+    })
+
+    const reply = await factory.openAgent(
+      'term-source',
+      { agent: 'codex', prompt: 'bounded preflight' },
+      true
+    )
+    expect(reply).toMatchObject({ ok: true })
+    expect(pty.sends.at(-1)?.text).toBe(
+      "codex 'bounded preflight' --ask-for-approval untrusted"
+    )
+    await expect(factory.openTerminal('term-source', {}, true)).resolves.toMatchObject({ ok: true })
+  })
+
+  it('reports the real serialized creation handler as wedged without waiting behind it', async () => {
+    let releaseCaps!: (caps: ClaudeCliCaps) => void
+    const pendingCaps = new Promise<ClaudeCliCaps>((resolve) => {
+      releaseCaps = resolve
+    })
+    cliCaps = () => pendingCaps
+    const first = factory.openAgent('term-source', { agent: 'claude' }, true)
+    await Promise.resolve()
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-agent',
+      queued: 0
+    })
+
+    const second = factory.openTerminal('term-source', {}, true)
+    handlerNow += 101
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-agent',
+      activeForMs: 101,
+      queued: 1
+    })
+
+    releaseCaps({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      sessionIdFlag: false,
+      remoteControlFlag: false
+    })
+    await Promise.all([first, second])
+  })
+
+  it('defaults control-spawned agents to half-footprint compact geometry and persists overrides', async () => {
+    const compact = await factory.openAgent('term-source', { agent: 'claude' }, true)
+    const compactId = (compact.result as { id: string }).id
+    const normal = await factory.openAgent(
+      'term-source',
+      { agent: 'codex', size: 'normal' },
+      true
+    )
+    const normalId = (normal.result as { id: string }).id
+
+    const project = (await new WorkspaceStore().load({ sideline: false })).projects[0]
+    expect(project.nodes.find((node) => node.id === compactId)).toMatchObject({
+      size: { width: 440, height: 320 },
+      controlSize: 'compact'
+    })
+    expect(project.nodes.find((node) => node.id === normalId)).toMatchObject({
+      size: { width: 640, height: 440 },
+      controlSize: 'normal'
+    })
+    expect(published.find((node) => node.id === compactId)?.size).toEqual({
+      width: 440,
+      height: 320
+    })
+    expect(published.find((node) => node.id === normalId)?.size).toEqual({
+      width: 640,
+      height: 440
+    })
+
+    await expect(
+      factory.openAgent('term-source', { agent: 'claude', size: 'small' }, true)
+    ).resolves.toEqual({ ok: false, error: 'open-agent: --size must be compact or normal' })
+  })
+
+  it('resizes an owned terminal durably without respawning its PTY', async () => {
+    const opened = await factory.openAgent(
+      'term-source',
+      { agent: 'claude', size: 'normal' },
+      true
+    )
+    const id = (opened.result as { id: string }).id
+    const creates = pty.creates.length
+    const sends = pty.sends.length
+    published.length = 0
+
+    await expect(
+      factory.resize('term-source', { node: id }, true)
+    ).resolves.toEqual({ ok: false, error: 'resize requires --size compact|normal' })
+
+    await expect(
+      factory.resize('term-source', { node: id, size: 'compact' }, true)
+    ).resolves.toMatchObject({
+      ok: true,
+      result: { id, size: { width: 440, height: 320 } }
+    })
+    expect(pty.creates).toHaveLength(creates)
+    expect(pty.sends).toHaveLength(sends)
+    expect(published).toEqual([
+      expect.objectContaining({
+        id,
+        size: { width: 440, height: 320 },
+        controlSize: 'compact'
+      })
+    ])
+    expect((await store.load({ sideline: false })).projects[0].nodes
+      .find((node) => node.id === id)).toMatchObject({
+        size: { width: 440, height: 320 },
+        controlSize: 'compact'
+      })
+
+    await expect(
+      factory.resize('term-source', { node: id, size: 'normal' }, true)
+    ).resolves.toMatchObject({ result: { size: { width: 640, height: 440 } } })
+    await expect(
+      factory.resize('term-source', { node: id, size: 'wide' }, true)
+    ).resolves.toEqual({ ok: false, error: 'resize: --size must be compact or normal' })
   })
 
   it('re-grants an exact saved local project after a Server restart before cross-project open', async () => {
@@ -396,6 +694,7 @@ describe('HeadlessNodeFactory', () => {
       await factory.link('term-source', { to: 'term-foreign' }, true),
       await factory.group('term-source', { nodes: 'term-source,term-foreign' }),
       await factory.rename('term-source', { node: 'term-foreign', title: 'Stolen' }),
+      await factory.resize('term-source', { node: 'term-foreign', size: 'compact' }, true),
       await factory.color('term-source', { node: 'term-foreign', color: '#32d74b' }),
       await factory.sticky('term-source', { node: 'sticky-foreign', append: 'stolen' }),
       await factory.openAgent(
@@ -405,11 +704,20 @@ describe('HeadlessNodeFactory', () => {
       )
     ]
 
-    expect(replies.map((reply) => reply.ok)).toEqual([false, false, false, false, false, false])
+    expect(replies.map((reply) => reply.ok)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ])
     expect(replies.map((reply) => reply.error)).toEqual([
       expect.stringContaining('link-not-owner'),
       expect.stringContaining('group-not-owner'),
       expect.stringContaining('rename-not-owner'),
+      expect.stringContaining('resize-not-owner'),
       expect.stringContaining('color-not-owner'),
       expect.stringContaining('sticky-not-owner'),
       expect.stringContaining('open-agent-not-owner')
@@ -889,6 +1197,48 @@ describe('HeadlessNodeFactory', () => {
       agentId: agent
     })
     expect(pty.sends.at(-1)).toEqual({ nodeId: id, text: command })
+  })
+
+  it('feature-detects Claude Remote Control and safely passes an optional name', async () => {
+    remoteControlFlag = true
+
+    const unnamed = await factory.openAgent(
+      'term-source',
+      { agent: 'claude', 'remote-control': '' },
+      true
+    )
+    expect(unnamed.ok).toBe(true)
+    expect(pty.sends.at(-1)?.text).toBe('claude --remote-control')
+
+    const named = await factory.openAgent(
+      'term-source',
+      {
+        agent: 'claude',
+        prompt: 'watch this',
+        'remote-control': "  Overnight\nO'Brien  "
+      },
+      true
+    )
+    expect(named.ok).toBe(true)
+    expect(pty.sends.at(-1)?.text).toBe(
+      "claude 'watch this' --remote-control 'Overnight O'\\''Brien'"
+    )
+  })
+
+  it('refuses unsupported or non-Claude Remote Control before creating a node', async () => {
+    await expect(
+      factory.openAgent('term-source', { agent: 'claude', 'remote-control': '' }, true)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('remote-control-unsupported')
+    })
+    await expect(
+      factory.openAgent('term-source', { agent: 'codex', 'remote-control': '' }, true)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('remote-control-agent-refused')
+    })
+    expect(pty.creates).toEqual([])
   })
 
   it('never cold-spawns a persisted arm during boot reconciliation', async () => {
