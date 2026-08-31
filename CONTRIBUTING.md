@@ -130,9 +130,12 @@ creator ledger is process-local and must never be rebuilt from `.nodeterm/projec
 hook history, or a surviving tmux name: all are writable or stale. A restart therefore clears
 ownership, performs no node/session adoption, and leaves durable queued launches dormant. Metadata
 mutations and message delivery validate every target before writing anything; missing proof is a
-named refusal. Validate Server upgrades against a disposable data directory and port. Restarting a
-shared live service is
-an explicit operator action, never a test or an automatic repair step.
+named refusal. There is no agent ownership exception for global dead-card cleanup. The separately
+authenticated operator API and its periodic reaper share one engine; it skips SSH projects and
+removes a local terminal card only after two definitive absent-session probes. Failed or unreadable
+probes preserve it. Validate Server upgrades against a disposable data directory and port.
+Restarting a shared live service is an explicit operator action, never a test or an automatic
+repair step.
 
 **The Server operator API is a different principal, not an agent escape hatch.** `/opsapi/*` is
 TCP-loopback-only and authenticates only the `0600` `ops-token` bearer; browser cookies, the

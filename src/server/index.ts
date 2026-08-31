@@ -51,6 +51,7 @@ import { serverEditionControlHandler } from './control-unsupported'
 import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
 import { createHeadlessNodeOwnership } from './headless-node-factory'
 import { ServerNodeOps } from './node-ops'
+import { ServerDeadCardReaper } from './dead-card-reaper'
 import { createOpsApiHandler } from './ops-api'
 import { loadOrCreateOpsToken, OPS_TOKEN_FILE } from './ops-token'
 import { SpawnHandlerState } from './spawn-handler-state'
@@ -450,6 +451,10 @@ export async function startServer(
       publishCanvasMutation(projectId, { op: 'remove', id: nodeId }),
     mutationQueue: workspaceMutationQueue
   })
+  const deadCardReaper = new ServerDeadCardReaper({
+    intervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
+    sweep: (dryRun) => nodeOps.sweep(dryRun)
+  })
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
@@ -620,6 +625,7 @@ export async function startServer(
   await workspaceStore.load({ sideline: false }).catch((e) => {
     console.warn('[nodeterm-server] context-link initial workspace load failed', e)
   })
+  deadCardReaper.start()
 
   if (config.canvasControl === true) {
     try {
@@ -742,6 +748,7 @@ export async function startServer(
         projectSetupService.disposeAll()
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
+        deadCardReaper.stop()
         pressure.stop()
         ptyPressure.stop()
         canvasControl?.stop()
@@ -818,6 +825,7 @@ export async function startServer(
       projectSetupService.disposeAll()
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
+      deadCardReaper.stop()
       pressure.stop()
       ptyPressure.stop()
       canvasControl?.stop()
