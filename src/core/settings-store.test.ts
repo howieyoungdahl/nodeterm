@@ -96,6 +96,36 @@ describe('SettingsStore nested-default merge', () => {
     expect(store.get().openMarkdownPreview).toBe(false)
   })
 
+  describe('renderer-memory policy migration', () => {
+    const loadWith = (saved: Record<string, unknown>): Settings => {
+      writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(saved), 'utf-8')
+      const store = new SettingsStore()
+      store.init()
+      return store.get()
+    }
+
+    it('moves the materialized legacy 10-minute offscreen default to 1 minute once', () => {
+      const migrated = loadWith({ offscreenTerminalMinutes: 10 })
+      expect(migrated.offscreenTerminalMinutes).toBe(1)
+      expect(migrated.rendererMemoryPolicyMigrated).toBe(true)
+    })
+
+    it('preserves a custom offscreen window and the 50k tmux history', () => {
+      const migrated = loadWith({ offscreenTerminalMinutes: 4, tmuxScrollback: 50000 })
+      expect(migrated.offscreenTerminalMinutes).toBe(4)
+      expect(migrated.tmuxScrollback).toBe(50000)
+      expect(migrated.rendererMemoryPolicyMigrated).toBe(true)
+    })
+
+    it('keeps a stamped post-migration choice of 10 minutes', () => {
+      const migrated = loadWith({
+        offscreenTerminalMinutes: 10,
+        rendererMemoryPolicyMigrated: true
+      })
+      expect(migrated.offscreenTerminalMinutes).toBe(10)
+    })
+  })
+
   it('leaves an already-modern speech object alone', () => {
     writeFileSync(
       path.join(dir, 'settings.json'),

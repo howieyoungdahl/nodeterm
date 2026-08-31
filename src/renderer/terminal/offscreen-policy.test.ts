@@ -13,9 +13,9 @@ import {
 } from './offscreen-policy'
 
 describe('offscreen dispose policy', () => {
-  it('default is 10 minutes; 0 disables; undefined falls back to default', () => {
-    expect(OFFSCREEN_DISPOSE_MS_DEFAULT).toBe(600_000)
-    expect(offscreenDisposeMs(undefined)).toBe(600_000)
+  it('default is 1 minute; 0 disables; undefined falls back to default', () => {
+    expect(OFFSCREEN_DISPOSE_MS_DEFAULT).toBe(60_000)
+    expect(offscreenDisposeMs(undefined)).toBe(60_000)
     expect(offscreenDisposeMs(10)).toBe(600_000)
     expect(offscreenDisposeMs(0)).toBeNull()
     expect(offscreenDisposeMs(-3)).toBeNull()
@@ -105,16 +105,16 @@ describe('planOffscreenVisibility', () => {
 })
 
 describe('shouldDeferReleaseForEco — hibernate first, then release the viewer', () => {
-  // Defaults: the release fires at 10 minutes, the idle window closes at 30. Without the deferral
+  // Defaults: the release fires at 1 minute, the idle window closes at 30. Without the deferral
   // the release wins, unwires the node, and "finish a turn and pan away" never hibernates at all.
   const base = {
     ecoEnabled: true,
     resumableAgent: true,
     hibernated: false,
     idleKnown: true,
-    offscreenElapsedMs: 10 * 60_000,
+    offscreenElapsedMs: 1 * 60_000,
     idleMinutes: 30,
-    offscreenMinutes: 10
+    offscreenMinutes: 1
   }
 
   it('defers at the release deadline, so the bigger prize (the CLI) is still reachable', () => {
@@ -147,8 +147,8 @@ describe('shouldDeferReleaseForEco — hibernate first, then release the viewer'
   it('caps the wait at idle + offscreen, so a node that can NEVER hibernate is not stranded', () => {
     // A /cron node, one with a live subagent, one whose session id never arrived: nothing here
     // knows that, and the cap is what makes not knowing safe.
-    expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 40 * 60_000 - 1 })).toBe(true)
-    expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 40 * 60_000 })).toBe(false)
+    expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 31 * 60_000 - 1 })).toBe(true)
+    expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 31 * 60_000 })).toBe(false)
     expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 90 * 60_000 })).toBe(false)
   })
 })
