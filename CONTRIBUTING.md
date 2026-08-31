@@ -128,11 +128,13 @@ default, never something more destructive than the default.
 **A Server Edition agent owns only nodes it freshly opened in this server run.** The
 creator ledger is process-local and must never be rebuilt from `.nodeterm/project.json`, titles,
 hook history, or a surviving tmux name: all are writable or stale. A restart therefore clears
-ownership, performs no node/session adoption, and leaves durable queued launches dormant. Metadata
+ownership and leaves durable queued launches dormant. Before listening, Server boot classifies
+every saved local terminal id. A definitively absent backend becomes an inert dead card; a live or
+unreadable backend may be reached only through an attach-only primitive. Neither branch may
+attach-or-create, and only node ids created during the current Server run may fresh-spawn. Metadata
 mutations and message delivery validate every target before writing anything; missing proof is a
 named refusal. Validate Server upgrades against a disposable data directory and port. Restarting a
-shared live service is
-an explicit operator action, never a test or an automatic repair step.
+shared live service is an explicit operator action, never a test or an automatic repair step.
 
 **A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
 a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
