@@ -208,6 +208,9 @@ export function parseControlRequest(
   }
   if (v === 'open-browser' && !args.url) return { error: 'open-browser requires --url' }
   if (v === 'open-agent' && !args.agent) return { error: 'open-agent requires --agent <id>' }
+  if (args['remote-control'] !== undefined && (v !== 'open-agent' || args.agent !== 'claude')) {
+    return { error: '--remote-control is supported only by open-agent --agent claude' }
+  }
   if ((v === 'group' || v === 'arrange') && !args.nodes) return { error: `${v} requires --nodes <id,id>` }
   if (v === 'ungroup' && !args.group) return { error: 'ungroup requires --group <id>' }
   if (v === 'move' && !args.nodes) return { error: 'move requires --nodes <id,id>' }
@@ -302,7 +305,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
     '- `open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
-    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--remote-control[=NAME]] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
@@ -330,6 +333,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  On Server Edition, `launch-timeout` means the card is durable but its PTY or initial command',
     '  did not settle. Later creations remain available; do not repeat the timed-out open because',
     '  its non-cancellable launch may still finish.',
+    '  Server Edition also accepts `--remote-control[=NAME]` for `--agent claude` only. It emits',
+    '  the launch flag only when the installed Claude CLI advertises support; otherwise it refuses',
+    '  before creating a node. Desktop control refuses this Server-only option. In either case,',
+    '  open Claude normally and run `/rc [name]` inside the session as the manual fallback.',
     '- `open-project --cwd </abs/path> [--name N] [--color C]` — register (or find) the project for a',
     '  local directory; the reply carries `{ projectId, name, cwd, created }`. Idempotent: the same',
     '  cwd always returns the same project, never a duplicate. Creating/adding asks the user to',
@@ -702,7 +709,7 @@ Verbs:
   is also what to run when you are unsure whether the control endpoint is alive.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]\` — open N plain terminals (default 1).
 - \`open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--remote-control[=NAME]] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
@@ -744,6 +751,10 @@ Verbs:
   On Server Edition, \`launch-timeout\` means the card is durable but its PTY or initial command did
   not settle. Later creations remain available; do not repeat the timed-out open because its
   non-cancellable launch may still finish.
+  Server Edition also accepts \`--remote-control[=NAME]\` for \`--agent claude\` only. It emits
+  the launch flag only when the installed Claude CLI advertises support; otherwise it refuses
+  before creating a node. Desktop control refuses this Server-only option. In either case, open
+  Claude normally and run \`/rc [name]\` inside the session as the manual fallback.
 - \`open-project --cwd </abs/path> [--name N] [--color C]\` — register (or find) the project for a
   local directory; the reply carries \`{ projectId, name, cwd, created }\`. Idempotent: the same
   cwd always returns the same project, never a duplicate — and \`--name\`/\`--color\` apply only

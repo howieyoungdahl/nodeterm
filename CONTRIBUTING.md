@@ -254,6 +254,12 @@ inherit a builtin harness, so add the capability and its one shared leaf (`src/s
 let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and
 eventually drifts.
 
+**Never guess a local CLI launch flag from its version.** Probe the installed CLI's help once,
+carry the answer through the shared capability bag, and refuse before node creation when a requested
+option is absent. Keep the command assembler, both generated canvas-control instruction bodies, and
+the operator-facing edition docs in the same PR. Capability tests must inspect help and command
+assembly without starting an externally visible provider session.
+
 ## Testing
 
 `npm test` must pass, and `npm run typecheck` is the fastest gate.

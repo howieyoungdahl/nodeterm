@@ -638,10 +638,18 @@ calls remain available immediately. If the card is explicitly closed or removed 
 operator API while creation is unresolved, the factory remembers that cancellation and destroys an
 eventual late backend a second time, so releasing the transaction lock cannot create an orphan
 session.
-Claude CLI capability discovery is
-bounded at five seconds and degrades to no optional flags. Server Codex launches use the edition's
-deliberate no-shared-app-server answer directly and therefore start the ordinary `codex` CLI rather
-than waiting on the desktop-only capability initializer.
+Claude CLI capability discovery is bounded at five seconds and degrades to no optional flags.
+Server Codex shared-identity lookup is bounded by the same preflight policy and consumes the
+capability refreshed during Server boot; a missing or failed answer degrades that launch to the
+ordinary `codex` CLI without blocking later creation calls.
+
+`open-agent --agent claude --remote-control[=NAME]` starts a Claude session with Remote Control so
+it can be continued from claude.ai. Server Edition checks the installed CLI's own `--help` output
+before adding the launch flag; if the option is absent, it returns
+`remote-control-unsupported` before persisting a node. The option is Claude-only and requires the
+normal Claude.ai subscription and authentication. As a manual fallback, open Claude normally and
+run `/rc [name]` inside the session. Do not exercise this path in automated tests: command assembly
+and capability detection are testable without creating an external Remote Control session.
 
 ### Managed Claude accounts
 

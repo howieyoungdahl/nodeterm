@@ -102,6 +102,7 @@ describe('HeadlessNodeFactory', () => {
   let cliCaps: () => Promise<ClaudeCliCaps>
   let handlerNow: number
   let spawnHandlerState: SpawnHandlerState
+  let remoteControlFlag: boolean
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -122,11 +123,13 @@ describe('HeadlessNodeFactory', () => {
     removed = []
     publishedProjects = []
     codexSharedIdentity = false
+    remoteControlFlag = false
     cliCaps = async () => ({
       version: null,
       autoPermissionMode: false,
       fullscreenTui: false,
-      sessionIdFlag: false
+      sessionIdFlag: false,
+      remoteControlFlag
     })
     handlerNow = 1_000
     spawnHandlerState = new SpawnHandlerState({
@@ -1106,6 +1109,48 @@ describe('HeadlessNodeFactory', () => {
       agentId: agent
     })
     expect(pty.sends.at(-1)).toEqual({ nodeId: id, text: command })
+  })
+
+  it('feature-detects Claude Remote Control and safely passes an optional name', async () => {
+    remoteControlFlag = true
+
+    const unnamed = await factory.openAgent(
+      'term-source',
+      { agent: 'claude', 'remote-control': '' },
+      true
+    )
+    expect(unnamed.ok).toBe(true)
+    expect(pty.sends.at(-1)?.text).toBe('claude --remote-control')
+
+    const named = await factory.openAgent(
+      'term-source',
+      {
+        agent: 'claude',
+        prompt: 'watch this',
+        'remote-control': "  Overnight\nO'Brien  "
+      },
+      true
+    )
+    expect(named.ok).toBe(true)
+    expect(pty.sends.at(-1)?.text).toBe(
+      "claude 'watch this' --remote-control 'Overnight O'\\''Brien'"
+    )
+  })
+
+  it('refuses unsupported or non-Claude Remote Control before creating a node', async () => {
+    await expect(
+      factory.openAgent('term-source', { agent: 'claude', 'remote-control': '' }, true)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('remote-control-unsupported')
+    })
+    await expect(
+      factory.openAgent('term-source', { agent: 'codex', 'remote-control': '' }, true)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('remote-control-agent-refused')
+    })
+    expect(pty.creates).toEqual([])
   })
 
   it('never cold-spawns a persisted arm during boot reconciliation', async () => {

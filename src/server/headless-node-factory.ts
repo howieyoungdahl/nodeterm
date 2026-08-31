@@ -1138,7 +1138,16 @@ export class HeadlessNodeFactory {
         args,
         verb === 'open-terminal'
           ? new Set(['count', 'cwd', 'cmd', 'after', 'project'])
-          : new Set(['agent', 'count', 'cwd', 'prompt', 'after', 'project', 'model'])
+          : new Set([
+              'agent',
+              'count',
+              'cwd',
+              'prompt',
+              'after',
+              'project',
+              'model',
+              'remote-control'
+            ])
       )
       if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
       if (!verified) {
@@ -1180,6 +1189,21 @@ export class HeadlessNodeFactory {
         return {
           ok: false,
           error: 'open-agent: Server Edition v1 supports --agent claude|codex|gemini'
+        }
+      }
+      const remoteControl = args['remote-control']
+      if (remoteControl !== undefined && agentId !== 'claude') {
+        return {
+          ok: false,
+          error: 'remote-control-agent-refused: --remote-control requires --agent claude'
+        }
+      }
+      if (remoteControl !== undefined && caps?.remoteControlFlag !== true) {
+        return {
+          ok: false,
+          error:
+            'remote-control-unsupported: the installed Claude CLI does not advertise ' +
+            '`--remote-control`; open Claude normally and run `/rc [name]` inside the session'
         }
       }
       // The Server shell owns the same shared Codex app-server spine as desktop. Ask its boot-time
@@ -1242,7 +1266,8 @@ export class HeadlessNodeFactory {
               sessionIdFlagSupported,
               launchCmdOverride: settings.agentLaunchCommands?.[agentId as BuiltinAgentId],
               sharedIdentity: codexSharedIdentity,
-              model: args.model
+              model: args.model,
+              remoteControl
             },
             this.deps.env ?? process.env
           ).command

@@ -1357,6 +1357,12 @@ else, and its context links must keep classifying across restarts).
   target's verified `newTurn`/`working` hook remains the receipt that permits `delivered`; a retry
   that produces no receipt becomes `stalled`. Keep the retry bounded: repeating Enter can submit a
   human draft after the intended envelope has already moved.
+  **Claude Remote Control launches (2026-08):** Server `open-agent --agent claude` accepts
+  `--remote-control[=NAME]`. `claudeCliCaps()` detects the exact option token in the installed
+  CLI's `--help`; absence is a named `remote-control-unsupported` refusal before node persistence,
+  never a guessed version floor or a launch with an unknown flag. The optional name is normalized
+  to one line and shell-quoted by the shared command assembler. Desktop canvas control refuses the
+  Server-only flag explicitly; `/rc [name]` inside an ordinary Claude session is the manual path.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
   the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
   `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim

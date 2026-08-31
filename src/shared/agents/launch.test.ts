@@ -82,6 +82,28 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
       ).command
     ).toBe("claude 'fix' --permission-mode plan --model 'anthropic/claude-sonnet-4'")
   })
+
+  it('adds Claude Remote Control with an optional normalized, shell-safe name', () => {
+    expect(
+      assembleLaunchCommand({ agentId: 'claude', remoteControl: '' }, ENV).command
+    ).toBe('claude --remote-control')
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'claude',
+          initialPrompt: 'watch this',
+          remoteControl: "  Overnight\nO'Brien  "
+        },
+        ENV
+      ).command
+    ).toBe("claude 'watch this' --remote-control 'Overnight O'\\''Brien'")
+  })
+
+  it('does not apply the Claude-only Remote Control flag to another harness', () => {
+    expect(
+      assembleLaunchCommand({ agentId: 'codex', remoteControl: 'wrong provider' }, ENV).command
+    ).toBe('codex')
+  })
 })
 
 describe('assembleResumeCommand — Copilot', () => {
