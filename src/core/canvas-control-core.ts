@@ -327,6 +327,9 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  and copilot (and custom agents based on them); any other agent ignores it and launches',
     '  exactly as it would without the flag. The id is passed to the CLI as-is, so a name that',
     '  agent does not recognise fails inside the session, not at open time — name a model you know.',
+    '  On Server Edition, `launch-timeout` means the card is durable but its PTY or initial command',
+    '  did not settle. Later creations remain available; do not repeat the timed-out open because',
+    '  its non-cancellable launch may still finish.',
     '- `open-project --cwd </abs/path> [--name N] [--color C]` — register (or find) the project for a',
     '  local directory; the reply carries `{ projectId, name, cwd, created }`. Idempotent: the same',
     '  cwd always returns the same project, never a duplicate. Creating/adding asks the user to',
@@ -738,6 +741,9 @@ Verbs:
   as it would have — the flag is never an error, so a mixed fan-out needs no special-casing. The
   id goes to the CLI verbatim: an unknown name fails inside the session on its first turn, not at
   open time, so name a model you know that CLI accepts rather than guessing.
+  On Server Edition, \`launch-timeout\` means the card is durable but its PTY or initial command did
+  not settle. Later creations remain available; do not repeat the timed-out open because its
+  non-cancellable launch may still finish.
 - \`open-project --cwd </abs/path> [--name N] [--color C]\` — register (or find) the project for a
   local directory; the reply carries \`{ projectId, name, cwd, created }\`. Idempotent: the same
   cwd always returns the same project, never a duplicate — and \`--name\`/\`--color\` apply only

@@ -141,8 +141,9 @@ canvas-control creator ownership strict. A dead-card sweep requires two definiti
 probes, preserves `unknown` on every read failure, and shares one mutation engine with the periodic
 reaper. Server-owned operator and agent workspace transactions also share one FIFO; separate
 load/save queues can overwrite each other with stale snapshots. `/opsapi/health` must snapshot
-spawn-handler state without awaiting the serialized handler it diagnoses. Credentials still never
-ride argv — operator clients feed curl headers via stdin or another non-argv channel.
+spawn-handler state without awaiting the preparation or parallel external launches it diagnoses;
+timed-out non-cancellable launches remain visible until they actually settle. Credentials still
+never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
 
 **A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
 a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
@@ -180,6 +181,15 @@ worse, leaks the server-starter's value into everyone else) after that. That is 
 shipped: managed-account `CLAUDE_CONFIG_DIR` leaked into system-account sessions. New per-session
 env either joins `ACCOUNT_SCOPE_UPDATE_ENV` / the gateway list, or rides `-e` — and gets a
 real-tmux test (`account-env.realtmux.test.ts` is the pattern).
+
+**Do not hold a workspace transaction lock across PTY or subprocess work.** Save and publish the
+durable node while serialized, release the lock, then start external work behind a bounded deadline.
+PTY creation is not cancellable: a timeout must preserve the card, report that the operation may
+finish late, and tell the caller not to repeat. Any capability promise used on this path needs its
+own bounded fail-safe; an edition-specific `false` answer must not be replaced with a getter whose
+initializer that edition never runs. When close can race the unlocked external phase, retain a
+per-node cancellation until the late operation settles and destroy its exact backend again; the
+first destroy may have run before anything existed.
 
 **A new keyboard chord has to survive the shells, not just the renderer.** The application menu is
 ours (`buildAppMenu` in `main/index.ts`), but its command-style accelerators — ⌘Q, ⌘M, ⌘W, ⌘0, ⌘⇧B,
