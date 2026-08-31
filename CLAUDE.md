@@ -1293,6 +1293,18 @@ else, and its context links must keep classifying across restarts).
   `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
   node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
   identity never defaults to Claude.
+  **Creation liveness (2026-08 incident hardening):** the serialized section of
+  `HeadlessNodeFactory.open` ends after the card is saved/published. PTY creation and initial-command
+  delivery run outside it behind one 15s deadline, so an unresponsive tmux/session-host operation
+  answers `launch-timeout` without wedging later workspace mutations. The backend call cannot be
+  cancelled; its card stays durable and the response says not to repeat because it may finish late.
+  A concurrent close/Server stop marks an in-flight node cancelled; if the non-cancellable create
+  resolves after the first destroy already found nothing, launch cleanup destroys the exact backend
+  again. Keep this two-pass guard when moving work outside the lock or closed cards leak tmux husks.
+  Capability preflight is separately bounded at 5s. In particular, Server canvas control must use
+  its direct `shared:false` Codex answer: `codexIdentityCaps()` waits for the desktop-only
+  `refreshCodexIdentityCaps()` initializer and caused the first Codex open to hold the old global
+  lock forever while message verbs, which bypassed the factory, kept answering.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
   the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
   `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim

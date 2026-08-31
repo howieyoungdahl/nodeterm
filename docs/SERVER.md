@@ -548,6 +548,18 @@ missing `agentId` never means Claude.
 Validate upgrades with a disposable `NODETERM_DATA_DIR` and port. Restarting a shared live Server
 service is an explicit operator action; it is not part of a test, repair, or boot-rescue flow.
 
+Node creation persists and publishes the card under the serialized workspace transaction, then
+releases that transaction before starting its PTY or typing the initial command. Those external
+steps have a 15-second total deadline. `launch-timeout` means the durable card remains but startup
+did not settle; the underlying operation cannot be cancelled and may still finish, so do not repeat
+the request. Other creation calls remain available immediately. If the card is explicitly closed
+while creation is unresolved, the factory remembers that cancellation and destroys an eventual
+late backend a second time, so releasing the transaction lock cannot create an orphan session.
+Claude CLI capability discovery is
+bounded at five seconds and degrades to no optional flags. Server Codex launches use the edition's
+deliberate no-shared-app-server answer directly and therefore start the ordinary `codex` CLI rather
+than waiting on the desktop-only capability initializer.
+
 ### Managed Claude accounts
 
 Managed Claude accounts (several logged-in Claude identities side by side, each with its own

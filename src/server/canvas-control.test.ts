@@ -51,7 +51,7 @@ describe('initServerCanvasControl', () => {
     fs.rmSync(dataDir, { recursive: true, force: true })
   })
 
-  it('installs only under temp data when integrations are gated, and enforces messaging switch off', async () => {
+  it('gates installs/messaging and defaults Server Codex to a prompt bare launch', async () => {
     const workspace: Workspace = {
       version: 2,
       activeProjectId: 'p1',
@@ -172,6 +172,41 @@ describe('initServerCanvasControl', () => {
     })
     expect(paneOwner).not.toHaveBeenCalled()
     expect(sendEnvelope).not.toHaveBeenCalled()
+
+    // Production Server registers "no shared Codex identity" and never runs the desktop
+    // refreshCodexIdentityCaps boot path. The headless factory must use that direct answer rather
+    // than await the unresolved desktop getter while holding its workspace transaction queue.
+    runtime.stop()
+    runtime = await initServerCanvasControl({
+      workspaceStore: store,
+      ptyManager: pty,
+      settings,
+      boardLog: { append: async () => false },
+      cliCaps: async () => ({
+        version: null,
+        autoPermissionMode: false,
+        fullscreenTui: false,
+        sessionIdFlag: false
+      }),
+      installAgentIntegrations: false
+    })
+    sendText.mockClear()
+    const deadline = Symbol('unresolved Server Codex capability')
+    const bareOpen = runtime.handler({
+      verb: 'open-agent',
+      nodeId: 'source',
+      args: { agent: 'codex', prompt: 'must not wedge' },
+      verified: true
+    })
+    const bareReply = await Promise.race([
+      bareOpen,
+      new Promise<typeof deadline>((resolve) => setTimeout(() => resolve(deadline), 1_000))
+    ])
+    expect(bareReply).not.toBe(deadline)
+    expect(bareReply).toMatchObject({ ok: true })
+    expect(sendText.mock.calls.at(-1)?.[1]).toBe(
+      "codex 'must not wedge' --ask-for-approval on-request"
+    )
   })
 
   it('wires permitted delivery through paste-settle-submit on the first fresh pane message', async () => {

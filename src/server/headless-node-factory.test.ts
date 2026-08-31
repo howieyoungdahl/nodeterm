@@ -19,6 +19,7 @@ import {
 import {
   createHeadlessNodeOwnership,
   HeadlessNodeFactory,
+  type HeadlessNodeFactoryDeps,
   type HeadlessNodeOwnership,
   type HeadlessPty
 } from './headless-node-factory'
@@ -93,6 +94,7 @@ describe('HeadlessNodeFactory', () => {
   let removed: string[]
   let publishedProjects: Workspace['projects']
   let factory: HeadlessNodeFactory
+  let factoryDeps: HeadlessNodeFactoryDeps
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
 
@@ -145,7 +147,7 @@ describe('HeadlessNodeFactory', () => {
       ]
     }
     await store.save(initial)
-    factory = new HeadlessNodeFactory({
+    factoryDeps = {
       workspaceStore: store,
       ptyManager: pty,
       settings,
@@ -161,7 +163,8 @@ describe('HeadlessNodeFactory', () => {
       publishNode: (_projectId, node) => published.push(node),
       publishRemoval: (_projectId, nodeId) => removed.push(nodeId),
       publishProject: (project) => publishedProjects.push(structuredClone(project))
-    })
+    }
+    factory = new HeadlessNodeFactory(factoryDeps)
   })
 
   afterEach(() => {
@@ -204,6 +207,122 @@ describe('HeadlessNodeFactory', () => {
     expect(reloaded.projects[0].nodes.find((node) => node.id === id)).toMatchObject({
       cwd: projectDir
     })
+  })
+
+  it('does not let one hung PTY creation block a later node creation', async () => {
+    let releaseFirst!: (result: PtyCreateResult) => void
+    let markFirstEntered!: () => void
+    const firstEntered = new Promise<void>((resolve) => (markFirstEntered = resolve))
+    const createNormally = pty.createHeadless.bind(pty)
+    vi.spyOn(pty, 'createHeadless')
+      .mockImplementationOnce((options) => {
+        pty.creates.push(options)
+        markFirstEntered()
+        return new Promise<PtyCreateResult>((resolve) => (releaseFirst = resolve))
+      })
+      .mockImplementation(createNormally)
+
+    const first = factory.openTerminal('term-source', {}, true)
+    await firstEntered
+    const second = factory.openTerminal('term-source', {}, true)
+    const wedged = Symbol('creation remained behind the first PTY')
+    const observed = await Promise.race([
+      second,
+      new Promise<typeof wedged>((resolve) => setTimeout(() => resolve(wedged), 500))
+    ])
+
+    // Always release/consume both requests so the red pre-fix run leaves no background promise.
+    releaseFirst({ sessionId: 'pty-first', fresh: true, persistent: true })
+    await first
+    const secondReply = observed === wedged ? await second : observed
+
+    expect(observed).not.toBe(wedged)
+    expect(secondReply).toMatchObject({ ok: true })
+    expect(pty.creates).toHaveLength(2)
+  })
+
+  it('kills a backend that appears after its in-flight card was closed', async () => {
+    let releaseCreate!: (result: PtyCreateResult) => void
+    let markCreateEntered!: () => void
+    const createEntered = new Promise<void>((resolve) => (markCreateEntered = resolve))
+    vi.spyOn(pty, 'createHeadless').mockImplementationOnce((options) => {
+      pty.creates.push(options)
+      markCreateEntered()
+      return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
+    })
+
+    const opening = factory.openTerminal('term-source', {}, true)
+    await createEntered
+    const nodeId = pty.creates[0].persistKey as string
+    await expect(factory.close('term-source', { node: nodeId }, true)).resolves.toMatchObject({
+      ok: true
+    })
+
+    // The non-cancellable create resolves AFTER close's first absent-backend destroy. The launch
+    // guard must issue an exact second destroy instead of leaving this late backend orphaned.
+    pty.live.add(nodeId)
+    releaseCreate({ sessionId: `pty-${nodeId}`, fresh: true, persistent: true })
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-failed')
+    })
+    expect(pty.sends).toEqual([])
+    expect(pty.live.has(nodeId)).toBe(false)
+    expect(pty.destroys.filter((entry) => entry.nodeId === nodeId)).toHaveLength(2)
+    expect(pty.destroys.at(-1)).toMatchObject({ nodeId, wasLive: true })
+    const workspace = await store.load({ sideline: false })
+    expect(workspace.projects[0].nodes.some((node) => node.id === nodeId)).toBe(false)
+  })
+
+  it('bounds a hung launch with a named timeout and leaves later creations available', async () => {
+    factory.stop()
+    factory = new HeadlessNodeFactory({
+      ...factoryDeps,
+      ownership: createHeadlessNodeOwnership(),
+      launchTimeoutMs: 25
+    })
+    const createNormally = pty.createHeadless.bind(pty)
+    vi.spyOn(pty, 'createHeadless')
+      .mockImplementationOnce((options) => {
+        pty.creates.push(options)
+        return new Promise<PtyCreateResult>(() => {})
+      })
+      .mockImplementation(createNormally)
+
+    const timedOut = await factory.openTerminal('term-source', {}, true)
+    expect(timedOut).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-timeout'),
+      result: {
+        timedOut: [expect.stringMatching(/^term-/)]
+      }
+    })
+    expect(timedOut.error).toContain('later creations remain available')
+    expect(timedOut.error).toContain('do not repeat')
+
+    await expect(factory.openTerminal('term-source', {}, true)).resolves.toMatchObject({ ok: true })
+    expect(pty.creates).toHaveLength(2)
+  })
+
+  it('bounds a missing Codex capability answer and degrades to the ordinary CLI', async () => {
+    factory.stop()
+    factory = new HeadlessNodeFactory({
+      ...factoryDeps,
+      ownership: createHeadlessNodeOwnership(),
+      capabilityTimeoutMs: 25,
+      codexSharedIdentity: () => new Promise<boolean>(() => {})
+    })
+
+    const reply = await factory.openAgent(
+      'term-source',
+      { agent: 'codex', prompt: 'bounded preflight' },
+      true
+    )
+    expect(reply).toMatchObject({ ok: true })
+    expect(pty.sends.at(-1)?.text).toBe(
+      "codex 'bounded preflight' --ask-for-approval untrusted"
+    )
+    await expect(factory.openTerminal('term-source', {}, true)).resolves.toMatchObject({ ok: true })
   })
 
   it('re-grants an exact saved local project after a Server restart before cross-project open', async () => {
