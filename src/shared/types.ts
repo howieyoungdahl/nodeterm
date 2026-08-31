@@ -246,6 +246,14 @@ export interface PtyCreateResult {
    */
   closed?: { by: number | null }
   /**
+   * REFUSED: this card existed when the Server process booted, but its local persistent backend
+   * was definitively absent. Nothing was spawned (`sessionId` is empty). The renderer leaves the
+   * card inert so the dead-card reaper can remove it instead of resurrecting a context-free shell.
+   *
+   * Server-only. New cards created during this process run still use the ordinary fresh-spawn path.
+   */
+  deadCard?: true
+  /**
    * REFUSED: `requireRemote` was set and no remote spawn was possible (no live ControlMaster, or
    * no `ssh` executable), so nothing was spawned (`sessionId` is empty) — see
    * `PtyCreateOptions.requireRemote` for what used to happen instead. The renderer shows the

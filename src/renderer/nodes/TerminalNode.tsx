@@ -767,6 +767,11 @@ interface CoState {
    */
   ended: boolean
   /**
+   * Server boot proved that this persisted card has no backend. It stays inert and reap-eligible;
+   * remounts must not call create again because that would turn restart recovery into resurrection.
+   */
+  deadCard: boolean
+  /**
    * This is an SSH-project terminal and its host is UNREACHABLE, so no session was spawned —
    * neither here nor, crucially, locally (see `PtyCreateOptions.requireRemote`).
    *
@@ -806,6 +811,7 @@ const NO_CO: CoState = {
   letterbox: false,
   closed: null,
   ended: false,
+  deadCard: false,
   offline: false,
   spawnError: null,
   staleCwd: false
@@ -948,6 +954,7 @@ function setCo(key: string, patch: Partial<CoState>): void {
     next.letterbox === prev.letterbox &&
     next.closed === prev.closed &&
     next.ended === prev.ended &&
+    next.deadCard === prev.deadCard &&
     next.offline === prev.offline &&
     next.spawnError === prev.spawnError &&
     next.staleCwd === prev.staleCwd
@@ -2650,7 +2657,7 @@ export function TerminalNode({
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
-    const noSpawn = !!getCo(termKey).closed || getCo(termKey).ended
+    const noSpawn = !!getCo(termKey).closed || getCo(termKey).ended || getCo(termKey).deadCard
     const scrollbackPromise =
       parked || noSpawn
         ? Promise.resolve('')
@@ -2732,12 +2739,23 @@ export function TerminalNode({
           accountFallback: fellBack,
           staleCwd,
           closed,
+          deadCard,
           screen,
           cursor,
           coAttachMouse,
           persistent,
           unavailable
         }) => {
+        // REFUSED: this card predates the Server process and its backend was definitively absent.
+        // Keep it inert and reap-eligible; a remount must not turn it into a context-free shell.
+        if (deadCard) {
+          setCo(termKey, { deadCard: true })
+          if (!disposed)
+            term.write(
+              '\r\n\x1b[90m[session backend did not survive the server restart — this dead card was not respawned]\x1b[0m\r\n'
+            )
+          return
+        }
         // REFUSED: `requireRemote` and core could not spawn remotely (the master died inside our
         // round-trip, or `ssh` is missing). Nothing was spawned — land in the same offline state
         // the near-side guard above produces, retry included.
@@ -4875,7 +4893,12 @@ export function TerminalNode({
             </button>
           </div>
         )}
-        {!co.closed && !co.ended && co.spawnError && (
+        {!co.closed && !co.ended && co.deadCard && (
+          <div className="term-node__closed nodrag">
+            <span>Session backend did not survive the server restart. This dead card was not respawned.</span>
+          </div>
+        )}
+        {!co.closed && !co.ended && !co.deadCard && co.spawnError && (
           <div className="term-node__closed nodrag">
             <span>This terminal could not be started. {co.spawnError}</span>
             <button className="term-node__reopen" onClick={retrySpawn}>
@@ -4883,7 +4906,7 @@ export function TerminalNode({
             </button>
           </div>
         )}
-        {!co.closed && !co.ended && !co.spawnError && co.offline && (
+        {!co.closed && !co.ended && !co.deadCard && !co.spawnError && co.offline && (
           <div className="term-node__closed nodrag">
             <span>
               Not connected to {data.ssh ? `${(data.ssh as SshConnection).user}@${(data.ssh as SshConnection).host}` : 'the host'} — this session was not started
@@ -4898,7 +4921,7 @@ export function TerminalNode({
             terminal underneath is alive and may be mid-work. Top edge on purpose: every shell
             and agent CLI writes its input line at the BOTTOM, and covering the prompt would be
             worse than covering the oldest visible output row. */}
-        {!co.closed && !co.ended && !co.spawnError && !co.offline && co.staleCwd && !offscreenDown && (
+        {!co.closed && !co.ended && !co.deadCard && !co.spawnError && !co.offline && co.staleCwd && !offscreenDown && (
           <div className="term-node__stalecwd nodrag">
             <span className="term-node__stalecwd-text">
               This terminal&apos;s folder was deleted (or replaced) — the shell&apos;s working
