@@ -126,6 +126,19 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('open-agent')).toBe(false)
   })
 
+  it('accepts Remote Control only on open-agent --agent claude', () => {
+    expect(parseControlRequest('open-agent', { agent: 'claude', 'remote-control': '' })).toEqual({
+      verb: 'open-agent',
+      args: { agent: 'claude', 'remote-control': '' }
+    })
+    expect(parseControlRequest('open-agent', { agent: 'codex', 'remote-control': '' })).toEqual({
+      error: '--remote-control is supported only by open-agent --agent claude'
+    })
+    expect(parseControlRequest('open-claude', { 'remote-control': '' })).toEqual({
+      error: '--remote-control is supported only by open-agent --agent claude'
+    })
+  })
+
   it('open-worktree requires --branch, close-worktree requires --group; neither destructive', () => {
     expect(parseControlRequest('open-worktree', {})).toEqual({ error: 'open-worktree requires --branch <name>' })
     expect(parseControlRequest('open-worktree', { branch: 'feat/x' })).toEqual({
@@ -344,6 +357,16 @@ describe('parseControlRequest', () => {
       expect(body.toLowerCase()).toContain('ignore')
       // Per-role model is what lets ONE spawn-team call mix tiers; the JSON example must show it.
       expect(body).toContain('"model"')
+    }
+  })
+
+  it('both agent-facing texts document the feature-detected Remote Control launch and fallback', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('--remote-control[=NAME]')
+      expect(body).toContain('--agent claude')
+      expect(body).toContain('installed Claude CLI advertises support')
+      expect(body).toContain('/rc [name]')
+      expect(body).toContain('before creating a node')
     }
   })
 

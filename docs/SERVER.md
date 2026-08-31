@@ -548,6 +548,14 @@ missing `agentId` never means Claude.
 Validate upgrades with a disposable `NODETERM_DATA_DIR` and port. Restarting a shared live Server
 service is an explicit operator action; it is not part of a test, repair, or boot-rescue flow.
 
+`open-agent --agent claude --remote-control[=NAME]` starts a Claude session with Remote Control so
+it can be continued from claude.ai. Server Edition checks the installed CLI's own `--help` output
+before adding the launch flag; if the option is absent, it returns
+`remote-control-unsupported` before persisting a node. The option is Claude-only and requires the
+normal Claude.ai subscription and authentication. As a manual fallback, open Claude normally and
+run `/rc [name]` inside the session. Do not exercise this path in automated tests: command assembly
+and capability detection are testable without creating an external Remote Control session.
+
 ### Managed Claude accounts
 
 Managed Claude accounts (several logged-in Claude identities side by side, each with its own
