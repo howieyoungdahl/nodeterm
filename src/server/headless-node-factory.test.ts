@@ -10,6 +10,7 @@ import { WorkspaceStore } from '../core/workspace-store'
 import type { AgentState } from '../shared/agents/normalize'
 import {
   DEFAULT_SETTINGS,
+  type ClaudeCliCaps,
   type CanvasNodeState,
   type PtyCreateOptions,
   type PtyCreateResult,
@@ -22,6 +23,7 @@ import {
   type HeadlessNodeOwnership,
   type HeadlessPty
 } from './headless-node-factory'
+import { SpawnHandlerState } from './spawn-handler-state'
 
 class FakePty implements HeadlessPty {
   readonly creates: PtyCreateOptions[] = []
@@ -34,8 +36,6 @@ class FakePty implements HeadlessPty {
   }> = []
   readonly live = new Set<string>()
   readonly alreadyDead = new Set<string>()
-  readonly unreadable = new Set<string>()
-  readonly probes: string[] = []
 
   async createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult> {
     this.creates.push(options)
@@ -44,8 +44,6 @@ class FakePty implements HeadlessPty {
   }
 
   async sessionExists(persistKey: string): Promise<boolean> {
-    this.probes.push(persistKey)
-    if (this.unreadable.has(persistKey)) throw new Error('probe unavailable')
     return this.live.has(persistKey)
   }
 
@@ -99,9 +97,9 @@ describe('HeadlessNodeFactory', () => {
   let factory: HeadlessNodeFactory
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
-  let reapTick: (() => void) | undefined
-  let reapDelay: number | undefined
-  let reapCleared: boolean
+  let cliCaps: () => Promise<ClaudeCliCaps>
+  let handlerNow: number
+  let spawnHandlerState: SpawnHandlerState
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -122,9 +120,17 @@ describe('HeadlessNodeFactory', () => {
     removed = []
     publishedProjects = []
     codexSharedIdentity = false
-    reapTick = undefined
-    reapDelay = undefined
-    reapCleared = false
+    cliCaps = async () => ({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      sessionIdFlag: false
+    })
+    handlerNow = 1_000
+    spawnHandlerState = new SpawnHandlerState({
+      now: () => handlerNow,
+      wedgeAfterMs: 100
+    })
     ownership = createHeadlessNodeOwnership()
     ownership.record('term-upstream', {
       sourceNodeId: 'term-source',
@@ -159,27 +165,14 @@ describe('HeadlessNodeFactory', () => {
       workspaceStore: store,
       ptyManager: pty,
       settings,
-      cliCaps: async () => ({
-        version: null,
-        autoPermissionMode: false,
-        fullscreenTui: false,
-        sessionIdFlag: false
-      }),
+      cliCaps: () => cliCaps(),
       codexSharedIdentity: async () => codexSharedIdentity,
       ownership,
+      spawnHandlerState,
       stateOf: (id) => states[id],
       publishNode: (_projectId, node) => published.push(node),
       publishRemoval: (_projectId, nodeId) => removed.push(nodeId),
-      publishProject: (project) => publishedProjects.push(structuredClone(project)),
-      deadCardReapIntervalMs: 1_234,
-      setReapInterval: (cb, ms) => {
-        reapTick = cb
-        reapDelay = ms
-        return { unref: vi.fn() } as unknown as ReturnType<typeof setInterval>
-      },
-      clearReapInterval: () => {
-        reapCleared = true
-      }
+      publishProject: (project) => publishedProjects.push(structuredClone(project))
     })
   })
 
@@ -223,6 +216,38 @@ describe('HeadlessNodeFactory', () => {
     expect(reloaded.projects[0].nodes.find((node) => node.id === id)).toMatchObject({
       cwd: projectDir
     })
+  })
+
+  it('reports the real serialized creation handler as wedged without waiting behind it', async () => {
+    let releaseCaps!: (caps: ClaudeCliCaps) => void
+    const pendingCaps = new Promise<ClaudeCliCaps>((resolve) => {
+      releaseCaps = resolve
+    })
+    cliCaps = () => pendingCaps
+    const first = factory.openAgent('term-source', { agent: 'claude' }, true)
+    await Promise.resolve()
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-agent',
+      queued: 0
+    })
+
+    const second = factory.openTerminal('term-source', {}, true)
+    handlerNow += 101
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-agent',
+      activeForMs: 101,
+      queued: 1
+    })
+
+    releaseCaps({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      sessionIdFlag: false
+    })
+    await Promise.all([first, second])
   })
 
   it('re-grants an exact saved local project after a Server restart before cross-project open', async () => {
@@ -380,85 +405,6 @@ describe('HeadlessNodeFactory', () => {
     })
     expect((await store.load({ sideline: false })).projects[0].nodes.some((node) => node.id === id))
       .toBe(false)
-  })
-
-  it('lets any verified control session sweep an unowned card only after two absent-pane probes', async () => {
-    const workspace = await store.load({ sideline: false })
-    const plainSource = workspace.projects[0].nodes.find((node) => node.id === 'term-source')!
-    delete plainSource.agentId
-    const dead = terminal('term-dead-card', 'Dead card', 'claude', 1500)
-    workspace.projects[0].nodes.push(dead)
-    workspace.projects[0].ropes = [
-      { id: 'rope-dead', source: 'term-source', target: dead.id }
-    ]
-    workspace.projects[0].bridges = [
-      { id: 'bridge-dead', source: dead.id, target: 'term-upstream' }
-    ]
-    workspace.projects.push({
-      id: 'project-remote',
-      name: 'Remote',
-      color: '#6ac4dc',
-      ssh: { server: { host: 'example.com', user: 'user' }, remoteCwd: '/srv/work' },
-      viewport: { x: 0, y: 0, zoom: 1 },
-      nodes: [terminal('term-remote-dead', 'Unprobeable remote')],
-      bridges: [],
-      ropes: []
-    })
-    await store.save(workspace)
-    for (const id of ['term-source', 'term-upstream', 'term-owned']) pty.live.add(id)
-
-    const reply = await factory.sweepDeadCards('term-source', true)
-
-    expect(reply).toMatchObject({
-      ok: true,
-      result: { removed: ['term-dead-card'], scanned: 4 }
-    })
-    expect(pty.probes.filter((id) => id === 'term-dead-card')).toHaveLength(2)
-    expect(pty.probes).not.toContain('term-remote-dead')
-    expect(pty.destroys).toEqual([])
-    const after = await store.load({ sideline: false })
-    expect(after.projects[0].nodes.some((node) => node.id === dead.id)).toBe(false)
-    expect(after.projects[0].ropes).toEqual([])
-    expect(after.projects[0].bridges).toEqual([])
-    expect(after.projects[1].nodes.some((node) => node.id === 'term-remote-dead')).toBe(true)
-    expect(removed).toContain(dead.id)
-  })
-
-  it('preserves a card when its pane probe is unreadable', async () => {
-    const workspace = await store.load({ sideline: false })
-    const unknown = terminal('term-probe-unknown', 'Unknown pane', 'codex', 1500)
-    workspace.projects[0].nodes.push(unknown)
-    await store.save(workspace)
-    for (const node of workspace.projects[0].nodes) pty.live.add(node.id)
-    pty.live.delete(unknown.id)
-    pty.unreadable.add(unknown.id)
-
-    await expect(factory.sweepDeadCards('term-source', true)).resolves.toMatchObject({
-      ok: true,
-      result: { removed: [] }
-    })
-    expect((await store.load({ sideline: false })).projects[0].nodes).toContainEqual(unknown)
-    expect(removed).toEqual([])
-  })
-
-  it('runs the same ownership-free sweep on the configured interval and clears it on stop', async () => {
-    const workspace = await store.load({ sideline: false })
-    workspace.projects[0].nodes.push(terminal('term-auto-dead', 'Auto dead', 'gemini', 1500))
-    await store.save(workspace)
-    for (const id of ['term-source', 'term-upstream', 'term-owned']) pty.live.add(id)
-
-    await factory.start()
-    expect(reapDelay).toBe(1_234)
-    expect(reapTick).toBeTypeOf('function')
-    reapTick!()
-
-    await vi.waitFor(async () => {
-      const current = await store.load({ sideline: false })
-      expect(current.projects[0].nodes.some((node) => node.id === 'term-auto-dead')).toBe(false)
-    })
-    expect(pty.destroys).toEqual([])
-    factory.stop()
-    expect(reapCleared).toBe(true)
   })
 
   it('requires verified node identity before applying the process-local ownership ledger', async () => {

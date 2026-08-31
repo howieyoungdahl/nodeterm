@@ -158,6 +158,16 @@ export class DeliveryQueue {
     return this.queues.get(nodeId)?.length ?? 0
   }
 
+  /** Read-only health snapshot: target node id → current queue depth. */
+  depths(): Record<string, number> {
+    return Object.fromEntries(
+      [...this.queues.entries()]
+        .filter(([, entries]) => entries.length > 0)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([nodeId, entries]) => [nodeId, entries.length])
+    )
+  }
+
   /**
    * Enqueue a message whose initial delivery refused as `targetBusy` (or whose target is
    * hibernated). Returns the `queued` receipt (with its position and TTL) or `queueFull` at the

@@ -35,8 +35,13 @@ import {
   createServerEditionControlHandler,
   type ServerEditionControlActions
 } from './control-unsupported'
-import { HeadlessNodeFactory } from './headless-node-factory'
+import {
+  HeadlessNodeFactory,
+  type HeadlessNodeOwnership
+} from './headless-node-factory'
 import { sendSettledEnvelope } from './settled-envelope'
+import { SpawnHandlerState } from './spawn-handler-state'
+import type { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 export interface ServerCanvasControlDeps {
   workspaceStore: WorkspaceStore
@@ -46,15 +51,21 @@ export interface ServerCanvasControlDeps {
   cliCaps?: () => Promise<ClaudeCliCaps>
   /** Test seam for the boot-populated shared Codex capability answer. */
   codexSharedIdentity?: () => Promise<boolean>
+  /** Shared with the operator inventory so creator provenance has one process-local source. */
+  ownership?: HeadlessNodeOwnership
+  /** Shared with `/opsapi/health`; snapshotting it never waits on the handler. */
+  spawnHandlerState?: SpawnHandlerState
+  /** Shared with `/opsapi` so every Server-owned workspace transaction is serialized. */
+  mutationQueue?: WorkspaceMutationQueue
   /** The server's installHooks gate. False keeps every real agent config directory untouched. */
   installAgentIntegrations?: boolean
-  /** Zero disables only the periodic dead-card pass; the manual sweep verb remains available. */
-  deadCardReapIntervalMs?: number
 }
 
 export interface ServerCanvasControl {
   handler: ReturnType<typeof createServerEditionControlHandler>
   onAgentEvent(event: NormalizedAgentEvent): void
+  deliveryQueueDepths(): Record<string, number>
+  forgetNodes(nodeIds: readonly string[]): void
   installSkillInto(configDir: string): void
   stop(): void
 }
@@ -149,8 +160,10 @@ export async function initServerCanvasControl(
       deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
-    publishProject: (project: Project) => platform().broadcast(IPC.workspaceExternalChange, project),
-    deadCardReapIntervalMs: deps.deadCardReapIntervalMs
+    ownership: deps.ownership,
+    spawnHandlerState: deps.spawnHandlerState,
+    mutationQueue: deps.mutationQueue,
+    publishProject: (project: Project) => platform().broadcast(IPC.workspaceExternalChange, project)
   })
 
   const messaging: AgentMessagingDeps = {
@@ -181,8 +194,6 @@ export async function initServerCanvasControl(
       factory.openTerminal(sourceNodeId, args, verified),
     openAgent: (sourceNodeId, args, verified) => factory.openAgent(sourceNodeId, args, verified),
     close: (sourceNodeId, args, verified) => factory.close(sourceNodeId, args, verified),
-    sweepDeadCards: (sourceNodeId, verified) =>
-      factory.sweepDeadCards(sourceNodeId, verified),
     link: (sourceNodeId, args, verified) => factory.link(sourceNodeId, args, verified),
     group: (sourceNodeId, args) => factory.group(sourceNodeId, args),
     rename: (sourceNodeId, args) => factory.rename(sourceNodeId, args),
@@ -203,6 +214,8 @@ export async function initServerCanvasControl(
       onMessagingAgentEvent(event, queue)
       factory.onAgentEvent(event)
     },
+    deliveryQueueDepths: () => queue.depths(),
+    forgetNodes: (nodeIds) => factory.forgetNodes(nodeIds),
     installSkillInto,
     stop: () => {
       factory.stop()

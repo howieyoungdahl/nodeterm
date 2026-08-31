@@ -36,8 +36,8 @@ import type {
   Settings,
   Workspace
 } from '../shared/types'
-
-type ReapTimer = ReturnType<typeof setInterval> | number
+import { SpawnHandlerState, type SpawnHandlerSnapshot } from './spawn-handler-state'
+import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 export interface ServerControlReply {
   ok: boolean
@@ -79,10 +79,10 @@ export interface HeadlessNodeFactoryDeps {
   publishProject?: (project: Project) => void
   schedule?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearSchedule?: (timer: ReturnType<typeof setTimeout>) => void
-  /** Periodic dead-card sweep. Zero disables it; Server config supplies the 30-minute default. */
-  deadCardReapIntervalMs?: number
-  setReapInterval?: (cb: () => void, ms: number) => ReapTimer
-  clearReapInterval?: (timer: ReapTimer) => void
+  /** Shared health observer. Omitted in unit tests that do not inspect handler liveness. */
+  spawnHandlerState?: SpawnHandlerState
+  /** Shared with operator mutations so two stale workspace snapshots cannot overwrite each other. */
+  mutationQueue?: WorkspaceMutationQueue
   /** Injectable only so tests can seed creator facts; production uses a fresh process-local ledger. */
   ownership?: HeadlessNodeOwnership
 }
@@ -126,7 +126,6 @@ const GROUP_PAD = 28
 const GROUP_HEADER = 34
 const AFTER_RETRY_MS = 500
 const AFTER_RETRY_LIMIT = 5
-export const DEFAULT_DEAD_CARD_REAP_INTERVAL_MS = 30 * 60 * 1000
 const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini'])
 
 function token(): string {
@@ -487,7 +486,8 @@ function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
  * invisible tmux session.
  */
 export class HeadlessNodeFactory {
-  private serial: Promise<unknown> = Promise.resolve()
+  private readonly spawnHandlerState: SpawnHandlerState
+  private readonly mutationQueue: WorkspaceMutationQueue
   private attached = new Set<string>()
   /** Process-local proof that a caller created a node during THIS Server Edition run. */
   private ownership: HeadlessNodeOwnership
@@ -502,20 +502,46 @@ export class HeadlessNodeFactory {
   private projectGrants = new Map<string, Set<string>>()
   private retryCount = new Map<string, number>()
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  private reapTimer: ReapTimer | undefined
   private stopped = false
 
   constructor(private readonly deps: HeadlessNodeFactoryDeps) {
     this.ownership = deps.ownership ?? createHeadlessNodeOwnership()
+    this.spawnHandlerState = deps.spawnHandlerState ?? new SpawnHandlerState({ now: deps.now })
+    this.mutationQueue = deps.mutationQueue ?? new WorkspaceMutationQueue()
   }
 
-  private runExclusive<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.serial.then(work, work)
-    this.serial = run.then(
-      () => undefined,
-      () => undefined
-    )
-    return run
+  private runExclusive<T>(operation: string, work: () => Promise<T>): Promise<T> {
+    const ticket = this.spawnHandlerState.enqueue(operation)
+    const tracked = async (): Promise<T> => {
+      ticket.start()
+      try {
+        const value = await work()
+        ticket.finish()
+        return value
+      } catch (error) {
+        ticket.finish(error)
+        throw error
+      }
+    }
+    return this.mutationQueue.run(tracked)
+  }
+
+  /** Synchronous, non-blocking snapshot used by `/opsapi/health`. */
+  spawnHandlerSnapshot(): SpawnHandlerSnapshot {
+    return this.spawnHandlerState.snapshot()
+  }
+
+  /** Clear process-local state for cards the operator management plane removed. */
+  forgetNodes(nodeIds: readonly string[]): void {
+    for (const id of nodeIds) {
+      this.ownership.forget(id)
+      this.attached.delete(id)
+      this.awaitingFirstWorking.delete(id)
+      this.retryCount.delete(id)
+      const timer = this.retryTimers.get(id)
+      if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
+      this.retryTimers.delete(id)
+    }
   }
 
   private publishChangeSet(
@@ -536,16 +562,6 @@ export class HeadlessNodeFactory {
 
   private publish(project: Project, nodes: readonly CanvasNodeState[]): void {
     this.publishChangeSet(project, nodes, [])
-  }
-
-  private forgetRuntimeState(nodeId: string): void {
-    this.ownership.forget(nodeId)
-    this.attached.delete(nodeId)
-    this.awaitingFirstWorking.delete(nodeId)
-    this.retryCount.delete(nodeId)
-    const timer = this.retryTimers.get(nodeId)
-    if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
-    this.retryTimers.delete(nodeId)
   }
 
   /** Literal creator ownership: a caller may act only on nodes it freshly spawned this run. */
@@ -662,7 +678,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('open-project', async () => {
       const flagError = unsupportedFlags(args, new Set(['cwd']))
       if (flagError) return { ok: false, error: `open-project: ${flagError}` }
       if (!verified) {
@@ -738,7 +754,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('close', async () => {
       const flagError = unsupportedFlags(args, new Set(['node']))
       if (flagError) return { ok: false, error: `close: ${flagError}` }
       if (!verified) {
@@ -828,7 +844,7 @@ export class HeadlessNodeFactory {
         }
       }
 
-      for (const id of ids) this.forgetRuntimeState(id)
+      this.forgetNodes(ids)
       return {
         ok: true,
         message: `closed ${ids.length} owned node(s): ${ids.join(', ')}`,
@@ -837,105 +853,12 @@ export class HeadlessNodeFactory {
     })
   }
 
-  /**
-   * Remove local terminal cards only when the PTY layer proves their backend absent twice.
-   *
-   * This intentionally bypasses creator ownership: an absent pane is inert, so keeping its card
-   * because the current caller did not create it is what accumulated the overnight corpses. The
-   * caller still needs verified node identity for a uniquely saved source, but the source need not
-   * be an agent or creator. SSH projects are skipped because this Server process cannot probe their
-   * host. `sessionExists` itself treats a failed tmux/session-host probe as present; a thrown test
-   * seam is preserved for the same reason.
-   */
-  sweepDeadCards(
-    sourceNodeId: string,
-    verified: boolean
-  ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
-      if (!verified) {
-        return {
-          ok: false,
-          error: 'sweep-dead-cards-identity-refused: Server Edition sweep requires verified node identity'
-        }
-      }
-      const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      const result = await this.sweepDeadCardsIn(workspace)
-      return {
-        ok: true,
-        message:
-          `swept ${result.removed.length} dead terminal card(s) after probing ` +
-          `${result.scanned} local terminal card(s)`,
-        result
-      }
-    })
-  }
-
-  private async sweepDeadCardsIn(
-    workspace: Workspace
-  ): Promise<{ removed: string[]; scanned: number }> {
-    const deadByProject = new Map<Project, string[]>()
-    let scanned = 0
-    for (const project of workspace.projects) {
-      if (project.ssh) continue
-      for (const node of project.nodes) {
-        if (node.kind !== 'terminal') continue
-        scanned += 1
-        try {
-          if (await this.deps.ptyManager.sessionExists(node.id)) continue
-          // Re-probe at the mutation boundary. This does not manufacture atomicity with a browser
-          // open, but it closes the common stale-snapshot window and, critically, never converts a
-          // failed read into absence (`sessionExists` is fail-safe in production).
-          if (await this.deps.ptyManager.sessionExists(node.id)) continue
-        } catch {
-          continue
-        }
-        const dead = deadByProject.get(project) ?? []
-        dead.push(node.id)
-        deadByProject.set(project, dead)
-      }
-    }
-
-    const removed: string[] = []
-    for (const [project, ids] of deadByProject) {
-      const dead = new Set(ids)
-      project.nodes = project.nodes.filter((node) => !dead.has(node.id))
-      if (project.ropes) {
-        project.ropes = project.ropes.filter(
-          (edge) => !dead.has(edge.source) && !dead.has(edge.target)
-        )
-      }
-      if (project.bridges) {
-        project.bridges = project.bridges.filter(
-          (edge) => !dead.has(edge.source) && !dead.has(edge.target)
-        )
-      }
-      removed.push(...ids)
-    }
-
-    if (removed.length) {
-      await this.deps.workspaceStore.save(workspace)
-      for (const [project, ids] of deadByProject) this.publishChangeSet(project, [], ids)
-      for (const id of removed) this.forgetRuntimeState(id)
-    }
-    return { removed, scanned }
-  }
-
-  private reapDeadCards(): Promise<{ removed: string[]; scanned: number }> {
-    return this.runExclusive(async () => {
-      if (this.stopped) return { removed: [], scanned: 0 }
-      const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      return this.sweepDeadCardsIn(workspace)
-    })
-  }
-
   link(
     sourceNodeId: string,
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('link', async () => {
       const flagError = unsupportedFlags(args, new Set(['from', 'to']))
       if (flagError) return { ok: false, error: `link: ${flagError}` }
       if (!verified) {
@@ -1010,7 +933,7 @@ export class HeadlessNodeFactory {
   }
 
   group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('group', async () => {
       const flagError = unsupportedFlags(args, new Set(['nodes', 'label', 'color']))
       if (flagError) return { ok: false, error: `group: ${flagError}` }
       let color: NodeColor | undefined
@@ -1065,7 +988,7 @@ export class HeadlessNodeFactory {
   }
 
   rename(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('rename', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'title']))
       if (flagError) return { ok: false, error: `rename: ${flagError}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -1102,7 +1025,7 @@ export class HeadlessNodeFactory {
   }
 
   color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('color', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'color']))
       if (flagError) return { ok: false, error: `color: ${flagError}` }
       if (!isNodeColor(args.color)) return { ok: false, error: invalidNodeColorMessage() }
@@ -1144,7 +1067,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive(verb, async () => {
       const flagError = unsupportedFlags(
         args,
         verb === 'open-terminal'
@@ -1341,7 +1264,7 @@ export class HeadlessNodeFactory {
   }
 
   sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('sticky', async () => {
       const parsed = parseStickyArgs(args)
       if ('error' in parsed) return { ok: false, error: `sticky: ${parsed.error}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -1408,29 +1331,11 @@ export class HeadlessNodeFactory {
   }
 
   /**
-   * Boot is spawn-inert: it never loads saved nodes, adopts sessions, or sends persisted commands.
-   * It only schedules conservative dead-card cleanup; the first workspace read happens after the
-   * configured interval. Owner opens and browser views remain the only cold-spawn authority, while
-   * current-run agent events drive arms below.
+   * Boot is intentionally inert. Creator proof is process-local and empty after restart, so even
+   * sending a persisted command would control a session this process cannot attribute. Owner opens
+   * and browser views are the only cold-spawn authority; current-run agent events drive arms below.
    */
   start(): Promise<void> {
-    const intervalMs = this.deps.deadCardReapIntervalMs ?? DEFAULT_DEAD_CARD_REAP_INTERVAL_MS
-    if (Number.isFinite(intervalMs) && intervalMs > 0 && !this.reapTimer) {
-      const setIntervalFn = this.deps.setReapInterval ?? setInterval
-      this.reapTimer = setIntervalFn(() => {
-        void this.reapDeadCards().then(
-          (result) => {
-            if (result.removed.length) {
-              console.info(
-                `[server-canvas-control] reaped ${result.removed.length} dead terminal card(s)`
-              )
-            }
-          },
-          (error) => console.warn('[server-canvas-control] dead-card reap failed', error)
-        )
-      }, intervalMs)
-      ;(this.reapTimer as { unref?: () => void }).unref?.()
-    }
     return Promise.resolve()
   }
 
@@ -1441,7 +1346,7 @@ export class HeadlessNodeFactory {
   }
 
   refreshArmed(observed?: Pick<NormalizedAgentEvent, 'nodeId' | 'state'>): Promise<void> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('refresh-armed', async () => {
       if (this.stopped) return
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
       const changedByProject = new Map<Project, CanvasNodeState[]>()
@@ -1524,8 +1429,6 @@ export class HeadlessNodeFactory {
 
   stop(): void {
     this.stopped = true
-    if (this.reapTimer) (this.deps.clearReapInterval ?? clearInterval)(this.reapTimer)
-    this.reapTimer = undefined
     for (const timer of this.retryTimers.values()) (this.deps.clearSchedule ?? clearTimeout)(timer)
     this.retryTimers.clear()
     this.ownership.clear()

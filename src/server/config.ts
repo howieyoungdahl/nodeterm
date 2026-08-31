@@ -42,8 +42,8 @@ export type ServerConfig = {
    */
   canvasControl?: boolean
   /**
-   * How often enabled Server canvas control removes terminal cards whose local backend is proven
-   * absent. Default 30 minutes; zero disables the periodic pass while keeping the manual verb.
+   * How often the Server calls the operator plane's conservative dead-card sweep engine.
+   * Default 30 minutes; zero disables only the periodic trigger, not POST /opsapi/sweep.
    */
   deadCardReapMinutes?: number
   /**

@@ -104,14 +104,23 @@ The codebase is split by Electron process boundary — keep code on the correct 
   channels (`registerTranscriptIpc` — the ⌘M chat view + the find-bar's transcript index; see the
   ⌘M bullet under Agent support). **Canvas control is opt-in**
   (`NODETERM_SERVER_CANVAS_CONTROL=1` / `--canvas-control`): the Server shell installs its own shim
-  and runs a serialized `HeadlessNodeFactory`; disabled remains the default. The factory schedules
-  a 30-minute dead-card pass by default (`NODETERM_DEAD_CARD_REAP_MINUTES`, `0` disables only the
-  timer), but removes a local terminal card only after two definitive absent-session probes;
-  unreadable probes and SSH-project cards are preserved. The same conservative pass is available
-  to any verified saved session as `sweep-dead-cards`, outside creator ownership because
-  a proven-absent backend is inert. (The SDK **chat node**
+  and runs a serialized `HeadlessNodeFactory`; disabled remains the default. The Server shell also
+  schedules a 30-minute dead-card pass by default (`NODETERM_DEAD_CARD_REAP_MINUTES`, `0` disables
+  only the timer), using the operator API's shared `ServerNodeOps` engine. It removes a local
+  terminal card only after two definitive absent-session probes; unreadable probes and SSH-project
+  cards are preserved. Global cleanup is never exposed as an agent canvas-control verb. (The SDK
+  **chat node**
   — once listed here as deferred — was removed entirely, 2026-07; see the chat-node note in the
   node-kinds list.)
+  **Operator management is separate from canvas control:** the always-wired `/opsapi/` REST
+  namespace accepts only the `0600` data-dir `ops-token` bearer from a real loopback TCP peer —
+  never the UI password/cookie, trusted-proxy header, or an agent node token. `ServerNodeOps` owns
+  inventory, the single-delete force gate, and the one conservative dead-card sweep engine that
+  the periodic reaper also calls. Operator and agent read/modify/save transactions share one
+  `WorkspaceMutationQueue`, so neither can publish a stale snapshot over the other.
+  `SpawnHandlerState` is a synchronous observer of the serialized factory, so health remains
+  readable while the operation it names is wedged. No operator verb creates, sends, or renames,
+  and the surface is Server-only (Desktop/Mobile N/A).
 - **`src/preload/`** — the only bridge. `index.ts` uses `contextBridge` to expose a
   narrow API on `window.nodeTerminal` (typed in `index.d.ts`). `contextIsolation` is on,
   `nodeIntegration` off.
@@ -1298,6 +1307,12 @@ else, and its context links must keep classifying across restarts).
   `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
   node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
   identity never defaults to Claude.
+  **Do not widen this for operators.** The Server operator plane is a separate loopback bearer
+  principal in `src/server/ops-api.ts`; its ability to inventory or remove any persisted card is
+  not authority an agent `/control/*` request inherits. Pane probe errors remain `unknown`, and
+  only two definitive misses enter the shared sweep deletion set. A forced live delete confirms
+  local PTY teardown before the durable card is removed. The health read snapshots the factory's
+  tracker directly and must never enqueue behind it.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
   the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
   `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim

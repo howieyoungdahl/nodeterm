@@ -177,7 +177,6 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     openTerminal: vi.fn(async () => ({ ok: true as const, result: { id: 'term-new' } })),
     openAgent: vi.fn(async () => ({ ok: true as const, result: { id: 'agent-new' } })),
     close: vi.fn(async () => ({ ok: true as const, result: { id: 'closed' } })),
-    sweepDeadCards: vi.fn(async () => ({ ok: true as const, result: { removed: [] } })),
     link: vi.fn(async () => ({ ok: true as const, result: { linked: ['term-target'] } })),
     group: vi.fn(async () => ({ ok: true as const, result: { groupId: 'group-new' } })),
     rename: vi.fn(async () => ({ ok: true as const, result: { id: 'renamed' } })),
@@ -235,24 +234,6 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
       { node: 'term-new,term-other' },
       true
     )
-
-    await expect(
-      handler({
-        verb: 'sweep-dead-cards',
-        nodeId: 'term-source',
-        args: {},
-        verified: true
-      })
-    ).resolves.toMatchObject({ ok: true })
-    expect(a.sweepDeadCards).toHaveBeenCalledWith('term-source', true)
-    await expect(
-      handler({
-        verb: 'sweep-dead-cards',
-        nodeId: 'term-source',
-        args: { node: 'term-target' },
-        verified: true
-      })
-    ).resolves.toEqual({ ok: false, error: 'sweep-dead-cards does not accept flags' })
   })
 
   it('refuses every enabled verb at the handler boundary when creator identity is unverified', async () => {

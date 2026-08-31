@@ -84,10 +84,6 @@ export interface ServerEditionControlActions {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply>
-  sweepDeadCards(
-    sourceNodeId: string,
-    verified: boolean
-  ): Promise<ServerControlReply>
   link(
     sourceNodeId: string,
     args: Record<string, string>,
@@ -110,7 +106,6 @@ const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
   'open-terminal',
   'open-agent',
   'close',
-  'sweep-dead-cards',
   'link',
   'group',
   'rename',
@@ -171,8 +166,6 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
         return actions.openAgent(nodeId, command.args, verified)
       case 'close':
         return actions.close(nodeId, command.args, verified)
-      case 'sweep-dead-cards':
-        return actions.sweepDeadCards(nodeId, verified)
       case 'link':
         return actions.link(nodeId, command.args, verified)
       case 'group':
