@@ -347,6 +347,15 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts document the Server launch-timeout contract', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('`launch-timeout`')
+      expect(body).toContain('Later creations remain available')
+      expect(body).toContain('do not repeat')
+      expect(body).toContain('may still finish')
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')

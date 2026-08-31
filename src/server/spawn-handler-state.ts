@@ -5,6 +5,8 @@ export interface SpawnHandlerSnapshot {
   operation: string | null
   startedAt: number | null
   activeForMs: number
+  /** Number of active preparations or external launches; `operation` names the oldest. */
+  active: number
   queued: number
   wedgeAfterMs: number
   lastSettledAt: number | null
@@ -28,7 +30,7 @@ export class SpawnHandlerState {
   private readonly wedgeAfterMs: number
   private queued = 0
   private nextId = 1
-  private active: { id: number; operation: string; startedAt: number } | null = null
+  private active = new Map<number, { id: number; operation: string; startedAt: number }>()
   private lastSettledAt: number | null = null
   private lastError: string | null = null
 
@@ -47,13 +49,13 @@ export class SpawnHandlerState {
         if (started || finished) return
         started = true
         this.queued = Math.max(0, this.queued - 1)
-        this.active = { id, operation, startedAt: this.now() }
+        this.active.set(id, { id, operation, startedAt: this.now() })
       },
       finish: (error?: unknown) => {
         if (finished) return
         finished = true
         if (!started) this.queued = Math.max(0, this.queued - 1)
-        if (this.active?.id === id) this.active = null
+        if (started) this.active.delete(id)
         this.lastSettledAt = this.now()
         this.lastError = error === undefined
           ? null
@@ -66,16 +68,20 @@ export class SpawnHandlerState {
 
   snapshot(): SpawnHandlerSnapshot {
     const now = this.now()
-    const activeForMs = this.active ? Math.max(0, now - this.active.startedAt) : 0
+    const oldest = [...this.active.values()].sort(
+      (left, right) => left.startedAt - right.startedAt || left.id - right.id
+    )[0]
+    const activeForMs = oldest ? Math.max(0, now - oldest.startedAt) : 0
     return {
-      state: !this.active
+      state: !oldest
         ? 'idle'
         : activeForMs >= this.wedgeAfterMs
           ? 'wedged'
           : 'running',
-      operation: this.active?.operation ?? null,
-      startedAt: this.active?.startedAt ?? null,
+      operation: oldest?.operation ?? null,
+      startedAt: oldest?.startedAt ?? null,
       activeForMs,
+      active: this.active.size,
       queued: this.queued,
       wedgeAfterMs: this.wedgeAfterMs,
       lastSettledAt: this.lastSettledAt,

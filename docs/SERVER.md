@@ -296,9 +296,9 @@ The v1 contract is deliberately narrow:
   forced local terminal deletion confirms backend teardown before saving the card removal. Agents
   using this operator API by convention must never force a live or unknown target.
 - `GET /opsapi/health` returns boot time/uptime, attached WS client count, whether canvas control
-  initialized, the non-blocking spawn
-  handler snapshot (`idle`/`running`/`wedged`, operation, age, queue), per-target delivery queue
-  depths, and the loaded project list. Health does not enter the handler queue it observes, so a
+  initialized, the non-blocking spawn handler snapshot (`idle`/`running`/`wedged`, oldest
+  operation, age, active count, queue), per-target delivery queue depths, and the loaded project
+  list. Health does not enter the handler queue or await the external launches it observes, so a
   wedged node creation cannot wedge its diagnosis too.
 
 There are no create, send, rename, remote-exposure, or UI verbs here. **Surfaces:** Server Edition:
@@ -617,6 +617,21 @@ periodic trigger; the operator endpoint remains available.
 
 Validate upgrades with a disposable `NODETERM_DATA_DIR` and port. Restarting a shared live Server
 service is an explicit operator action; it is not part of a test, repair, or boot-rescue flow.
+
+Node creation persists and publishes the card under the serialized workspace transaction, then
+releases that transaction before starting its PTY or typing the initial command. Those external
+steps have a 15-second total deadline. `launch-timeout` means the durable card remains but startup
+did not settle; the underlying operation cannot be cancelled and may still finish, so do not repeat
+the request. Its `/opsapi/health` ticket remains active until the underlying operation actually
+settles, and parallel launches are counted separately while the oldest is named. Other creation
+calls remain available immediately. If the card is explicitly closed or removed through the
+operator API while creation is unresolved, the factory remembers that cancellation and destroys an
+eventual late backend a second time, so releasing the transaction lock cannot create an orphan
+session.
+Claude CLI capability discovery is
+bounded at five seconds and degrades to no optional flags. Server Codex launches use the edition's
+deliberate no-shared-app-server answer directly and therefore start the ordinary `codex` CLI rather
+than waiting on the desktop-only capability initializer.
 
 ### Managed Claude accounts
 

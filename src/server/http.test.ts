@@ -41,7 +41,7 @@ beforeEach(async () => {
         wsClientCount: 0,
         canvasControlEnabled: false,
         spawnHandler: {
-          state: 'idle', operation: null, startedAt: null, activeForMs: 0, queued: 0,
+          state: 'idle', operation: null, startedAt: null, activeForMs: 0, active: 0, queued: 0,
           wedgeAfterMs: 30_000, lastSettledAt: null, lastError: null
         },
         deliveryQueueDepths: {},
