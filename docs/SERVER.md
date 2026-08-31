@@ -601,11 +601,15 @@ before any write or PTY kill; an unowned member refuses the whole operation. Que
 the creator check at flush time in addition to the existing verified and per-project switch gates.
 
 The creator ledger is memory-only and is never reconstructed from a project file, title, hook
-record, or tmux session name. After a service restart it is empty, and boot performs no canvas-node
-or terminal-session adoption: it does not attach-or-create missing backends and does not send a
-persisted queued command even when a tmux backend survived. A later explicit owner open or browser
-view is the only cold-spawn path. Plain terminals carry no agent identity or canvas-control grant;
-missing `agentId` never means Claude.
+record, or tmux session name. After a service restart it is empty, and the headless factory performs
+no session adoption or persisted queued-command delivery. Before the HTTP listener opens, Server
+boot separately classifies every saved local terminal id. A definitively missing backend is marked
+as an inert dead card; the browser shows that state and never asks for a replacement shell. A
+surviving or unreadable backend is guarded by an attach-only primitive (`tmux attach-session` or
+session-host attach-existing), so even a backend that disappears between the boot probe and browser
+mount cannot fall through to attach-or-create. Only node ids created during the current Server run
+may take the normal fresh-spawn path. Plain terminals carry no agent identity or canvas-control
+grant; missing `agentId` never means Claude.
 
 Dead-card cleanup is not an agent creator-ownership exception. The separately authenticated
 operator endpoint `POST /opsapi/sweep` and the 30-minute periodic pass call the same

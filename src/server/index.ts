@@ -632,9 +632,25 @@ export async function startServer(
   // and this shell may never have one. Read it once so links are live before any browser connects.
   // Read-only: boot must not sideline a conflict-marked project.json (that stays a renderer/probe
   // decision). The onPersist above turns this load into the initial refresh.
-  await workspaceStore.load({ sideline: false }).catch((e) => {
+  const bootWorkspace = await workspaceStore.load({ sideline: false }).catch((e) => {
     console.warn('[nodeterm-server] context-link initial workspace load failed', e)
+    return undefined
   })
+  if (bootWorkspace) {
+    const persistedLocalTerminals = bootWorkspace.projects.flatMap((project) =>
+      project.ssh
+        ? []
+        : project.nodes.filter((node) => node.kind === 'terminal').map((node) => node.id)
+    )
+    const protectedSessions = await ptyManager.protectPersistedSessionsAtBoot(
+      persistedLocalTerminals
+    )
+    if (protectedSessions.dead.length) {
+      console.info(
+        `[nodeterm-server] marked ${protectedSessions.dead.length} persisted terminal card(s) dead; no backend was respawned`
+      )
+    }
+  }
   deadCardReaper.start()
 
   if (config.canvasControl === true) {

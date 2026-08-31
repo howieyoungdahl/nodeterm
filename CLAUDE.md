@@ -1320,8 +1320,12 @@ else, and its context links must keep classifying across restarts).
   the whole target set as current-run creations before writing or killing anything. Queued messages
   revalidate creator ownership before flush. The ledger is intentionally empty after restart —
   project JSON, titles, hook history and tmux names are not creator proof — so
-  boot neither attaches/creates backends nor sends persisted queued commands. A live backend with a
-  durable arm remains untouched until an explicit owner action or browser view. `open-terminal` and
+  boot sends no persisted queued command. Before the Server starts listening,
+  `PtyManager.protectPersistedSessionsAtBoot` classifies every saved local terminal id: a missing
+  backend becomes an inert `deadCard`, while a surviving or unreadable backend is attach-only
+  (`tmux attach-session` / session-host attach-existing). Neither path can create a context-free
+  shell, including if the backend disappears between boot and browser mount. Only node ids created
+  during the current Server run retain the normal fresh-spawn path. `open-terminal` and
   `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
   node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
   identity never defaults to Claude.
