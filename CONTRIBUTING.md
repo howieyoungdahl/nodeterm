@@ -134,6 +134,16 @@ named refusal. Validate Server upgrades against a disposable data directory and 
 shared live service is
 an explicit operator action, never a test or an automatic repair step.
 
+**The Server operator API is a different principal, not an agent escape hatch.** `/opsapi/*` is
+TCP-loopback-only and authenticates only the `0600` `ops-token` bearer; browser cookies, the
+operator password, proxy headers, and node tokens never substitute for it. Keep agent
+canvas-control creator ownership strict. A dead-card sweep requires two definitive absent-pane
+probes, preserves `unknown` on every read failure, and shares one mutation engine with the periodic
+reaper. Server-owned operator and agent workspace transactions also share one FIFO; separate
+load/save queues can overwrite each other with stale snapshots. `/opsapi/health` must snapshot
+spawn-handler state without awaiting the serialized handler it diagnoses. Credentials still never
+ride argv — operator clients feed curl headers via stdin or another non-argv channel.
+
 **A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
 a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
 `NODETERM_CANVAS_CONTROL` until the serialized node explicitly names an agent.
