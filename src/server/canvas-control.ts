@@ -21,6 +21,7 @@ import {
   buildCanvasSkillBody,
   mergeCanvasControlBlock
 } from '../core/canvas-control-core'
+import { codexIdentityCaps } from '../core/codex-identity-caps'
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
@@ -48,7 +49,7 @@ export interface ServerCanvasControlDeps {
   settings(): Settings
   boardLog: BoardLogHandlers
   cliCaps?: () => Promise<ClaudeCliCaps>
-  /** Test seam for shared Codex launch assembly. Production Server deliberately answers false. */
+  /** Test seam for the boot-populated shared Codex capability answer. */
   codexSharedIdentity?: () => Promise<boolean>
   /** Shared with the operator inventory so creator provenance has one process-local source. */
   ownership?: HeadlessNodeOwnership
@@ -155,13 +156,11 @@ export async function initServerCanvasControl(
     ptyManager: deps.ptyManager,
     settings: deps.settings,
     cliCaps: deps.cliCaps ?? claudeCliCaps,
-    // Server registers UNKNOWN_CODEX_IDENTITY_CAPS by design: it has no shared app-server
-    // handlers. Calling the core getter here bypassed that Server RPC answer and waited forever
-    // for refreshCodexIdentityCaps(), which only desktop runs. The first Codex open therefore held
-    // HeadlessNodeFactory's serial transaction forever and wedged every later creation. Keep the
-    // production answer directly aligned with the Server capability registration; tests can still
-    // inject true to exercise the managed-launcher branch.
-    codexSharedIdentity: deps.codexSharedIdentity ?? (async () => false),
+    // Server boot populates this answer after arming the identity secret and start/bind handlers.
+    // HeadlessNodeFactory bounds the await, so a failed boot refresh degrades only this launch to
+    // bare Codex and cannot wedge the serialized workspace mutation path.
+    codexSharedIdentity:
+      deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
     ownership: deps.ownership,

@@ -421,7 +421,8 @@ describe('HeadlessNodeFactory', () => {
       version: null,
       autoPermissionMode: false,
       fullscreenTui: false,
-      sessionIdFlag: false
+      sessionIdFlag: false,
+      remoteControlFlag: false
     })
     await Promise.all([first, second])
   })

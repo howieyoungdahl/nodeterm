@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -11,6 +12,14 @@ import {
 import { resetMessageFlow } from '../core/agents/agent-message-flow'
 import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-trace'
 import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
+import {
+  refreshCodexIdentityCaps,
+  resetCodexIdentityCapsForTests
+} from '../core/codex-identity-caps'
+import {
+  resetCodexThreadIdentityAuthSecret,
+  setCodexThreadIdentityAuthSecret
+} from '../core/codex-identity-proxy'
 import {
   resetNodeTokenFilesForTests,
   writeNodeTokenFile
@@ -39,6 +48,8 @@ describe('initServerCanvasControl', () => {
     resetAgentMessageTraceForTests()
     resetAgentStatusMirrorForTests()
     resetNodeTokenFilesForTests()
+    resetCodexIdentityCapsForTests()
+    resetCodexThreadIdentityAuthSecret()
   })
 
   afterEach(() => {
@@ -47,11 +58,13 @@ describe('initServerCanvasControl', () => {
     resetPaneOwnershipForTests()
     resetAgentStatusMirrorForTests()
     resetNodeTokenFilesForTests()
+    resetCodexIdentityCapsForTests()
+    resetCodexThreadIdentityAuthSecret()
     resetPlatformForTests()
     fs.rmSync(dataDir, { recursive: true, force: true })
   })
 
-  it('gates installs/messaging and defaults Server Codex to a prompt bare launch', async () => {
+  it('gates installs/messaging and consumes the boot-populated Server Codex capability', async () => {
     const workspace: Workspace = {
       version: 2,
       activeProjectId: 'p1',
@@ -174,10 +187,12 @@ describe('initServerCanvasControl', () => {
     expect(paneOwner).not.toHaveBeenCalled()
     expect(sendEnvelope).not.toHaveBeenCalled()
 
-    // Production Server registers "no shared Codex identity" and never runs the desktop
-    // refreshCodexIdentityCaps boot path. The headless factory must use that direct answer rather
-    // than await the unresolved desktop getter while holding its workspace transaction queue.
+    // Production Server refreshes this shared capability after arming its identity secret. Drive
+    // that same core answer, then use the default (non-injected) canvas-control dependency. The
+    // bounded factory await must both avoid the old wedge and retain the managed launcher.
     runtime.stop()
+    setCodexThreadIdentityAuthSecret(randomBytes(32))
+    await refreshCodexIdentityCaps(async () => true, async () => true)
     runtime = await initServerCanvasControl({
       workspaceStore: store,
       ptyManager: pty,
@@ -187,26 +202,27 @@ describe('initServerCanvasControl', () => {
         version: null,
         autoPermissionMode: false,
         fullscreenTui: false,
-        sessionIdFlag: false
+        sessionIdFlag: false,
+        remoteControlFlag: false
       }),
       installAgentIntegrations: false
     })
     sendText.mockClear()
-    const deadline = Symbol('unresolved Server Codex capability')
-    const bareOpen = runtime.handler({
+    const deadline = Symbol('Server Codex capability did not settle')
+    const managedOpen = runtime.handler({
       verb: 'open-agent',
       nodeId: 'source',
       args: { agent: 'codex', prompt: 'must not wedge' },
       verified: true
     })
-    const bareReply = await Promise.race([
-      bareOpen,
+    const managedReply = await Promise.race([
+      managedOpen,
       new Promise<typeof deadline>((resolve) => setTimeout(() => resolve(deadline), 1_000))
     ])
-    expect(bareReply).not.toBe(deadline)
-    expect(bareReply).toMatchObject({ ok: true })
+    expect(managedReply).not.toBe(deadline)
+    expect(managedReply).toMatchObject({ ok: true })
     expect(sendText.mock.calls.at(-1)?.[1]).toBe(
-      "codex 'must not wedge' --ask-for-approval on-request"
+      "nodeterm-codex 'must not wedge' --ask-for-approval on-request"
     )
   })
 
