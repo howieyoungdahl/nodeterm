@@ -545,6 +545,12 @@ persisted queued command even when a tmux backend survived. A later explicit own
 view is the only cold-spawn path. Plain terminals carry no agent identity or canvas-control grant;
 missing `agentId` never means Claude.
 
+Server message delivery verifies submission in two stages. It waits until the complete framed
+message is visible in the target pane, sends Enter, then re-captures the pane. If the composer did
+not advance, it retries Enter once and verifies again. A verified target next-turn hook is still
+required before the control reply says `delivered`; otherwise the existing `stalled` result tells
+the caller the text may remain composed and must not be sent twice.
+
 Validate upgrades with a disposable `NODETERM_DATA_DIR` and port. Restarting a shared live Server
 service is an explicit operator action; it is not part of a test, repair, or boot-rescue flow.
 

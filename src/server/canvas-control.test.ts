@@ -220,23 +220,29 @@ describe('initServerCanvasControl', () => {
     } as unknown as WorkspaceStore
     const writes: Array<{ text: string; enter: boolean | undefined }> = []
     let pasted = ''
+    let submitted = false
     const legacySendEnvelope = vi.fn(async () => true)
     const pty = {
       createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
       captureSession: vi.fn(async () =>
-        pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer'),
+        submitted
+          ? 'Claude working'
+          : pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer'),
       sendText: vi.fn(async (nodeId: string, text: string, opts?: { enter?: boolean }) => {
         writes.push({ text, enter: opts?.enter })
         if (text) pasted = text
-        else queueMicrotask(() => runtime?.onAgentEvent({
-          nodeId,
-          agentId: 'claude',
-          kind: 'state',
-          state: 'working',
-          newTurn: true,
-          verified: true,
-          clientRevision: MANAGED_SCRIPT_REVISION
-        } as never))
+        else {
+          submitted = true
+          queueMicrotask(() => runtime?.onAgentEvent({
+            nodeId,
+            agentId: 'claude',
+            kind: 'state',
+            state: 'working',
+            newTurn: true,
+            verified: true,
+            clientRevision: MANAGED_SCRIPT_REVISION
+          } as never))
+        }
         return true
       }),
       destroySession: vi.fn(async () => undefined),
@@ -270,6 +276,7 @@ describe('initServerCanvasControl', () => {
     const targetId = (opened.result as { id: string }).id
     writes.length = 0
     pasted = ''
+    submitted = false
     recordFreshSpawnOwner(targetId, 'p1')
     expect(writeNodeTokenFile(targetId, 'token')).toBe(true)
     recordAgentEvent({
