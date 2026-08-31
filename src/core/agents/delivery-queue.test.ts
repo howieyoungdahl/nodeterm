@@ -106,6 +106,15 @@ describe('DeliveryQueue', () => {
     expect(q.depth('dst')).toBe(2)
   })
 
+  it('reports per-target depths without exposing queue contents', async () => {
+    const h = harness()
+    const q = new DeliveryQueue(h.deps)
+    await q.enqueue(req({ targetNodeId: 'z', body: 'one' }))
+    await q.enqueue(req({ targetNodeId: 'a', body: 'two' }))
+    await q.enqueue(req({ targetNodeId: 'z', body: 'three' }))
+    expect(q.depths()).toEqual({ a: 1, z: 2 })
+  })
+
   it('refuses with `queueFull` at capacity — never drops an accepted message', async () => {
     const h = harness()
     const q = new DeliveryQueue(h.deps, { capacity: 2 })

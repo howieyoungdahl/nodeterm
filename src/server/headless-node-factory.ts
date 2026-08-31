@@ -36,6 +36,8 @@ import type {
   Settings,
   Workspace
 } from '../shared/types'
+import { SpawnHandlerState, type SpawnHandlerSnapshot } from './spawn-handler-state'
+import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 export interface ServerControlReply {
   ok: boolean
@@ -77,6 +79,10 @@ export interface HeadlessNodeFactoryDeps {
   publishProject?: (project: Project) => void
   schedule?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearSchedule?: (timer: ReturnType<typeof setTimeout>) => void
+  /** Shared health observer. Omitted in unit tests that do not inspect handler liveness. */
+  spawnHandlerState?: SpawnHandlerState
+  /** Shared with operator mutations so two stale workspace snapshots cannot overwrite each other. */
+  mutationQueue?: WorkspaceMutationQueue
   /** Injectable only so tests can seed creator facts; production uses a fresh process-local ledger. */
   ownership?: HeadlessNodeOwnership
 }
@@ -480,7 +486,8 @@ function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
  * invisible tmux session.
  */
 export class HeadlessNodeFactory {
-  private serial: Promise<unknown> = Promise.resolve()
+  private readonly spawnHandlerState: SpawnHandlerState
+  private readonly mutationQueue: WorkspaceMutationQueue
   private attached = new Set<string>()
   /** Process-local proof that a caller created a node during THIS Server Edition run. */
   private ownership: HeadlessNodeOwnership
@@ -499,15 +506,42 @@ export class HeadlessNodeFactory {
 
   constructor(private readonly deps: HeadlessNodeFactoryDeps) {
     this.ownership = deps.ownership ?? createHeadlessNodeOwnership()
+    this.spawnHandlerState = deps.spawnHandlerState ?? new SpawnHandlerState({ now: deps.now })
+    this.mutationQueue = deps.mutationQueue ?? new WorkspaceMutationQueue()
   }
 
-  private runExclusive<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.serial.then(work, work)
-    this.serial = run.then(
-      () => undefined,
-      () => undefined
-    )
-    return run
+  private runExclusive<T>(operation: string, work: () => Promise<T>): Promise<T> {
+    const ticket = this.spawnHandlerState.enqueue(operation)
+    const tracked = async (): Promise<T> => {
+      ticket.start()
+      try {
+        const value = await work()
+        ticket.finish()
+        return value
+      } catch (error) {
+        ticket.finish(error)
+        throw error
+      }
+    }
+    return this.mutationQueue.run(tracked)
+  }
+
+  /** Synchronous, non-blocking snapshot used by `/opsapi/health`. */
+  spawnHandlerSnapshot(): SpawnHandlerSnapshot {
+    return this.spawnHandlerState.snapshot()
+  }
+
+  /** Clear process-local state for cards the operator management plane removed. */
+  forgetNodes(nodeIds: readonly string[]): void {
+    for (const id of nodeIds) {
+      this.ownership.forget(id)
+      this.attached.delete(id)
+      this.awaitingFirstWorking.delete(id)
+      this.retryCount.delete(id)
+      const timer = this.retryTimers.get(id)
+      if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
+      this.retryTimers.delete(id)
+    }
   }
 
   private publishChangeSet(
@@ -644,7 +678,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('open-project', async () => {
       const flagError = unsupportedFlags(args, new Set(['cwd']))
       if (flagError) return { ok: false, error: `open-project: ${flagError}` }
       if (!verified) {
@@ -720,7 +754,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('close', async () => {
       const flagError = unsupportedFlags(args, new Set(['node']))
       if (flagError) return { ok: false, error: `close: ${flagError}` }
       if (!verified) {
@@ -810,15 +844,7 @@ export class HeadlessNodeFactory {
         }
       }
 
-      for (const id of ids) {
-        this.ownership.forget(id)
-        this.attached.delete(id)
-        this.awaitingFirstWorking.delete(id)
-        this.retryCount.delete(id)
-        const timer = this.retryTimers.get(id)
-        if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
-        this.retryTimers.delete(id)
-      }
+      this.forgetNodes(ids)
       return {
         ok: true,
         message: `closed ${ids.length} owned node(s): ${ids.join(', ')}`,
@@ -832,7 +858,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('link', async () => {
       const flagError = unsupportedFlags(args, new Set(['from', 'to']))
       if (flagError) return { ok: false, error: `link: ${flagError}` }
       if (!verified) {
@@ -907,7 +933,7 @@ export class HeadlessNodeFactory {
   }
 
   group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('group', async () => {
       const flagError = unsupportedFlags(args, new Set(['nodes', 'label', 'color']))
       if (flagError) return { ok: false, error: `group: ${flagError}` }
       let color: NodeColor | undefined
@@ -962,7 +988,7 @@ export class HeadlessNodeFactory {
   }
 
   rename(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('rename', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'title']))
       if (flagError) return { ok: false, error: `rename: ${flagError}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -999,7 +1025,7 @@ export class HeadlessNodeFactory {
   }
 
   color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('color', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'color']))
       if (flagError) return { ok: false, error: `color: ${flagError}` }
       if (!isNodeColor(args.color)) return { ok: false, error: invalidNodeColorMessage() }
@@ -1041,7 +1067,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive(verb, async () => {
       const flagError = unsupportedFlags(
         args,
         verb === 'open-terminal'
@@ -1238,7 +1264,7 @@ export class HeadlessNodeFactory {
   }
 
   sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('sticky', async () => {
       const parsed = parseStickyArgs(args)
       if ('error' in parsed) return { ok: false, error: `sticky: ${parsed.error}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -1320,7 +1346,7 @@ export class HeadlessNodeFactory {
   }
 
   refreshArmed(observed?: Pick<NormalizedAgentEvent, 'nodeId' | 'state'>): Promise<void> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('refresh-armed', async () => {
       if (this.stopped) return
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
       const changedByProject = new Map<Project, CanvasNodeState[]>()

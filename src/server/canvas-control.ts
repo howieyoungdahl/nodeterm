@@ -35,8 +35,13 @@ import {
   createServerEditionControlHandler,
   type ServerEditionControlActions
 } from './control-unsupported'
-import { HeadlessNodeFactory } from './headless-node-factory'
+import {
+  HeadlessNodeFactory,
+  type HeadlessNodeOwnership
+} from './headless-node-factory'
 import { sendSettledEnvelope } from './settled-envelope'
+import { SpawnHandlerState } from './spawn-handler-state'
+import type { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 export interface ServerCanvasControlDeps {
   workspaceStore: WorkspaceStore
@@ -46,6 +51,12 @@ export interface ServerCanvasControlDeps {
   cliCaps?: () => Promise<ClaudeCliCaps>
   /** Test seam for the boot-populated shared Codex capability answer. */
   codexSharedIdentity?: () => Promise<boolean>
+  /** Shared with the operator inventory so creator provenance has one process-local source. */
+  ownership?: HeadlessNodeOwnership
+  /** Shared with `/opsapi/health`; snapshotting it never waits on the handler. */
+  spawnHandlerState?: SpawnHandlerState
+  /** Shared with `/opsapi` so every Server-owned workspace transaction is serialized. */
+  mutationQueue?: WorkspaceMutationQueue
   /** The server's installHooks gate. False keeps every real agent config directory untouched. */
   installAgentIntegrations?: boolean
 }
@@ -53,6 +64,8 @@ export interface ServerCanvasControlDeps {
 export interface ServerCanvasControl {
   handler: ReturnType<typeof createServerEditionControlHandler>
   onAgentEvent(event: NormalizedAgentEvent): void
+  deliveryQueueDepths(): Record<string, number>
+  forgetNodes(nodeIds: readonly string[]): void
   installSkillInto(configDir: string): void
   stop(): void
 }
@@ -147,6 +160,9 @@ export async function initServerCanvasControl(
       deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
+    ownership: deps.ownership,
+    spawnHandlerState: deps.spawnHandlerState,
+    mutationQueue: deps.mutationQueue,
     publishProject: (project: Project) => platform().broadcast(IPC.workspaceExternalChange, project)
   })
 
@@ -198,6 +214,8 @@ export async function initServerCanvasControl(
       onMessagingAgentEvent(event, queue)
       factory.onAgentEvent(event)
     },
+    deliveryQueueDepths: () => queue.depths(),
+    forgetNodes: (nodeIds) => factory.forgetNodes(nodeIds),
     installSkillInto,
     stop: () => {
       factory.stop()

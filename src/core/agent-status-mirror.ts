@@ -1623,6 +1623,19 @@ export function mirrorEntry(nodeId: string): MirrorEntry | undefined {
 }
 
 /**
+ * Newest in-process activity timestamp for operator inventory. Main-state hooks and raw tool/context
+ * activity live in separate mirror maps; taking the later value keeps the management plane from
+ * advertising an old turn boundary while the agent is visibly using a tool.
+ */
+export function nodeLastActivityAt(nodeId: string): number | undefined {
+  const stateAt = state.get(nodeId)?.updatedAt
+  const nowAt = inboxNodes.get(nodeId)?.updatedAt
+  if (stateAt === undefined) return nowAt
+  if (nowAt === undefined) return stateAt
+  return Math.max(stateAt, nowAt)
+}
+
+/**
  * The nodes the mirror currently believes are `working`, with the identity a synthetic event needs.
  * Read-only peek for the shells — the reconnect resync asks the host about exactly these, because
  * `working` is the only state a lost hook event can strand (see remote-ssh/agent-resync-decide.ts).
