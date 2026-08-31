@@ -595,10 +595,22 @@ Server canvas control is disabled by default. Set `NODETERM_SERVER_CANVAS_CONTRO
 Every enabled request requires verified node identity.
 
 Ownership is intentionally narrower than the desktop confirmation UI: an agent may mutate, message,
-or close only a node it opened during the current Server process run. Link, group, rename, color,
+or close only a node it opened during the current Server process run. Link, group, rename, resize, color,
 sticky updates, dependency targets, message delivery, and close validate their complete target set
 before any write or PTY kill; an unowned member refuses the whole operation. Queued messages repeat
 the creator check at flush time in addition to the existing verified and per-project switch gates.
+
+Node geometry is durable canvas state: Server control writes `CanvasNodeState.size`, the browser
+hydrates that exact rectangle into React Flow, and later saves measured geometry back. Consequently,
+`open-agent` defaults to the compact 440×320 control size (exactly half the stock 640×440 area),
+while `--size normal` uses the configured `defaultNodeWidth`/`defaultNodeHeight`. Manual UI opens and
+`open-terminal` retain the normal default. `resize --node <id> --size compact|normal` updates the same
+persisted record without killing or respawning its terminal, subject to current-run creator ownership.
+During a staged static-renderer update, the still-running pre-size Server emits a new headless agent
+as a source-less, unmarked canvas upsert. A connected refreshed renderer recognizes only that exact
+legacy shape, stamps it compact, and persists the result. Browser/manual creations carry a client
+source and are never rewritten; new-server explicit `normal` creations carry the marker and are also
+preserved. This lets the next connected control spawn compact before the Server process restart.
 
 The creator ledger is memory-only and is never reconstructed from a project file, title, hook
 record, or tmux session name. After a service restart it is empty, and the headless factory performs

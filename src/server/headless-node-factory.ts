@@ -10,6 +10,11 @@ import {
   NODE_COLORS,
   type NodeColor
 } from '../shared/node-colors'
+import {
+  controlNodeSizeError,
+  resolveControlNodeSize,
+  resolveControlNodeSizeName
+} from '../shared/control-node-size'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../shared/sticky-write'
 import type { WorkspaceStore } from '../core/workspace-store'
 import {
@@ -1090,6 +1095,65 @@ export class HeadlessNodeFactory {
     })
   }
 
+  resize(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply> {
+    return this.runExclusive('resize', async () => {
+      const flagError = unsupportedFlags(args, new Set(['node', 'size']))
+      if (flagError) return { ok: false, error: `resize: ${flagError}` }
+      if (!verified) {
+        return {
+          ok: false,
+          error: 'resize-identity-refused: Server Edition resize requires verified node identity'
+        }
+      }
+      if (args.size === undefined) {
+        return { ok: false, error: 'resize requires --size compact|normal' }
+      }
+      const sizeName = resolveControlNodeSizeName(args.size)
+      const size = resolveControlNodeSize(args.size, terminalSize(this.deps.settings()))
+      if (!sizeName || !size) return { ok: false, error: controlNodeSizeError('resize') }
+
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const source = sourceProject(workspace, sourceNodeId)
+      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
+      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+        return { ok: false, error: 'source node is not a control-capable agent' }
+      }
+
+      const id = (args.node ?? '').trim()
+      const projects = nodeProjects(workspace, id)
+      if (projects.length && (projects.length !== 1 || projects[0].id !== source.project.id)) {
+        return {
+          ok: false,
+          error: `resize-project-refused: ${id} is not exclusively in the caller's project`
+        }
+      }
+      const target = source.project.nodes.find((node) => node.id === id)
+      if (!target) return { ok: false, error: `resize: no node with id ${id}` }
+      if (!this.ownsMutation(sourceNodeId, id)) {
+        return this.ownershipRefusal('resize', sourceNodeId, id)
+      }
+      if (target.kind !== 'terminal') {
+        return { ok: false, error: 'resize: target must be a terminal node' }
+      }
+
+      const resized = { ...target, size, controlSize: sizeName }
+      source.project.nodes = source.project.nodes.map((node) =>
+        node.id === id ? resized : node
+      )
+      await this.deps.workspaceStore.save(workspace)
+      this.publish(source.project, [resized])
+      return {
+        ok: true,
+        message: `resized ${id} to ${sizeName} (${size.width}×${size.height})`,
+        result: { id, size }
+      }
+    })
+  }
+
   color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
     return this.runExclusive('color', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'color']))
@@ -1146,7 +1210,8 @@ export class HeadlessNodeFactory {
               'after',
               'project',
               'model',
-              'remote-control'
+              'remote-control',
+              'size'
             ])
       )
       if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
@@ -1171,7 +1236,16 @@ export class HeadlessNodeFactory {
       if (unownedAfter) return this.ownershipRefusal(verb, sourceNodeId, unownedAfter)
 
       const settings = this.deps.settings()
-      const nodeSize = terminalSize(settings)
+      const normalNodeSize = terminalSize(settings)
+      const nodeSizeName = verb === 'open-agent'
+        ? resolveControlNodeSizeName(args.size)
+        : undefined
+      const nodeSize = verb === 'open-agent'
+        ? resolveControlNodeSize(args.size, normalNodeSize)
+        : normalNodeSize
+      if (!nodeSize || (verb === 'open-agent' && !nodeSizeName)) {
+        return { ok: false, error: controlNodeSizeError(verb) }
+      }
       const capabilityTimeout =
         this.deps.capabilityTimeoutMs ?? SERVER_CAPABILITY_TIMEOUT_MS
       const capsAttempt =
@@ -1289,6 +1363,7 @@ export class HeadlessNodeFactory {
           kind: 'terminal',
           position: placeRight(target, source.node, nodeSize, created),
           size: { ...nodeSize },
+          ...(nodeSizeName ? { controlSize: nodeSizeName } : {}),
           title,
           ...(verb === 'open-agent' ? { titleAuto: true } : {}),
           color,

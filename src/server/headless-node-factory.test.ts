@@ -426,6 +426,83 @@ describe('HeadlessNodeFactory', () => {
     await Promise.all([first, second])
   })
 
+  it('defaults control-spawned agents to half-footprint compact geometry and persists overrides', async () => {
+    const compact = await factory.openAgent('term-source', { agent: 'claude' }, true)
+    const compactId = (compact.result as { id: string }).id
+    const normal = await factory.openAgent(
+      'term-source',
+      { agent: 'codex', size: 'normal' },
+      true
+    )
+    const normalId = (normal.result as { id: string }).id
+
+    const project = (await new WorkspaceStore().load({ sideline: false })).projects[0]
+    expect(project.nodes.find((node) => node.id === compactId)).toMatchObject({
+      size: { width: 440, height: 320 },
+      controlSize: 'compact'
+    })
+    expect(project.nodes.find((node) => node.id === normalId)).toMatchObject({
+      size: { width: 640, height: 440 },
+      controlSize: 'normal'
+    })
+    expect(published.find((node) => node.id === compactId)?.size).toEqual({
+      width: 440,
+      height: 320
+    })
+    expect(published.find((node) => node.id === normalId)?.size).toEqual({
+      width: 640,
+      height: 440
+    })
+
+    await expect(
+      factory.openAgent('term-source', { agent: 'claude', size: 'small' }, true)
+    ).resolves.toEqual({ ok: false, error: 'open-agent: --size must be compact or normal' })
+  })
+
+  it('resizes an owned terminal durably without respawning its PTY', async () => {
+    const opened = await factory.openAgent(
+      'term-source',
+      { agent: 'claude', size: 'normal' },
+      true
+    )
+    const id = (opened.result as { id: string }).id
+    const creates = pty.creates.length
+    const sends = pty.sends.length
+    published.length = 0
+
+    await expect(
+      factory.resize('term-source', { node: id }, true)
+    ).resolves.toEqual({ ok: false, error: 'resize requires --size compact|normal' })
+
+    await expect(
+      factory.resize('term-source', { node: id, size: 'compact' }, true)
+    ).resolves.toMatchObject({
+      ok: true,
+      result: { id, size: { width: 440, height: 320 } }
+    })
+    expect(pty.creates).toHaveLength(creates)
+    expect(pty.sends).toHaveLength(sends)
+    expect(published).toEqual([
+      expect.objectContaining({
+        id,
+        size: { width: 440, height: 320 },
+        controlSize: 'compact'
+      })
+    ])
+    expect((await store.load({ sideline: false })).projects[0].nodes
+      .find((node) => node.id === id)).toMatchObject({
+        size: { width: 440, height: 320 },
+        controlSize: 'compact'
+      })
+
+    await expect(
+      factory.resize('term-source', { node: id, size: 'normal' }, true)
+    ).resolves.toMatchObject({ result: { size: { width: 640, height: 440 } } })
+    await expect(
+      factory.resize('term-source', { node: id, size: 'wide' }, true)
+    ).resolves.toEqual({ ok: false, error: 'resize: --size must be compact or normal' })
+  })
+
   it('re-grants an exact saved local project after a Server restart before cross-project open', async () => {
     const targetDir = path.join(dataDir, 'loop-project')
     fs.mkdirSync(targetDir, { recursive: true })
@@ -616,6 +693,7 @@ describe('HeadlessNodeFactory', () => {
       await factory.link('term-source', { to: 'term-foreign' }, true),
       await factory.group('term-source', { nodes: 'term-source,term-foreign' }),
       await factory.rename('term-source', { node: 'term-foreign', title: 'Stolen' }),
+      await factory.resize('term-source', { node: 'term-foreign', size: 'compact' }, true),
       await factory.color('term-source', { node: 'term-foreign', color: '#32d74b' }),
       await factory.sticky('term-source', { node: 'sticky-foreign', append: 'stolen' }),
       await factory.openAgent(
@@ -625,11 +703,20 @@ describe('HeadlessNodeFactory', () => {
       )
     ]
 
-    expect(replies.map((reply) => reply.ok)).toEqual([false, false, false, false, false, false])
+    expect(replies.map((reply) => reply.ok)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ])
     expect(replies.map((reply) => reply.error)).toEqual([
       expect.stringContaining('link-not-owner'),
       expect.stringContaining('group-not-owner'),
       expect.stringContaining('rename-not-owner'),
+      expect.stringContaining('resize-not-owner'),
       expect.stringContaining('color-not-owner'),
       expect.stringContaining('sticky-not-owner'),
       expect.stringContaining('open-agent-not-owner')

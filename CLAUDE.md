@@ -1316,7 +1316,7 @@ else, and its context links must keep classifying across restarts).
   marker-block route instead — see docs/grok-agent.md.
   **Server creator ownership (2026-08 incident hardening):** enabled Server control accepts only
   verified node identity. `HeadlessNodeFactory` records which source node opened each new node in a
-  process-local ledger; link/group/rename/color/sticky-update, message delivery, and close validate
+  process-local ledger; link/group/rename/resize/color/sticky-update, message delivery, and close validate
   the whole target set as current-run creations before writing or killing anything. Queued messages
   revalidate creator ownership before flush. The ledger is intentionally empty after restart —
   project JSON, titles, hook history and tmux names are not creator proof — so
@@ -1363,6 +1363,14 @@ else, and its context links must keep classifying across restarts).
   never a guessed version floor or a launch with an unknown flag. The optional name is normalized
   to one line and shell-quoted by the shared command assembler. Desktop canvas control refuses the
   Server-only flag explicitly; `/rc [name]` inside an ordinary Claude session is the manual path.
+  **Control-spawn geometry:** persisted `CanvasNodeState.size` is authoritative, not renderer CSS.
+  Canvas-control agent opens default to 440×320 (half the area of 640×440); `--size normal` restores
+  the configured manual-open dimensions, and manual UI opens stay unchanged. The `resize` verb
+  changes that persisted rectangle without restarting the PTY and is creator-owned on Server.
+  A refreshed renderer also recognizes a NEW source-less/unmarked headless agent upsert from the
+  pre-size Server process and stamps it compact before save. Client/manual upserts have a `src`, and
+  new-server explicit-normal upserts have `controlSize: 'normal'`, so neither is rewritten. This is
+  the no-service-restart bridge for the next connected spawn while static assets roll ahead of main.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
   the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
   `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim

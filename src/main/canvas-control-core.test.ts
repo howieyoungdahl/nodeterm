@@ -123,6 +123,13 @@ describe('parseControlRequest', () => {
       verb: 'open-agent',
       args: { agent: 'codex' }
     })
+    expect(parseControlRequest('open-agent', { agent: 'codex', size: 'normal' })).toEqual({
+      verb: 'open-agent',
+      args: { agent: 'codex', size: 'normal' }
+    })
+    expect(parseControlRequest('open-agent', { agent: 'codex', size: 'small' })).toEqual({
+      error: 'open-agent: --size must be compact or normal'
+    })
     expect(isDestructiveVerb('open-agent')).toBe(false)
   })
 
@@ -137,6 +144,21 @@ describe('parseControlRequest', () => {
     expect(parseControlRequest('open-claude', { 'remote-control': '' })).toEqual({
       error: '--remote-control is supported only by open-agent --agent claude'
     })
+  })
+
+  it('resize requires one node and a named compact or normal size', () => {
+    expect(parseControlRequest('resize', {})).toEqual({ error: 'resize requires --node <id>' })
+    expect(parseControlRequest('resize', { node: 'n1' })).toEqual({
+      error: 'resize requires --size compact|normal'
+    })
+    expect(parseControlRequest('resize', { node: 'n1', size: 'wide' })).toEqual({
+      error: 'resize: --size must be compact or normal'
+    })
+    expect(parseControlRequest('resize', { node: 'n1', size: 'compact' })).toEqual({
+      verb: 'resize',
+      args: { node: 'n1', size: 'compact' }
+    })
+    expect(isDestructiveVerb('resize')).toBe(false)
   })
 
   it('open-worktree requires --branch, close-worktree requires --group; neither destructive', () => {
@@ -234,14 +256,18 @@ describe('parseControlRequest', () => {
 
   it('instructions cover the verb set and the confirm caveat', () => {
     const body = buildCanvasControlInstructions('/tmp/nodeterm.sh')
-    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'ungroup', 'move', 'arrange', 'rename', 'color', 'write', 'close', 'board', 'assign']) {
+    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'ungroup', 'move', 'arrange', 'rename', 'resize', 'color', 'write', 'close', 'board', 'assign']) {
       expect(body).toContain(verb)
     }
     expect(body).toContain('group --nodes <id,id> [--label L] [--color C]')
     expect(body).toContain('color --node <id,id> --color C')
+    expect(body).toContain('resize --node <id> --size compact|normal')
+    expect(body).toContain('440×320')
     const skill = buildCanvasSkillBody('/tmp/nodeterm.sh')
     expect(skill).toContain('group --nodes <id,id> [--label "Frontend Team"] [--color C]')
     expect(skill).toContain('color --node <id,id> --color C')
+    expect(skill).toContain('resize --node <id> --size compact|normal')
+    expect(skill).toContain('440×320')
     expect(body.toLowerCase()).toContain('confirm')
   })
 
