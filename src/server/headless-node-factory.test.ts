@@ -10,6 +10,7 @@ import { WorkspaceStore } from '../core/workspace-store'
 import type { AgentState } from '../shared/agents/normalize'
 import {
   DEFAULT_SETTINGS,
+  type ClaudeCliCaps,
   type CanvasNodeState,
   type PtyCreateOptions,
   type PtyCreateResult,
@@ -22,6 +23,7 @@ import {
   type HeadlessNodeOwnership,
   type HeadlessPty
 } from './headless-node-factory'
+import { SpawnHandlerState } from './spawn-handler-state'
 
 class FakePty implements HeadlessPty {
   readonly creates: PtyCreateOptions[] = []
@@ -95,6 +97,9 @@ describe('HeadlessNodeFactory', () => {
   let factory: HeadlessNodeFactory
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
+  let cliCaps: () => Promise<ClaudeCliCaps>
+  let handlerNow: number
+  let spawnHandlerState: SpawnHandlerState
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -115,6 +120,17 @@ describe('HeadlessNodeFactory', () => {
     removed = []
     publishedProjects = []
     codexSharedIdentity = false
+    cliCaps = async () => ({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      sessionIdFlag: false
+    })
+    handlerNow = 1_000
+    spawnHandlerState = new SpawnHandlerState({
+      now: () => handlerNow,
+      wedgeAfterMs: 100
+    })
     ownership = createHeadlessNodeOwnership()
     ownership.record('term-upstream', {
       sourceNodeId: 'term-source',
@@ -149,14 +165,10 @@ describe('HeadlessNodeFactory', () => {
       workspaceStore: store,
       ptyManager: pty,
       settings,
-      cliCaps: async () => ({
-        version: null,
-        autoPermissionMode: false,
-        fullscreenTui: false,
-        sessionIdFlag: false
-      }),
+      cliCaps: () => cliCaps(),
       codexSharedIdentity: async () => codexSharedIdentity,
       ownership,
+      spawnHandlerState,
       stateOf: (id) => states[id],
       publishNode: (_projectId, node) => published.push(node),
       publishRemoval: (_projectId, nodeId) => removed.push(nodeId),
@@ -204,6 +216,38 @@ describe('HeadlessNodeFactory', () => {
     expect(reloaded.projects[0].nodes.find((node) => node.id === id)).toMatchObject({
       cwd: projectDir
     })
+  })
+
+  it('reports the real serialized creation handler as wedged without waiting behind it', async () => {
+    let releaseCaps!: (caps: ClaudeCliCaps) => void
+    const pendingCaps = new Promise<ClaudeCliCaps>((resolve) => {
+      releaseCaps = resolve
+    })
+    cliCaps = () => pendingCaps
+    const first = factory.openAgent('term-source', { agent: 'claude' }, true)
+    await Promise.resolve()
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-agent',
+      queued: 0
+    })
+
+    const second = factory.openTerminal('term-source', {}, true)
+    handlerNow += 101
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-agent',
+      activeForMs: 101,
+      queued: 1
+    })
+
+    releaseCaps({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      sessionIdFlag: false
+    })
+    await Promise.all([first, second])
   })
 
   it('re-grants an exact saved local project after a Server restart before cross-project open', async () => {

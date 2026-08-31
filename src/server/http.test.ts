@@ -13,6 +13,7 @@ import {
   SESSION_COOKIE
 } from './http'
 import { parseTrustedNets } from './proxy-trust'
+import { createOpsApiHandler } from './ops-api'
 
 let dir: string, rendererDir: string, server: http.Server, base: string, auth: Auth
 
@@ -26,7 +27,28 @@ beforeEach(async () => {
   )
   fs.writeFileSync(path.join(rendererDir, 'app.js'), 'console.log(1)')
   auth = new Auth(dir)
-  server = http.createServer(createHttpHandler({ auth, rendererDir }))
+  server = http.createServer(createHttpHandler({
+    auth,
+    rendererDir,
+    opsApi: createOpsApiHandler({
+      token: 'http-test-ops-token',
+      nodes: async () => [],
+      sweep: async (dryRun) => ({ dryRun, affectedIds: [], scanned: 0 }),
+      remove: async (id, force) => ({ ok: true, removedIds: [id], forced: force }),
+      health: () => ({
+        startedAt: 1,
+        uptimeMs: 2,
+        wsClientCount: 0,
+        canvasControlEnabled: false,
+        spawnHandler: {
+          state: 'idle', operation: null, startedAt: null, activeForMs: 0, queued: 0,
+          wedgeAfterMs: 30_000, lastSettledAt: null, lastError: null
+        },
+        deliveryQueueDepths: {},
+        projects: []
+      })
+    })
+  }))
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
 })
@@ -52,6 +74,16 @@ async function setupAndLogin(): Promise<string> {
 }
 
 describe('http layer', () => {
+  it('routes ops before browser auth, so only the dedicated bearer works', async () => {
+    const cookie = await setupAndLogin()
+    expect((await fetch(`${base}/opsapi/nodes`, { headers: { cookie } })).status).toBe(401)
+    const ops = await fetch(`${base}/opsapi/nodes`, {
+      headers: { authorization: 'Bearer http-test-ops-token' }
+    })
+    expect(ops.status).toBe(200)
+    expect(await ops.json()).toEqual({ nodes: [] })
+  })
+
   it('unauthenticated: html → /login redirect, api → 401; /login redirects to /setup when unconfigured', async () => {
     const r1 = await fetch(`${base}/`, { headers: { accept: 'text/html' }, redirect: 'manual' })
     expect(r1.status).toBe(302)

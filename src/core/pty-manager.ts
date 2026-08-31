@@ -134,6 +134,9 @@ import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './proje
 // runs on detach; the interval covers an ungraceful power loss between detaches.
 const SCROLLBACK_SNAPSHOT_MS = 15_000
 
+/** Truthful backend probe for operator inventory. `unknown` must never be treated as absence. */
+export type SessionPresence = 'alive' | 'dead' | 'unknown'
+
 // Async exec for tmux side-calls (capture / send-keys / kill-session) so they never block
 // the main event loop — a synchronous capture-pane of a large scrollback would stall every
 // other session's PTY streaming and all IPC for its duration.
@@ -2374,33 +2377,53 @@ export class PtyManager {
    * the caller treats it as a warm join and types nothing into it.
    */
   async sessionExists(persistKey: string): Promise<boolean> {
-    if (this.liveSessionForPersistKey(persistKey)) return true
-    const probes: Promise<boolean>[] = []
-    if (this.tmuxPath) probes.push(this.tmuxSessionExists(persistKey))
+    return (await this.sessionPresence(persistKey)) !== 'dead'
+  }
+
+  /**
+   * Tri-state sibling of `sessionExists` for diagnostics and destructive cleanup. Warm-attach
+   * callers keep using the boolean method above, where unknown deliberately means "possibly
+   * alive"; operator inventory needs to expose that uncertainty instead of calling it alive.
+   */
+  async sessionPresence(persistKey: string): Promise<SessionPresence> {
+    if (this.liveSessionForPersistKey(persistKey)) return 'alive'
+    const probes: Promise<SessionPresence>[] = []
+    if (this.tmuxPath) probes.push(this.tmuxSessionPresence(persistKey))
     if (this.getSettings().tmuxEnabled && sessionHostSupported()) {
-      // A failed host read is not evidence of absence. This mirrors tmuxSessionExists' fail-safe
-      // direction and prevents a reconnect blip from being mistaken for a cold generation.
-      probes.push(sessionHostHasSession(sessionName(persistKey)).catch(() => true))
+      probes.push(
+        sessionHostHasSession(sessionName(persistKey)).then(
+          (exists): SessionPresence => exists ? 'alive' : 'dead',
+          (): SessionPresence => 'unknown'
+        )
+      )
     }
-    if (probes.length === 0) return false
-    return (await Promise.all(probes)).some(Boolean)
+    if (probes.length === 0) return 'dead'
+    const answers = await Promise.all(probes)
+    if (answers.includes('alive')) return 'alive'
+    if (answers.includes('unknown')) return 'unknown'
+    return 'dead'
   }
 
   /** Whether a tmux session for this node id currently exists (server alive + session present).
    *  Async like the remote probe: a bulk project load fires one `create()` per terminal node,
    *  and a synchronous subprocess per probe would serialize on the main event loop. */
   private async tmuxSessionExists(persistKey: string): Promise<boolean> {
-    if (!this.tmuxPath) return false
+    return (await this.tmuxSessionPresence(persistKey)) !== 'dead'
+  }
+
+  /** Tri-state tmux probe; the boolean wrapper above preserves warm-attach's fail-safe direction. */
+  private async tmuxSessionPresence(persistKey: string): Promise<SessionPresence> {
+    if (!this.tmuxPath) return 'dead'
     try {
       await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)], {
         timeout: PROBE_TIMEOUT_MS
       })
-      return true
+      return 'alive'
     } catch (e) {
       // Same discrimination as the remote probe: tmux's exit 1 (no session / no server —
       // the reboot case) is absence; a spawn failure (EAGAIN under a bulk project load) is
       // not, and cold-restoring on it would type into a live session.
-      return !probeSaysAbsent(e)
+      return probeSaysAbsent(e) ? 'dead' : 'unknown'
     }
   }
 
