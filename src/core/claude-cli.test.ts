@@ -7,7 +7,8 @@ describe('claudeCliCapsFrom', () => {
       version: '2.1.207 (Claude Code)',
       autoPermissionMode: true,
       fullscreenTui: true,
-      sessionIdFlag: false
+      sessionIdFlag: false,
+      remoteControlFlag: false
     })
   })
 
@@ -16,7 +17,8 @@ describe('claudeCliCapsFrom', () => {
       version: '2.1.50 (Claude Code)',
       autoPermissionMode: false,
       fullscreenTui: false,
-      sessionIdFlag: false
+      sessionIdFlag: false,
+      remoteControlFlag: false
     })
   })
 
@@ -51,21 +53,26 @@ Options:
   --model <model>                       Model for the current session.
   --session-id <uuid>                   Use a specific session ID for the
                                         conversation (must be a valid UUID)
+  --remote-control [name]               Start an interactive session with Remote
+                                        Control enabled (optionally named)
   --setting-sources <sources>           Comma-separated list of setting sources
 `
 
   it('says yes when the CLI advertises the flag', () => {
     expect(claudeCliCapsFrom('2.1.226 (Claude Code)', HELP).sessionIdFlag).toBe(true)
+    expect(claudeCliCapsFrom('2.1.226 (Claude Code)', HELP).remoteControlFlag).toBe(true)
   })
 
   it('says no for help text without it — an old CLI would exit on an unknown flag', () => {
     const old = 'Options:\n  --model <model>   Model for the current session.\n'
     expect(claudeCliCapsFrom('2.1.50 (Claude Code)', old).sessionIdFlag).toBe(false)
+    expect(claudeCliCapsFrom('2.1.50 (Claude Code)', old).remoteControlFlag).toBe(false)
   })
 
   it('says no when the help probe produced nothing (it degrades on its own)', () => {
     expect(claudeCliCapsFrom('2.1.226 (Claude Code)', null).sessionIdFlag).toBe(false)
     expect(claudeCliCapsFrom('2.1.226 (Claude Code)').sessionIdFlag).toBe(false)
+    expect(claudeCliCapsFrom('2.1.226 (Claude Code)', null).remoteControlFlag).toBe(false)
   })
 
   // Matching a bare substring would let a DIFFERENT option, or prose describing one, answer yes
@@ -79,6 +86,15 @@ Options:
 
   it('accepts the `--session-id=<uuid>` spelling too', () => {
     expect(claudeCliCapsFrom('2.1.226', '  --session-id=<uuid>  use it\n').sessionIdFlag).toBe(true)
+  })
+
+  it('does not mistake the session-name-prefix option for --remote-control', () => {
+    expect(
+      claudeCliCapsFrom(
+        '2.1.226',
+        '  --remote-control-session-name-prefix <prefix>  prefix it\n'
+      ).remoteControlFlag
+    ).toBe(false)
   })
 
   // The two capabilities are independent: this flag says nothing about `auto`, and vice versa.

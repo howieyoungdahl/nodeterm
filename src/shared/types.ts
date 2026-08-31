@@ -2437,6 +2437,12 @@ export interface ClaudeCliCaps {
    * the CLI exit, so a wrong guess kills every claude launch rather than degrading.
    */
   sessionIdFlag: boolean
+  /**
+   * Whether this CLI accepts `--remote-control [name]` for an interactive local session.
+   * Feature-detected from `claude --help`; false means callers must refuse the option rather than
+   * type an unknown flag that exits the CLI.
+   */
+  remoteControlFlag: boolean
 }
 
 /** The answer whenever the CLI version can't be determined: no `auto` flag → bare command, and no
@@ -2445,7 +2451,8 @@ export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
   version: null,
   autoPermissionMode: false,
   fullscreenTui: false,
-  sessionIdFlag: false
+  sessionIdFlag: false,
+  remoteControlFlag: false
 }
 
 /** Whether a Codex node launched on this machine right now would get a managed shared identity.

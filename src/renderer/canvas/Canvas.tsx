@@ -8068,6 +8068,19 @@ export function Canvas() {
         return
       }
 
+      // `--remote-control` is a Server Edition launch option. The shared parser admits it so the
+      // headless factory can feature-detect the host CLI; desktop must answer explicitly instead
+      // of silently opening an ordinary Claude session while claiming the option was honored.
+      if (args['remote-control'] !== undefined) {
+        reply({
+          ok: false,
+          error:
+            'remote-control-server-only: open-agent --remote-control is available from Server ' +
+            'Edition canvas control; on desktop open Claude normally and run `/rc [name]` inside it'
+        })
+        return
+      }
+
       // ── `--project` targeted opens (issue #338 Task 2.3) — the three open verbs, early ──────
       // Main's gateProjectTarget already enforced own-or-granted BEFORE forwarding (spec §3):
       // the renderer never sees an unauthorized target — the checks below are belt, not the

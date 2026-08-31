@@ -52,6 +52,12 @@ export interface LaunchInputs {
    *  `--session-id` is emitted even for a claude-base agent — an unknown flag would kill the
    *  launch, so this fails open to the bare command. */
   sessionIdFlagSupported?: boolean
+  /**
+   * Enable Claude's interactive Remote Control launch. Undefined = off; an empty string emits the
+   * unnamed flag; any other value is normalized to one line and shell-quoted as the session name.
+   * Callers must feature-detect support before setting this.
+   */
+  remoteControl?: string
   /** Should a SHARED_IDENTITY_CAPABLE agent (codex) name its managed launcher instead of the bare
    *  CLI? The caller's answer to "will the launcher actually be there?" — false (the default) emits
    *  the bare command byte-for-byte. A remote node must pass false (the host has no launcher). */
@@ -184,12 +190,21 @@ export function assembleLaunchCommand(
     const withMode = inputs.permissionMode
       ? withPermissionMode(cmd, capId, inputs.permissionMode)
       : cmd
+    const withRemoteControl = (command: string): string => {
+      if (inputs.remoteControl === undefined || capId !== 'claude') return command
+      const name = inputs.remoteControl.replace(/\s+/g, ' ').trim()
+      return name
+        ? `${command} --remote-control ${shellSingleQuote(name)}`
+        : `${command} --remote-control`
+    }
     // Session-id minting: claude-base + CLI supports the flag. On resume this branch is never
     // taken (assembleResumeCommand does not pass sessionId).
     if (inputs.sessionId && mintsSessionId(capId) && inputs.sessionIdFlagSupported) {
-      return withAgentModel(withSessionId(withMode, capId, inputs.sessionId), capId, inputs.model)
+      return withRemoteControl(
+        withAgentModel(withSessionId(withMode, capId, inputs.sessionId), capId, inputs.model)
+      )
     }
-    return withAgentModel(withMode, capId, inputs.model)
+    return withRemoteControl(withAgentModel(withMode, capId, inputs.model))
   }
 
   const command = usesSep ? `${flagged(baseCmd)} ${sep} ${promptArg}` : flagged(withPrompt)
