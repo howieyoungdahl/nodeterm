@@ -326,6 +326,8 @@ export interface CanvasNodeState {
   kind: NodeKind
   position: { x: number; y: number }
   size: { width: number; height: number }
+  /** Agent nodes opened through canvas-control: the named geometry choice persisted at spawn. */
+  controlSize?: 'compact' | 'normal'
   title: string
   /**
    * Agent nodes only: while true (the default), the node title auto-tracks the agent's own
