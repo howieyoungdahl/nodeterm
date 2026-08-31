@@ -1336,16 +1336,23 @@ else, and its context links must keep classifying across restarts).
   non-cancellable create resolves after the first destroy already found nothing, launch cleanup
   destroys the exact backend again. Keep this two-pass guard when moving work outside the lock or
   removed cards leak tmux husks.
-  Capability preflight is separately bounded at 5s. In particular, Server canvas control must use
-  its direct `shared:false` Codex answer: `codexIdentityCaps()` waits for the desktop-only
-  `refreshCodexIdentityCaps()` initializer and caused the first Codex open to hold the old global
-  lock forever while message verbs, which bypassed the factory, kept answering.
+  Capability preflight is separately bounded at 5s. Server boot now refreshes the real shared-Codex
+  capability after arming its identity secret, and canvas control consumes that boot-populated
+  answer behind the bound. A missing or failed refresh degrades only that launch to bare Codex;
+  neither an unbounded unresolved getter nor a hardcoded `shared:false` production answer is valid.
   **Do not widen this for operators.** The Server operator plane is a separate loopback bearer
   principal in `src/server/ops-api.ts`; its ability to inventory or remove any persisted card is
   not authority an agent `/control/*` request inherits. Pane probe errors remain `unknown`, and
   only two definitive misses enter the shared sweep deletion set. A forced live delete confirms
   local PTY teardown before the durable card is removed. The health read snapshots the factory's
   tracker directly and must never enqueue behind it.
+  **Server message submit verification:** `sendSettledEnvelope` first waits until pane capture sees
+  the pasted envelope, then sends Enter and captures again. A fresh Claude composer can render a
+  paste before it is ready to consume Enter; an unchanged composed snapshot therefore gets exactly
+  one more Enter plus re-capture. The boolean still means only "bytes reached the pane" — the
+  target's verified `newTurn`/`working` hook remains the receipt that permits `delivered`; a retry
+  that produces no receipt becomes `stalled`. Keep the retry bounded: repeating Enter can submit a
+  human draft after the intended envelope has already moved.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
   the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
   `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim

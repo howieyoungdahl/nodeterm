@@ -615,6 +615,12 @@ cards are never probed, and cleanup does not kill a session. Set
 `NODETERM_DEAD_CARD_REAP_MINUTES=0` (or pass `--dead-card-reap-minutes 0`) to disable only the
 periodic trigger; the operator endpoint remains available.
 
+Server message delivery verifies submission in two stages. It waits until the complete framed
+message is visible in the target pane, sends Enter, then re-captures the pane. If the composer did
+not advance, it retries Enter once and verifies again. A verified target next-turn hook is still
+required before the control reply says `delivered`; otherwise the existing `stalled` result tells
+the caller the text may remain composed and must not be sent twice.
+
 Validate upgrades with a disposable `NODETERM_DATA_DIR` and port. Restarting a shared live Server
 service is an explicit operator action; it is not part of a test, repair, or boot-rescue flow.
 

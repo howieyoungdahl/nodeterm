@@ -148,6 +148,12 @@ spawn-handler state without awaiting the preparation or parallel external launch
 timed-out non-cancellable launches remain visible until they actually settle. Credentials still
 never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
 
+**A Server Edition message is not submitted just because tmux accepted Enter.** A fresh agent
+composer can render a pasted envelope before it is ready to consume the submit key. Capture the
+composed pane after Enter; if it did not advance, send one bounded retry and capture again. The
+target's verified next-turn hook remains the delivery receipt. Never report the paste as delivered
+from a successful tmux command alone, and never loop Enter against somebody else's composer.
+
 **A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
 a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
 `NODETERM_CANVAS_CONTROL` until the serialized node explicitly names an agent.
