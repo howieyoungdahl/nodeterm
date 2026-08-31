@@ -180,6 +180,7 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     link: vi.fn(async () => ({ ok: true as const, result: { linked: ['term-target'] } })),
     group: vi.fn(async () => ({ ok: true as const, result: { groupId: 'group-new' } })),
     rename: vi.fn(async () => ({ ok: true as const, result: { id: 'renamed' } })),
+    resize: vi.fn(async () => ({ ok: true as const, result: { id: 'resized' } })),
     color: vi.fn(async () => ({ ok: true as const, result: { colored: ['term-target'] } })),
     sticky: vi.fn(async () => ({ ok: true as const, result: { id: 'sticky-new' } })),
     deliver: vi.fn(async () => ({ ok: true as const, message: 'queued' }))
@@ -303,7 +304,7 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     })
   })
 
-  it('dispatches headless link, group, rename, and color while preserving link identity', async () => {
+  it('dispatches headless link, group, rename, resize, and color while preserving identity', async () => {
     const a = actions()
     const handler = createServerEditionControlHandler(a)
     await handler({
@@ -330,6 +331,12 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
       args: { node: 'term-a', title: 'A' },
       verified: true
     })
+    await handler({
+      verb: 'resize',
+      nodeId: 'term-source',
+      args: { node: 'term-a', size: 'compact' },
+      verified: true
+    })
     expect(a.link).toHaveBeenCalledWith(
       'term-source',
       { from: 'term-a', to: 'term-b' },
@@ -341,6 +348,11 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
       color: '#bf5af2'
     })
     expect(a.rename).toHaveBeenCalledWith('term-source', { node: 'term-a', title: 'A' })
+    expect(a.resize).toHaveBeenCalledWith(
+      'term-source',
+      { node: 'term-a', size: 'compact' },
+      true
+    )
     expect(a.color).toHaveBeenCalledWith('term-source', {
       node: 'term-a,term-b',
       color: '#32d74b'

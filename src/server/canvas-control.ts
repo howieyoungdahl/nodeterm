@@ -181,6 +181,7 @@ export async function initServerCanvasControl(
     link: (sourceNodeId, args, verified) => factory.link(sourceNodeId, args, verified),
     group: (sourceNodeId, args) => factory.group(sourceNodeId, args),
     rename: (sourceNodeId, args) => factory.rename(sourceNodeId, args),
+    resize: (sourceNodeId, args, verified) => factory.resize(sourceNodeId, args, verified),
     color: (sourceNodeId, args) => factory.color(sourceNodeId, args),
     sticky: (sourceNodeId, args) => factory.sticky(sourceNodeId, args),
     // `runDelivery` applies caller→target creator proof before any pane probe or write, and

@@ -26,6 +26,13 @@ import { useSettings } from './settings'
 export { applyCanvasMutation } from '@shared/canvas-mutations'
 import { sanitizeInboundNode } from '@shared/node-exec'
 import { NODE_COLORS } from '@shared/node-colors'
+import {
+  COMPACT_CONTROL_NODE_SIZE,
+  resolveControlNodeSize,
+  resolveControlNodeSizeName,
+  type ControlNodeSizeName,
+  type NodeSize
+} from '@shared/control-node-size'
 
 // Preserve the renderer's long-standing import surface; validation and the palette now live in
 // shared so Server Edition and canvas-control accept exactly what these pickers display.
@@ -66,6 +73,8 @@ export interface NodeData {
   hideFanout?: boolean
   /** Expanded height to restore when un-collapsing (kept out of the persisted size). */
   expandedHeight?: number
+  /** Named geometry choice for agent nodes opened through canvas-control. */
+  controlSize?: ControlNodeSizeName
   /**
    * Set while the node is maximized to the viewport (issue #399): the ROOT-space rect the
    * restore toggle gives back. Persisted — see CanvasNodeState.premaxRect.
@@ -228,6 +237,73 @@ function terminalNodeSize(): { width: number; height: number } {
   return {
     width: clamp(s.defaultNodeWidth, 280, 2400, TERMINAL_SIZE.width),
     height: clamp(s.defaultNodeHeight, 160, 1600, TERMINAL_SIZE.height)
+  }
+}
+
+/**
+ * Resolve the geometry used only by canvas-control agent opens/resizes. Manual factories continue
+ * to call terminalNodeSize directly and therefore retain the configured normal dimensions.
+ */
+export function canvasControlNodeSize(value?: string): NodeSize | null {
+  return resolveControlNodeSize(value, terminalNodeSize())
+}
+
+export interface CanvasControlNodeGeometry {
+  name: ControlNodeSizeName
+  size: NodeSize
+}
+
+export function canvasControlNodeGeometry(value?: string): CanvasControlNodeGeometry | null {
+  const name = resolveControlNodeSizeName(value)
+  const size = canvasControlNodeSize(value)
+  return name && size ? { name, size } : null
+}
+
+/**
+ * Apply control-plane terminal geometry without letting React Flow's previous measurement win on
+ * the next serialization. A collapsed node stays header-height while its new expanded height is
+ * persisted through NodeData.expandedHeight.
+ */
+export function resizeTerminalNodeGeometry(
+  node: CanvasNode,
+  geometry: CanvasControlNodeGeometry
+): CanvasNode {
+  const { name, size } = geometry
+  const height = node.data.collapsed ? COLLAPSED_HEIGHT : size.height
+  return {
+    ...node,
+    measured: undefined,
+    width: size.width,
+    height,
+    style: { ...node.style, width: size.width, height },
+    data: { ...node.data, expandedHeight: size.height, controlSize: name }
+  }
+}
+
+/**
+ * Compatibility for a refreshed Server renderer talking to the pre-size running process. Core
+ * headless publications have no client `src`; manual browser opens always do. Only a NEW agent node
+ * with no explicit marker is upgraded, so later resizes and new-server `--size normal` are retained.
+ */
+export function normalizeLegacyServerControlSpawnMutation(
+  mutation: CanvasMutation,
+  nodeAlreadyExists: boolean
+): CanvasMutation {
+  if (
+    mutation.op !== 'upsert' ||
+    nodeAlreadyExists ||
+    mutation.src !== undefined ||
+    mutation.node.kind !== 'terminal' ||
+    !mutation.node.agentId ||
+    mutation.node.controlSize !== undefined
+  ) return mutation
+  return {
+    ...mutation,
+    node: {
+      ...mutation.node,
+      size: { ...COMPACT_CONTROL_NODE_SIZE },
+      controlSize: 'compact'
+    }
   }
 }
 
@@ -582,7 +658,9 @@ export function createAgentNode(
    *  agent, so passing a model for one is harmless — it's simply not appended). Persisted as
    *  `data.agentModel` so cold-restore and later restarts keep the model. Trails `projectId`: every
    *  existing caller passes that ninth argument, so the model is the one that had to move. */
-  model?: string
+  model?: string,
+  /** Named, concrete persisted geometry for a canvas-control open. Manual callers leave absent. */
+  controlGeometry?: CanvasControlNodeGeometry
 ): CanvasNode {
   const { label, color } = resolveAgent(agentId)
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
@@ -647,7 +725,7 @@ export function createAgentNode(
       `[custom-agent] ${label}: ${missingEnv.map((m) => '${env:' + m + '}').join(', ')} unset in launch command — expanded to empty.`
     )
   }
-  const size = terminalNodeSize()
+  const size = controlGeometry?.size ?? terminalNodeSize()
   return {
     id: nextId('term'),
     type: 'terminal',
@@ -663,6 +741,7 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
+      ...(controlGeometry ? { controlSize: controlGeometry.name } : {}),
       // Managed accounts bind to the builtin Claude and Codex agents (S6) — never to another
       // builtin, and never to a custom agent even when it inherits one of those bases. A custom
       // agent inheriting claude/codex is still its own agent; account binding stays with the
@@ -1675,6 +1754,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         tags: n.tags,
         collapsed,
         hideFanout: n.hideFanout,
+        controlSize: n.controlSize,
         expandedHeight: n.size.height,
         premaxRect: n.premaxRect,
         shell: n.shell,
@@ -1749,6 +1829,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         tags: n.data.tags,
         collapsed: n.data.collapsed,
         hideFanout: n.data.hideFanout,
+        controlSize: n.data.controlSize,
         parentId: n.parentId,
         shell: n.data.shell,
         cwd: n.data.cwd,
