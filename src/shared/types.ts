@@ -1348,6 +1348,9 @@ export interface Settings {
   /** Minutes a terminal may sit fully offscreen before its xterm+PTY client is torn down in
    *  place (tmux keeps the session; re-approach reattaches and redraws). 0 = never. */
   offscreenTerminalMinutes: number
+  /** One-shot marker for the renderer-memory default change. Absent files that still carry the
+   *  old 10-minute value are moved to the 1-minute default; a custom value is preserved. */
+  rendererMemoryPolicyMigrated: boolean
   /** AI commit message agent: a local coding-agent CLI run read-only. */
   commitAgent: 'claude' | 'codex' | 'custom'
   /** For commitAgent='custom': command template; {prompt} placeholder optional (else stdin). */
@@ -1511,6 +1514,30 @@ export interface Settings {
   hookIdentityStrict?: boolean
 }
 
+export const OFFSCREEN_TERMINAL_MINUTES_DEFAULT = 1
+export const OFFSCREEN_TERMINAL_MINUTES_LEGACY_DEFAULT = 10
+
+/**
+ * Apply the one-shot renderer-memory default migration to an already-merged settings snapshot.
+ * Returns true when the caller owes a persistence write. Shared by SettingsStore and the renderer:
+ * the latter can be loaded from a newly-built static bundle while the old Server process is still
+ * running, so putting the migration only in the server would postpone the memory fix to restart.
+ */
+export function applyRendererMemoryPolicyMigration(
+  saved: Partial<Settings> | null | undefined,
+  merged: Settings
+): boolean {
+  if (saved?.rendererMemoryPolicyMigrated) return false
+  if (
+    saved?.offscreenTerminalMinutes === undefined ||
+    saved.offscreenTerminalMinutes === OFFSCREEN_TERMINAL_MINUTES_LEGACY_DEFAULT
+  ) {
+    merged.offscreenTerminalMinutes = OFFSCREEN_TERMINAL_MINUTES_DEFAULT
+  }
+  merged.rendererMemoryPolicyMigrated = true
+  return true
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   fontSize: 13,
   fontFamily: 'Menlo, Monaco, "Courier New", monospace',
@@ -1561,7 +1588,8 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
   tmuxLeadPaneWidth: 0,
-  offscreenTerminalMinutes: 10,
+  offscreenTerminalMinutes: OFFSCREEN_TERMINAL_MINUTES_DEFAULT,
+  rendererMemoryPolicyMigrated: true,
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',

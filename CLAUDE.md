@@ -623,9 +623,10 @@ seed** — the cases are:
   "can't scroll the kanban card-modal terminal until you press a key" bug.
 
 xterm's own `scrollback` (`xtermScrollback(settings.tmuxScrollback)`, floored at 1000, capped at
-`XTERM_SCROLLBACK_MAX` = 10000) is kept for the sessions tmux does *not* back (a plain shell when
+`XTERM_SCROLLBACK_MAX` = 2000) is kept for the sessions tmux does *not* back (a plain shell when
 tmux is unavailable) and for the cold-snapshot replay — it is not what the user scrolls in a tmux
-session.
+session. Keep that cap independent from tmux's 50,000-line history: tmux stores the operator's
+scrollable history outside the browser renderer, while every mounted xterm pays its own cap in RAM.
 
 ## Terminal node lifecycle (gotchas)
 
@@ -635,7 +636,7 @@ session.
   offscreenEpoch])` and torn down on unmount. The component persists across re-renders because
   React Flow keys nodes by `id` — never change a node's id, or you'll respawn its terminal.
   **Third in-place state — "released" (2026-08-11, offscreen dispose):** a node fully offscreen
-  in the canvas viewport for `settings.offscreenTerminalMinutes` (default 10, `0` = never;
+  in the canvas viewport for `settings.offscreenTerminalMinutes` (default 1, `0` = never;
   Settings → tmux) has its xterm + PTY client torn down IN PLACE — node stays mounted showing a
   plate, tmux session untouched — and revives (warm reattach) when it re-approaches the viewport.
   Pure policy: `terminal/offscreen-policy.ts`. Two load-bearing rules a refactor must not undo:
