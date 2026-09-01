@@ -105,6 +105,8 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   // (D5), which for a plain terminal is only ever the observed one. The spawn below keeps
   // `spawn.accountId` — launch identity stays creation-time.
   const observedAccount = useAgentStatus((s) => s.byId[nodeId]?.account)
+  // …resolved against the live account list, so linking the dir repoints the reader at once.
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   // One shallow-compared subscription for the whole appearance slice — see useXtermVisualSettings.
   // MIRROR TerminalNode: scoped to the OWNING project (`owningProjectId`, the active one — a modal
   // only ever opens over it), deliberately NOT this card's connection scope. `sshConnectionScope`
@@ -133,7 +135,7 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     nodeId,
     sessionId: agentSessionId,
     cwd: spawn.cwd,
-    accountId: effectiveAccountId(spawn.accountId, observedAccount),
+    accountId: effectiveAccountId(spawn.accountId, observedAccount, claudeAccounts),
     // MIRROR TerminalNode: the transcript index reads claude's JSONL through claude's resolver, so
     // it is gated on the claude-transcript fact, NOT on the context meter's `hasUsage` (which now
     // spans codex and gemini too) — see lib/transcriptGates.ts.

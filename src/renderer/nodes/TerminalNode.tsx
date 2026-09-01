@@ -1071,6 +1071,9 @@ export function TerminalNode({
   // Scoped to the OWNING project so its `terminal.theme` / `terminal.fontFamily` layer over the
   // global settings for this node, and for no other project's nodes.
   const visual = useXtermVisualSettings(owningProjectId())
+  // The account list, for the chip and for the READERS below: a config dir the user links while
+  // this pane sits quiet must resolve to its new account immediately, not at the next hook event.
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
   // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move
   // button are absent from `isHidden`'s inventory and stay put whatever the list says.
@@ -1450,7 +1453,7 @@ export function TerminalNode({
    */
   const observedAccount = status?.account
   const accountChip = useAccountChip(data.accountId, observedAccount)
-  const accountForReads = effectiveAccountId(data.accountId, observedAccount)
+  const accountForReads = effectiveAccountId(data.accountId, observedAccount, claudeAccounts)
   /** Mirror for the session-name poll, whose effect must not restart when a late hook event
    *  finally reveals the account (see its comment). */
   const accountForReadsRef = useRef(accountForReads)

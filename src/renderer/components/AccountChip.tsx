@@ -53,8 +53,10 @@ export function useAccountChip(
   const systemEmail = useSystemAccount((s) => s.email)
   // A PRIMITIVE selector (the `usageScopeKey` rule): this subscription lives on every node header
   // on the canvas, and returning the key set itself would re-render all of them on every hook
-  // event of every node. `hasMultipleAccountKeys` early-exits at the second key.
-  const multiple = useAgentStatus((s) => hasMultipleAccountKeys(s.byId, dataAccountId))
+  // event of every node. `hasMultipleAccountKeys` early-exits at the second key. `accounts` rides
+  // along so a dir that was linked since its observation counts as ONE identity with the account
+  // it now belongs to, not two.
+  const multiple = useAgentStatus((s) => hasMultipleAccountKeys(s.byId, dataAccountId, accounts))
   // The system account's email is looked up lazily and only when something will show it — a node
   // whose account is entirely unknown renders no chip, so it must not trigger the fetch.
   const known = accountKey(dataAccountId, observed) !== null

@@ -8,6 +8,8 @@ import {
   effectiveAccountId,
   hasMultipleAccountKeys,
   SYSTEM_ACCOUNT_KEY,
+  configDirsMatch,
+  resolveObserved,
   unlinkedConfigDirs
 } from './accountChip'
 
@@ -174,10 +176,22 @@ describe('accountChipFor (D6 visibility, D7 unlinked naming)', () => {
   })
 
   it('names an unlinked dir by its last segment and says how to link it', () => {
-    expect(accountChipFor({ observed: unlinked, accounts, multiple: false })).toEqual({
-      short: '.claude-2',
-      tooltip: 'Unlinked Claude config dir /home/me/.claude-2 — link it in Settings → Accounts',
+    // A dir NO account claims. (`unlinked` above is `.claude-2`, which `accounts` here has since
+    // linked as `a2` — that case is the "linking flows through every reader" block below.)
+    const stranger = observed({ configDir: '/home/me/.claude-7', known: false })
+    expect(accountChipFor({ observed: stranger, accounts, multiple: false })).toEqual({
+      short: '.claude-7',
+      tooltip: 'Unlinked Claude config dir /home/me/.claude-7 — link it in Settings → Accounts',
       kind: 'unlinked'
+    })
+  })
+
+  it('follows a dir that has since been LINKED to its account, with no new event', () => {
+    // The smoke-test regression: the store still holds `{known:false}` from before the link.
+    expect(accountChipFor({ observed: unlinked, accounts, multiple: false })).toEqual({
+      short: 'personal',
+      tooltip: 'personal',
+      kind: 'linked'
     })
   })
 
@@ -212,5 +226,104 @@ describe('unlinkedConfigDirs (Settings → Accounts “Detected config dirs”)'
     expect(unlinkedConfigDirs({ n1: { account: unlinked } }, [undefined])).toEqual([
       '/home/me/.claude-2'
     ])
+  })
+})
+
+// ── Follow-up 1: an observation classified BEFORE the user linked its dir ──────────────────────
+// The hook server stamps `known:false` at POST time and a quiet pane may not post again for hours,
+// so linking has to repaint from the renderer side or the chip lies until the next turn.
+describe('resolveObserved (a dir linked since the observation)', () => {
+  const linkedAcct = acct({ id: 'lnk', label: 'second', email: undefined, configDir: '/home/me/.claude-2' })
+
+  it('upgrades an unknown dir to the account that now owns it', () => {
+    expect(resolveObserved(unlinked, [linkedAcct])).toEqual({
+      configDir: '/home/me/.claude-2',
+      accountId: 'lnk',
+      known: true
+    })
+  })
+
+  it('leaves an unknown dir alone when nothing matches', () => {
+    expect(resolveObserved(unlinked, [acct({ configDir: '/home/me/.claude-9' })])).toBe(unlinked)
+    expect(resolveObserved(unlinked, [acct()])).toBe(unlinked) // a MANAGED account has no configDir
+  })
+
+  it('never downgrades a known observation', () => {
+    // Core classified these against the managed layout; settings cannot outrank that.
+    expect(resolveObserved(system, [linkedAcct])).toBe(system)
+    expect(resolveObserved(managed, [linkedAcct])).toBe(managed)
+  })
+})
+
+describe('configDirsMatch (one comparison, both sides normalized)', () => {
+  it('ignores a trailing separator', () => {
+    expect(configDirsMatch('/home/me/.claude-2/', '/home/me/.claude-2')).toBe(true)
+  })
+
+  it('is case- and separator-insensitive for Windows-shaped paths only', () => {
+    expect(configDirsMatch('C:\\Users\\Me\\.claude-2', 'c:/users/me/.claude-2')).toBe(true)
+    // POSIX: case and backslash are both significant filename text, so these are DIFFERENT dirs.
+    expect(configDirsMatch('/home/me/.Claude-2', '/home/me/.claude-2')).toBe(false)
+  })
+
+  it('never matches on an absent dir (every managed account has none)', () => {
+    expect(configDirsMatch(undefined, undefined)).toBe(false)
+    expect(configDirsMatch('', '/home/me/.claude-2')).toBe(false)
+  })
+})
+
+describe('linking flows through every reader of the observation', () => {
+  const linkedAcct = acct({ id: 'lnk', label: 'second', email: undefined, configDir: '/home/me/.claude-2/' })
+
+  it('gives the readers the account id (no new hook event needed)', () => {
+    expect(effectiveAccountId(undefined, unlinked)).toBeUndefined()
+    expect(effectiveAccountId(undefined, unlinked, [linkedAcct])).toBe('lnk')
+  })
+
+  it('keys the pane by account instead of by path', () => {
+    expect(accountKey(undefined, unlinked)).toBe('ext:/home/me/.claude-2')
+    expect(accountKey(undefined, unlinked, [linkedAcct])).toBe('lnk')
+  })
+
+  it('stops counting the linked pane as a second identity next to its own account', () => {
+    // A node created under the account and a pane observed on its dir are ONE identity.
+    expect(hasMultipleAccountKeys({ n1: { account: unlinked } }, 'lnk')).toBe(true)
+    expect(hasMultipleAccountKeys({ n1: { account: unlinked } }, 'lnk', [linkedAcct])).toBe(false)
+  })
+
+  it('flips the chip to the account\u2019s own label and kind', () => {
+    const chip = accountChipFor({ observed: unlinked, accounts: [linkedAcct], multiple: false })
+    expect(chip).toEqual({ short: 'second', tooltip: 'second', kind: 'linked' })
+  })
+
+  it('leaves a dir nobody linked dashed and unlinked', () => {
+    const chip = accountChipFor({
+      observed: unlinked,
+      accounts: [acct({ id: 'other', configDir: '/home/me/.claude-9' })],
+      multiple: false
+    })
+    expect(chip?.kind).toBe('unlinked')
+    expect(chip?.short).toBe('.claude-2')
+  })
+
+  it('drops the dir from the detected list the moment it is linked', () => {
+    const byId = { n1: { account: unlinked } }
+    expect(unlinkedConfigDirs(byId, ['/home/me/.claude-2/'])).toEqual([]) // trailing slash
+    expect(unlinkedConfigDirs(byId, ['/home/me/.claude-9'])).toEqual(['/home/me/.claude-2'])
+  })
+
+  it('excludes a Windows-shaped linked dir whatever its case', () => {
+    const byId = { n1: { account: observed({ configDir: 'C:\\Users\\Me\\.claude-2', known: false }) } }
+    expect(unlinkedConfigDirs(byId, ['c:/users/me/.claude-2'])).toEqual([])
+  })
+})
+
+describe('the system chip has nothing to truncate', () => {
+  it('says "System" rather than the 10-char cut of the generic display', () => {
+    // "System account" through the chip cap reads "System acc…", an ellipsis promising a longer
+    // name that does not exist.
+    const chip = accountChipFor({ observed: system, accounts: [], multiple: true })
+    expect(chip?.short).toBe('System')
+    expect(chip?.tooltip).toContain('System account')
   })
 })

@@ -89,11 +89,45 @@ describe('AccountChip (D6 visibility through the live stores)', () => {
   })
 
   it('names an unlinked dir by its folder, dashed, and says where to link it', () => {
-    useAgentStatus.setState({ byId: { n2: { unread: false, account: CLAUDE_2 } } })
-    const { host, root } = render({ observed: CLAUDE_2 })
-    expect(chipEl(host)?.textContent).toBe('.claude-2')
+    // A dir NO account claims — `CLAUDE_2` is linked by the `a2` fixture below.
+    const stranger: ObservedClaudeAccount = {
+      configDir: '/home/me/.claude-7',
+      accountId: null,
+      known: false
+    }
+    useAgentStatus.setState({ byId: { n2: { unread: false, account: stranger } } })
+    const { host, root } = render({ observed: stranger })
+    expect(chipEl(host)?.textContent).toBe('.claude-7')
     expect(chipEl(host)?.className).toContain('node-account-chip--unlinked')
     expect(chipEl(host)?.getAttribute('title')).toContain('Settings → Accounts')
+    root.unmount()
+  })
+
+  it('flips an unlinked chip to the account the moment the dir is LINKED', () => {
+    // The smoke-test regression: the store's observation was classified before the account existed
+    // (`known:false`), and a quiet pane may not post another hook for hours. Linking is a settings
+    // edit, so the repaint has to come from here — no new event is delivered in this test.
+    const fresh: ObservedClaudeAccount = {
+      configDir: '/home/me/.claude-8',
+      accountId: null,
+      known: false
+    }
+    useAgentStatus.setState({ byId: { n8: { unread: false, account: fresh } } })
+    const { host, root } = render({ observed: fresh })
+    expect(chipEl(host)?.className).toContain('node-account-chip--unlinked')
+    act(() => {
+      useSettings.setState({
+        settings: {
+          ...DEFAULT_SETTINGS,
+          claudeAccounts: [
+            ...accounts,
+            { id: 'a3', label: 'linked-now', configDir: '/home/me/.claude-8/', createdAt: 0 }
+          ]
+        }
+      })
+    })
+    expect(chipEl(host)?.textContent).toBe('linked-now')
+    expect(chipEl(host)?.className).toContain('node-account-chip--linked')
     root.unmount()
   })
 

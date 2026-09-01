@@ -23,6 +23,74 @@ export const SYSTEM_ACCOUNT_KEY = 'sys'
 /** Chip labels are ~one word wide; the same cap `accountChipLabel` applies to a managed label. */
 const MAX_CHIP_LABEL = 10
 
+/** `systemAccountDisplay`'s generic fallback, mirrored so the chip can recognise "there is no
+ *  identity here to shorten" (see `accountChipFor`). */
+const GENERIC_SYSTEM_DISPLAY = 'System account'
+
+/**
+ * Is this path string Windows-shaped? The owning filesystem is NOT known here — a config dir may
+ * come from this machine, an SSH host, or Windows — so the shape of the string decides, rather
+ * than treating `/` and `\` as interchangeable: on POSIX a backslash is legal filename text
+ * (CONTRIBUTING). A drive letter, a UNC prefix, or backslashes with no forward slash is Windows.
+ */
+function isWindowsShapedPath(dir: string): boolean {
+  return (
+    /^[a-zA-Z]:[\\/]/.test(dir) ||
+    dir.startsWith('\\\\') ||
+    (dir.includes('\\') && !dir.includes('/'))
+  )
+}
+
+/**
+ * The comparable form of a config dir. ONE function, used on BOTH sides of every config-dir
+ * comparison in this module (CONTRIBUTING: "normalize BOTH sides of a path comparison, through one
+ * function" — the half-normalized version of this is issue #558).
+ *
+ * Trims, drops trailing separators, and — only for a Windows-shaped path — folds separators to `\`
+ * and lowercases, because Windows paths are case-insensitive and `C:/x` and `C:\x` name the same
+ * dir. A POSIX path is left case- and backslash-sensitive, because there both are significant.
+ *
+ * This is a LABEL comparison (which account name to show, whose transcripts to read); the jail and
+ * every real permission check live in core and are unaffected by it.
+ */
+export function normalizeConfigDirForCompare(dir: string | undefined | null): string {
+  const trimmed = (dir ?? '').trim()
+  if (!trimmed) return ''
+  const windows = isWindowsShapedPath(trimmed)
+  let out = windows ? trimmed.replace(/\//g, '\\') : trimmed
+  const sep = windows ? '\\' : '/'
+  while (out.length > 1 && out.endsWith(sep)) out = out.slice(0, -1)
+  return windows ? out.toLowerCase() : out
+}
+
+/** Do these two config dirs name the same directory? Empty never matches — an absent `configDir`
+ *  (every managed account has none) must not collide with an unlinked observation. */
+export function configDirsMatch(a: string | undefined | null, b: string | undefined | null): boolean {
+  const left = normalizeConfigDirForCompare(a)
+  return !!left && left === normalizeConfigDirForCompare(b)
+}
+
+/**
+ * Re-resolve an observation against the CURRENT account list.
+ *
+ * The hook server classifies `transcript_path` at POST time, so an observation captured before the
+ * user linked its dir is frozen as `{ known: false }` — and nothing else would ever revisit it: a
+ * quiet pane may not post another hook for hours. Linking is a settings edit, so the renderer is
+ * the only place that can notice, and this is where it does. Everything else in this module goes
+ * through it, so the chip, the keys and the readers cannot disagree about the same dir.
+ *
+ * Only ever UPGRADES an unknown dir to a linked account (never the reverse): a `known` observation
+ * was classified by core against the managed layout and stays authoritative.
+ */
+export function resolveObserved(
+  observed: ObservedClaudeAccount | undefined,
+  accounts: readonly ClaudeAccount[] = []
+): ObservedClaudeAccount | undefined {
+  if (!observed || observed.known || !observed.configDir) return observed
+  const match = accounts.find((a) => configDirsMatch(a.configDir, observed.configDir))
+  return match ? { ...observed, accountId: match.id, known: true } : observed
+}
+
 /**
  * D5 — the account a node's READERS (transcript root, session name, context meter, ⌘M chat) must
  * use: the node's own account when it has one, else whatever the session was observed running as.
@@ -34,10 +102,14 @@ const MAX_CHIP_LABEL = 10
  */
 export function effectiveAccountId(
   dataAccountId?: string,
-  observed?: ObservedClaudeAccount
+  observed?: ObservedClaudeAccount,
+  /** The current account list, so a dir linked SINCE the observation resolves to its account
+   *  without waiting for the pane's next hook event (see `resolveObserved`). */
+  accounts: readonly ClaudeAccount[] = []
 ): string | undefined {
   if (dataAccountId) return dataAccountId
-  if (observed?.known && observed.accountId) return observed.accountId
+  const known = resolveObserved(observed, accounts)
+  if (known?.known && known.accountId) return known.accountId
   return undefined
 }
 
@@ -54,24 +126,29 @@ export function effectiveAccountId(
  */
 export function accountKey(
   dataAccountId?: string,
-  observed?: ObservedClaudeAccount
+  observed?: ObservedClaudeAccount,
+  /** See `resolveObserved`: a dir linked since the observation keys as its ACCOUNT, so the linked
+   *  pane and a node created under that account count as one identity, not two. */
+  accounts: readonly ClaudeAccount[] = []
 ): string | null {
   if (dataAccountId) return dataAccountId
-  if (!observed) return null
-  if (observed.known) return observed.accountId ?? SYSTEM_ACCOUNT_KEY
+  const resolved = resolveObserved(observed, accounts)
+  if (!resolved) return null
+  if (resolved.known) return resolved.accountId ?? SYSTEM_ACCOUNT_KEY
   // A `known: false` entry with no dir is not evidence of anything — it names no identity, so it
   // cannot be a distinct key (degrade to nothing, never to something wrong).
-  return observed.configDir ? `ext:${observed.configDir}` : null
+  return resolved.configDir ? `ext:${resolved.configDir}` : null
 }
 
 /** The distinct account keys across a set of nodes (see `accountKey`); unknown nodes contribute
  *  nothing. `size >= 2` is D6's "there's multiple". */
 export function distinctAccountKeys(
-  entries: Iterable<{ dataAccountId?: string; observed?: ObservedClaudeAccount }>
+  entries: Iterable<{ dataAccountId?: string; observed?: ObservedClaudeAccount }>,
+  accounts: readonly ClaudeAccount[] = []
 ): Set<string> {
   const keys = new Set<string>()
   for (const e of entries) {
-    const key = accountKey(e.dataAccountId, e.observed)
+    const key = accountKey(e.dataAccountId, e.observed, accounts)
     if (key) keys.add(key)
   }
   return keys
@@ -91,13 +168,14 @@ export function distinctAccountKeys(
  */
 export function hasMultipleAccountKeys(
   byId: Record<string, { account?: ObservedClaudeAccount }>,
-  ownAccountId?: string
+  ownAccountId?: string,
+  accounts: readonly ClaudeAccount[] = []
 ): boolean {
   const keys = new Set<string>()
-  const own = accountKey(ownAccountId, undefined)
+  const own = accountKey(ownAccountId, undefined, accounts)
   if (own) keys.add(own)
   for (const entry of Object.values(byId)) {
-    const key = accountKey(undefined, entry.account)
+    const key = accountKey(undefined, entry.account, accounts)
     if (key) keys.add(key)
     if (keys.size >= 2) return true
   }
@@ -110,18 +188,23 @@ export function hasMultipleAccountKeys(
  *
  * Derived from OBSERVATIONS only: a dir gets in here because a session posted a hook from it, so
  * the list is a record of what actually ran, and nothing here reads the filesystem (a forged POST
- * must not make us stat anything). `linkedDirs` is compared by exact string — the same normalized
- * form the classifier failed to match is the one that would still fail to match.
+ * must not make us stat anything). `linkedDirs` is compared through `configDirsMatch` — the SAME
+ * comparison `resolveObserved` uses, so a dir can never be both "already linked" (hidden from the
+ * chip) and "detected" (offered for linking).
  */
 export function unlinkedConfigDirs(
   byId: Record<string, { account?: ObservedClaudeAccount }>,
   linkedDirs: readonly (string | undefined)[] = []
 ): string[] {
-  const already = new Set(linkedDirs.filter((d): d is string => !!d))
+  const already = linkedDirs
+    .map((d) => normalizeConfigDirForCompare(d))
+    .filter((d) => d.length > 0)
   const dirs = new Set<string>()
   for (const entry of Object.values(byId)) {
     const a = entry.account
-    if (a && !a.known && a.configDir && !already.has(a.configDir)) dirs.add(a.configDir)
+    if (!a || a.known || !a.configDir) continue
+    if (already.includes(normalizeConfigDirForCompare(a.configDir))) continue
+    dirs.add(a.configDir)
   }
   // Sorted so the list does not reshuffle itself as unrelated nodes come and go.
   return [...dirs].sort()
@@ -156,7 +239,7 @@ function shortAccountLabel(label: string): string {
 export function configDirLabel(configDir: string): string {
   const dir = configDir.trim()
   if (!dir) return ''
-  const windowsShaped = /^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\') || (dir.includes('\\') && !dir.includes('/'))
+  const windowsShaped = isWindowsShapedPath(dir)
   const sep = windowsShaped ? '\\' : '/'
   const parts = dir.split(sep).filter((p) => p.length > 0)
   // A bare root (`/`, `C:\`) has no segment to name; fall back to the whole string so the chip
@@ -189,13 +272,18 @@ export function accountChipFor({
   /** D6: are ≥ 2 distinct account keys in play on this core? (`hasMultipleAccountKeys`) */
   multiple?: boolean
 }): AccountChipInfo | null {
-  const key = accountKey(dataAccountId, observed)
+  // Resolved against the CURRENT list: linking a detected dir must repaint every chip on it
+  // immediately, not at that pane's next hook event (see `resolveObserved`).
+  const key = accountKey(dataAccountId, observed, accounts)
   if (!key) return null // nothing known — no chip, and nothing counted either
   if (key === SYSTEM_ACCOUNT_KEY) {
     if (!multiple) return null // one identity in play: the system pane is the unremarkable case
     const display = systemAccountDisplay(systemLabel, systemEmail)
     return {
-      short: shortAccountLabel(display),
+      // With neither a custom label nor a detected email the display is the generic "System
+      // account", which the 10-char cap turns into "System acc…" — an ellipsis that promises a
+      // longer name there isn't one of. Nothing to shorten: say "System".
+      short: display === GENERIC_SYSTEM_DISPLAY ? 'System' : shortAccountLabel(display),
       tooltip: `${display} — system Claude account (~/.claude)`,
       kind: 'system'
     }
