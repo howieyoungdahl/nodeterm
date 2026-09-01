@@ -59,7 +59,7 @@ export function useAccountChip(
   const multiple = useAgentStatus((s) => hasMultipleAccountKeys(s.byId, dataAccountId, accounts))
   // The system account's email is looked up lazily and only when something will show it — a node
   // whose account is entirely unknown renders no chip, so it must not trigger the fetch.
-  const known = accountKey(dataAccountId, observed) !== null
+  const known = accountKey(dataAccountId, observed, accounts) !== null
   useEffect(() => {
     if (known) useSystemAccount.getState().ensure()
   }, [known])

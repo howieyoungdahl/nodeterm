@@ -144,6 +144,33 @@ describe('AccountChip (D6 visibility through the live stores)', () => {
     root.unmount()
   })
 
+  it('flips a linked chip back to unlinked the moment the account is REMOVED', () => {
+    // The other half of the smoke test: the store still holds `{known:true, accountId}` from
+    // before the unlink. Without the resolver the chip read "Unknown account" and the dir was
+    // gone from Settings → Detected, so there was no way back to Link without a new turn.
+    const observedLinked: ObservedClaudeAccount = {
+      configDir: '/home/me/.claude-2',
+      accountId: 'a2',
+      known: true
+    }
+    useAgentStatus.setState({ byId: { n9: { unread: false, account: observedLinked } } })
+    const { host, root } = render({ observed: observedLinked })
+    expect(chipEl(host)?.textContent).toBe('second')
+    expect(chipEl(host)?.className).toContain('node-account-chip--linked')
+    act(() => {
+      useSettings.setState({
+        settings: {
+          ...DEFAULT_SETTINGS,
+          claudeAccounts: accounts.filter((a) => a.id !== 'a2') // unlinked in Settings
+        }
+      })
+    })
+    expect(chipEl(host)?.textContent).toBe('.claude-2')
+    expect(chipEl(host)?.className).toContain('node-account-chip--unlinked')
+    expect(chipEl(host)?.getAttribute('title')).toContain('Settings → Accounts')
+    root.unmount()
+  })
+
   it('follows the node’s own account over the observed one', () => {
     // Launch identity wins: the env is what it is, whatever a later observation says.
     const { host, root } = render({ accountId: 'a1', observed: CLAUDE_2 })

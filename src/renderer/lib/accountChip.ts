@@ -15,6 +15,12 @@ import { accountChipLabel, systemAccountDisplay } from '../state/workspace'
  * Everything here is pure and display/read-only. An observed account is a LABEL (see the
  * `ObservedClaudeAccount` doc comment in shared/types): it may decide what we SHOW and whose
  * transcripts we READ, never what is permitted — so nothing in this module is a gate.
+ *
+ * PASS THE LIVE `accounts` LIST AT EVERY CALL SITE. It is optional only so the parameter could be
+ * added without touching every caller, and the default `[]` is not "don't resolve" — it means "no
+ * accounts exist", which is a real state (the user just unlinked their only one) and makes
+ * `resolveObserved` degrade every observed id to its bare dir. Omitting it therefore reads as
+ * "every account was removed", which is exactly wrong in the one case it matters.
  */
 
 /** The account key for the system default (`~/.claude`), which has no `ClaudeAccount` record. */
@@ -73,20 +79,41 @@ export function configDirsMatch(a: string | undefined | null, b: string | undefi
 /**
  * Re-resolve an observation against the CURRENT account list.
  *
- * The hook server classifies `transcript_path` at POST time, so an observation captured before the
- * user linked its dir is frozen as `{ known: false }` — and nothing else would ever revisit it: a
- * quiet pane may not post another hook for hours. Linking is a settings edit, so the renderer is
- * the only place that can notice, and this is where it does. Everything else in this module goes
- * through it, so the chip, the keys and the readers cannot disagree about the same dir.
+ * The hook server classifies `transcript_path` at POST time, so an observation is frozen as of the
+ * account list that existed then — and nothing else would ever revisit it: a quiet pane may not
+ * post another hook for hours. Linking and unlinking are settings edits, so the renderer is the
+ * only place that can notice, and this is where it does. Everything else in this module goes
+ * through it, so the chip, the keys, the detected list and the readers cannot disagree about the
+ * same dir.
  *
- * Only ever UPGRADES an unknown dir to a linked account (never the reverse): a `known` observation
- * was classified by core against the managed layout and stays authoritative.
+ * Two directions, and both are about the DIR, which is the one fact that outlives the record:
+ *  - unknown dir + an account now claiming it  ⇒ that account (the link case);
+ *  - a known id that no longer exists          ⇒ back to the bare dir, `known: false` (the unlink
+ *    or remove case). Without this the pane showed "Unknown account" and its dir vanished from
+ *    Settings → Detected, so there was no way back to Link short of waiting for the next turn.
+ *    A re-link under a NEW id is picked up by the same dir match, hence one code path.
+ *
+ * The system account (`known` with `accountId: null`) is never touched: it has no record to lose.
+ * `data.accountId` is likewise untouched — a NODE created under a removed account still reads
+ * "Unknown account", which is correct: that binding really is dangling.
  */
 export function resolveObserved(
   observed: ObservedClaudeAccount | undefined,
   accounts: readonly ClaudeAccount[] = []
 ): ObservedClaudeAccount | undefined {
-  if (!observed || observed.known || !observed.configDir) return observed
+  if (!observed) return observed
+  if (observed.known) {
+    if (!observed.accountId) return observed // the system default — nothing to lose
+    if (accounts.some((a) => a.id === observed.accountId)) return observed
+    // The id is gone (unlinked/removed since the observation). Fall back to the dir — unless there
+    // is none, in which case there is nothing better to say than the id we already have.
+    if (!observed.configDir) return observed
+    const relinked = accounts.find((a) => configDirsMatch(a.configDir, observed.configDir))
+    return relinked
+      ? { ...observed, accountId: relinked.id, known: true }
+      : { ...observed, accountId: null, known: false }
+  }
+  if (!observed.configDir) return observed
   const match = accounts.find((a) => configDirsMatch(a.configDir, observed.configDir))
   return match ? { ...observed, accountId: match.id, known: true } : observed
 }
@@ -188,22 +215,21 @@ export function hasMultipleAccountKeys(
  *
  * Derived from OBSERVATIONS only: a dir gets in here because a session posted a hook from it, so
  * the list is a record of what actually ran, and nothing here reads the filesystem (a forged POST
- * must not make us stat anything). `linkedDirs` is compared through `configDirsMatch` — the SAME
- * comparison `resolveObserved` uses, so a dir can never be both "already linked" (hidden from the
- * chip) and "detected" (offered for linking).
+ * must not make us stat anything).
+ *
+ * Membership is decided by `resolveObserved` — the SAME resolution the chip uses — so a dir can
+ * never be both "belongs to an account" (chipped as linked) and "detected" (offered for linking),
+ * in either direction: linking removes it from this list at once, and unlinking puts it back at
+ * once, with no hook event in between.
  */
 export function unlinkedConfigDirs(
   byId: Record<string, { account?: ObservedClaudeAccount }>,
-  linkedDirs: readonly (string | undefined)[] = []
+  accounts: readonly ClaudeAccount[] = []
 ): string[] {
-  const already = linkedDirs
-    .map((d) => normalizeConfigDirForCompare(d))
-    .filter((d) => d.length > 0)
   const dirs = new Set<string>()
   for (const entry of Object.values(byId)) {
-    const a = entry.account
+    const a = resolveObserved(entry.account, accounts)
     if (!a || a.known || !a.configDir) continue
-    if (already.includes(normalizeConfigDirForCompare(a.configDir))) continue
     dirs.add(a.configDir)
   }
   // Sorted so the list does not reshuffle itself as unrelated nodes come and go.

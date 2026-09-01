@@ -40,7 +40,8 @@ describe('effectiveAccountId (D5)', () => {
   })
 
   it('falls back to a KNOWN observed account for a node created without one', () => {
-    expect(effectiveAccountId(undefined, managed)).toBe('a1')
+    // The account list is what keeps a known observation known — see `resolveObserved`.
+    expect(effectiveAccountId(undefined, managed, [acct()])).toBe('a1')
   })
 
   it('resolves to nothing for the system account and for an unknown dir', () => {
@@ -61,7 +62,7 @@ describe('accountKey (D6)', () => {
 
   it('keys a managed/linked account by id, from either source', () => {
     expect(accountKey('a1', undefined)).toBe('a1')
-    expect(accountKey(undefined, managed)).toBe('a1')
+    expect(accountKey(undefined, managed, [acct()])).toBe('a1')
   })
 
   it('keys an unlinked dir by its path', () => {
@@ -104,7 +105,7 @@ describe('hasMultipleAccountKeys (the selector form)', () => {
     // The store only holds observed accounts, so a managed node that has posted no hook yet is
     // only visible through its own `data.accountId`.
     expect(hasMultipleAccountKeys({ n1: { account: system } }, 'a1')).toBe(true)
-    expect(hasMultipleAccountKeys({ n1: { account: managed } }, 'a1')).toBe(false)
+    expect(hasMultipleAccountKeys({ n1: { account: managed } }, 'a1', [acct()])).toBe(false)
   })
 })
 
@@ -209,23 +210,25 @@ describe('accountChipFor (D6 visibility, D7 unlinked naming)', () => {
 describe('unlinkedConfigDirs (Settings → Accounts “Detected config dirs”)', () => {
   it('lists each unknown dir once, sorted, and never a known one', () => {
     expect(
-      unlinkedConfigDirs({
-        n1: { account: unlinked },
-        n2: { account: unlinked }, // same dir, two panes
-        n3: { account: observed({ configDir: '/home/me/.claude-3', known: false }) },
-        n4: { account: system }, // known: not a candidate
-        n5: { account: managed },
-        n6: {}
-      })
+      unlinkedConfigDirs(
+        {
+          n1: { account: unlinked },
+          n2: { account: unlinked }, // same dir, two panes
+          n3: { account: observed({ configDir: '/home/me/.claude-3', known: false }) },
+          n4: { account: system }, // known: not a candidate
+          n5: { account: managed },
+          n6: {}
+        },
+        [acct()] // …and `managed`'s account still exists, so it stays known
+      )
     ).toEqual(['/home/me/.claude-2', '/home/me/.claude-3'])
   })
 
   it('drops a dir that is already linked', () => {
-    expect(unlinkedConfigDirs({ n1: { account: unlinked } }, ['/home/me/.claude-2'])).toEqual([])
-    // …and tolerates the undefined `configDir` every managed account has.
-    expect(unlinkedConfigDirs({ n1: { account: unlinked } }, [undefined])).toEqual([
-      '/home/me/.claude-2'
-    ])
+    const byId = { n1: { account: unlinked } }
+    expect(unlinkedConfigDirs(byId, [acct({ configDir: '/home/me/.claude-2' })])).toEqual([])
+    // …and tolerates the undefined `configDir` every MANAGED account has.
+    expect(unlinkedConfigDirs(byId, [acct()])).toEqual(['/home/me/.claude-2'])
   })
 })
 
@@ -248,10 +251,10 @@ describe('resolveObserved (a dir linked since the observation)', () => {
     expect(resolveObserved(unlinked, [acct()])).toBe(unlinked) // a MANAGED account has no configDir
   })
 
-  it('never downgrades a known observation', () => {
-    // Core classified these against the managed layout; settings cannot outrank that.
+  it('leaves a known observation alone while its account is still listed', () => {
+    // Core classified these against the managed layout; a dir match cannot outrank that.
     expect(resolveObserved(system, [linkedAcct])).toBe(system)
-    expect(resolveObserved(managed, [linkedAcct])).toBe(managed)
+    expect(resolveObserved(managed, [linkedAcct, acct()])).toBe(managed)
   })
 })
 
@@ -308,13 +311,15 @@ describe('linking flows through every reader of the observation', () => {
 
   it('drops the dir from the detected list the moment it is linked', () => {
     const byId = { n1: { account: unlinked } }
-    expect(unlinkedConfigDirs(byId, ['/home/me/.claude-2/'])).toEqual([]) // trailing slash
-    expect(unlinkedConfigDirs(byId, ['/home/me/.claude-9'])).toEqual(['/home/me/.claude-2'])
+    expect(unlinkedConfigDirs(byId, [acct({ configDir: '/home/me/.claude-2/' })])).toEqual([]) // trailing slash
+    expect(unlinkedConfigDirs(byId, [acct({ configDir: '/home/me/.claude-9' })])).toEqual([
+      '/home/me/.claude-2'
+    ])
   })
 
   it('excludes a Windows-shaped linked dir whatever its case', () => {
     const byId = { n1: { account: observed({ configDir: 'C:\\Users\\Me\\.claude-2', known: false }) } }
-    expect(unlinkedConfigDirs(byId, ['c:/users/me/.claude-2'])).toEqual([])
+    expect(unlinkedConfigDirs(byId, [acct({ configDir: 'c:/users/me/.claude-2' })])).toEqual([])
   })
 })
 
@@ -325,5 +330,97 @@ describe('the system chip has nothing to truncate', () => {
     const chip = accountChipFor({ observed: system, accounts: [], multiple: true })
     expect(chip?.short).toBe('System')
     expect(chip?.tooltip).toContain('System account')
+  })
+})
+
+// ── Follow-up 2: the account was UNLINKED (or removed) after the observation ───────────────────
+// The store still holds `{known:true, accountId}` from before. Left alone it chipped "Unknown
+// account" and the dir vanished from Settings → Detected, so there was no way back to Link.
+describe('resolveObserved (an account that has since gone away)', () => {
+  const observedLinked: ObservedClaudeAccount = {
+    configDir: '/home/me/.claude-2',
+    accountId: 'lnk',
+    known: true
+  }
+
+  it('degrades to the bare dir when nothing carries that id any more', () => {
+    expect(resolveObserved(observedLinked, [])).toEqual({
+      configDir: '/home/me/.claude-2',
+      accountId: null,
+      known: false
+    })
+    expect(resolveObserved(observedLinked, [acct({ id: 'other' })])).toEqual({
+      configDir: '/home/me/.claude-2',
+      accountId: null,
+      known: false
+    })
+  })
+
+  it('keeps the observation while the account is still listed — pending included', () => {
+    const live = [acct({ id: 'lnk', configDir: '/home/me/.claude-2' })]
+    expect(resolveObserved(observedLinked, live)).toBe(observedLinked)
+    // A row still finishing `claude /login` is present, not gone.
+    expect(resolveObserved(observedLinked, [acct({ id: 'lnk', pending: true })])).toBe(observedLinked)
+  })
+
+  it('re-adopts the dir when it is linked again under a NEW id', () => {
+    // Unlink → Link mints a fresh account; the DIR is what carries identity across that gap.
+    expect(resolveObserved(observedLinked, [acct({ id: 'lnk2', configDir: '/home/me/.claude-2/' })]))
+      .toEqual({ configDir: '/home/me/.claude-2', accountId: 'lnk2', known: true })
+  })
+
+  it('leaves a dangling id alone when there is no dir to fall back to', () => {
+    // A MANAGED observation whose dir the classifier did not report: nothing better to say.
+    const noDir: ObservedClaudeAccount = { configDir: '', accountId: 'gone', known: true }
+    expect(resolveObserved(noDir, [])).toBe(noDir)
+  })
+
+  it('never touches the system account', () => {
+    expect(resolveObserved(system, [])).toBe(system)
+  })
+})
+
+describe('unlinking flows through every reader of the observation', () => {
+  const observedLinked: ObservedClaudeAccount = {
+    configDir: '/home/me/.claude-2',
+    accountId: 'lnk',
+    known: true
+  }
+  const live = [acct({ id: 'lnk', label: 'second', email: undefined, configDir: '/home/me/.claude-2' })]
+
+  it('falls back to the dashed dir chip instead of "Unknown account"', () => {
+    expect(accountChipFor({ observed: observedLinked, accounts: live, multiple: false })).toEqual({
+      short: 'second',
+      tooltip: 'second',
+      kind: 'linked'
+    })
+    expect(accountChipFor({ observed: observedLinked, accounts: [], multiple: false })).toEqual({
+      short: '.claude-2',
+      tooltip: 'Unlinked Claude config dir /home/me/.claude-2 — link it in Settings → Accounts',
+      kind: 'unlinked'
+    })
+  })
+
+  it('puts the dir back in the detected list, ready to link again', () => {
+    const byId = { n1: { account: observedLinked } }
+    expect(unlinkedConfigDirs(byId, live)).toEqual([])
+    expect(unlinkedConfigDirs(byId, [])).toEqual(['/home/me/.claude-2'])
+  })
+
+  it('keys the pane by path again and gives the readers nothing', () => {
+    expect(accountKey(undefined, observedLinked, [])).toBe('ext:/home/me/.claude-2')
+    expect(effectiveAccountId(undefined, observedLinked, [])).toBeUndefined()
+    // …so its transcripts are read as the system account's, not as a removed account's.
+    expect(effectiveAccountId(undefined, observedLinked, live)).toBe('lnk')
+  })
+
+  it('leaves a NODE created under a removed account on the legacy Unknown-account chip', () => {
+    // `data.accountId` is a different fact — that binding really is dangling, and saying so is
+    // correct. Only the OBSERVATION degrades.
+    expect(accountChipFor({ dataAccountId: 'lnk', accounts: [], multiple: false })).toEqual({
+      short: 'Unknown account',
+      tooltip: 'Unknown account',
+      kind: 'managed'
+    })
   })
 })

@@ -181,7 +181,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const detectedDirs = useAgentStatus((s) =>
     // NUL-joined, not newline-joined: a path may legally contain a newline, and splitting one back
     // into two rows would offer the user a dir that does not exist.
-    unlinkedConfigDirs(s.byId, accounts.map((a) => a.configDir)).join('\u0000')
+    unlinkedConfigDirs(s.byId, accounts).join('\u0000')
   )
   const detected = detectedDirs ? detectedDirs.split('\u0000') : []
 
