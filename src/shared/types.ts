@@ -3,7 +3,7 @@
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
-import type { NormalizedAgentEvent } from './agents/normalize'
+import type { AgentState, NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
 import type { BrowserLeasePush } from './browser-indicator'
@@ -1160,6 +1160,28 @@ export interface ObservedClaudeAccount {
   configDir: string
   accountId: string | null
   known: boolean
+}
+
+/**
+ * One node's last-known agent status as the shell's status MIRROR holds it (`core/agent-status-mirror`),
+ * served on request so a freshly (re)loaded renderer can paint badges BEFORE the next hook event.
+ * The mirror restores across a Server/app restart; without this the canvas showed every pane idle
+ * until each one happened to post again. A display SEED only: nothing may gate on it (the mirror's
+ * `restored` rule for messaging is unchanged), and the renderer applies its own freshness cut.
+ */
+export interface AgentStatusSnapshotEntry {
+  state?: AgentState
+  agentId?: AgentId
+  sessionId?: string
+  /** When the mirror last asserted `state` (ms epoch). The renderer drops entries older than its cut. */
+  updatedAt: number
+  /** `state` came off disk at boot and nothing has been heard since (mirror `restored`). */
+  restored?: boolean
+}
+
+export interface AgentStatusSnapshot {
+  takenAt: number
+  nodes: Record<string, AgentStatusSnapshotEntry>
 }
 
 export interface SpeechSettings {
@@ -3074,6 +3096,9 @@ export interface NodeTerminalApi {
   onUnreadClear(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
+  /** Last-known status per node from the shell's mirror — a display seed for a fresh renderer
+   *  (see `AgentStatusSnapshot`). Both shells serve it from core. */
+  agentStatusSnapshot(): Promise<AgentStatusSnapshot>
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

@@ -50,7 +50,8 @@ import {
   type TmuxStatus,
   type TranscriptLine,
   type Workspace,
-  type WorkspaceApi
+  type WorkspaceApi,
+  AgentStatusSnapshot
 } from '../../shared/types'
 import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
@@ -628,10 +629,17 @@ export function buildAgentApi(
   client: RpcClient
 ): Pick<
   NodeTerminalApi,
-  'onAgentStatus' | 'onSubagentActivity' | 'onUnreadClear' | 'answerPermission' | 'ackDone'
+  | 'onAgentStatus'
+  | 'agentStatusSnapshot'
+  | 'onSubagentActivity'
+  | 'onUnreadClear'
+  | 'answerPermission'
+  | 'ackDone'
 > {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
+    agentStatusSnapshot: () =>
+      client.request(IPC.agentStatusSnapshot) as Promise<AgentStatusSnapshot>,
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>
