@@ -11,8 +11,12 @@ import {
   parseLoginCapture,
   isSupportedClaudeVersion,
   transcriptRootFor,
-  isSafeLocalTranscriptPath
+  isSafeLocalTranscriptPath,
+  classifyClaudeConfigDir,
+  configDirFromTranscriptPath,
+  normalizeLinkedConfigDir
 } from './claude-accounts-core'
+import type { ClaudeAccount } from '../shared/types'
 
 describe('accountConfigDir', () => {
   it('maps an account id under userData/claude-accounts', () => {
@@ -251,5 +255,299 @@ describe('isSafeRemoteTranscriptPath', () => {
 
   it('is false when the remote home is unknown', () => {
     expect(isSafeRemoteTranscriptPath('/home/enes/.claude/projects/x.jsonl', undefined)).toBe(false)
+  })
+})
+
+// ---- Observed accounts (design D1/D2) --------------------------------------------------------
+//
+// The whole feature turns on these three pure functions, so each is driven with BOTH path
+// dialects: the desktop that classifies an SSH node's POSIX `transcript_path` may itself be
+// running on Windows, and the config dir a Windows user posts is `C:\Users\x\.claude`.
+
+describe('configDirFromTranscriptPath', () => {
+  it('walks up to the projects root and names its parent (POSIX)', () => {
+    expect(
+      configDirFromTranscriptPath('/home/u/.claude/projects/-home-u-repo/abc-123.jsonl')
+    ).toBe('/home/u/.claude')
+    expect(
+      configDirFromTranscriptPath('/home/u/.claude-2/projects/-home-u-repo/abc-123.jsonl')
+    ).toBe('/home/u/.claude-2')
+  })
+
+  it('handles a Windows-shaped path', () => {
+    expect(
+      configDirFromTranscriptPath('C:\\Users\\x\\.claude\\projects\\slug\\id.jsonl')
+    ).toBe('C:\\Users\\x\\.claude')
+    // Forward slashes are separators on Windows too, and a drive letter is what says so.
+    expect(configDirFromTranscriptPath('C:/Users/x/.claude-2/projects/slug/id.jsonl')).toBe(
+      'C:\\Users\\x\\.claude-2'
+    )
+    expect(
+      configDirFromTranscriptPath('\\\\srv\\share\\.claude\\projects\\slug\\id.jsonl')
+    ).toBe('\\\\srv\\share\\.claude')
+  })
+
+  it('resolves a SUBAGENT transcript nested deeper under the same projects root', () => {
+    expect(
+      configDirFromTranscriptPath('/home/u/.claude-2/projects/-repo/parent/sub/agent.jsonl')
+    ).toBe('/home/u/.claude-2')
+  })
+
+  it('takes the NEAREST projects walking up, not the first one in the path', () => {
+    // Someone who keeps their checkouts in ~/projects: taking the FIRST match would answer
+    // `/home/u` — i.e. hand the jail a $HOME-wide root.
+    expect(
+      configDirFromTranscriptPath('/home/u/projects/.claude/projects/-repo/s.jsonl')
+    ).toBe('/home/u/projects/.claude')
+  })
+
+  it('normalizes the answer (redundant separators, `.`, a resolved `..`)', () => {
+    expect(configDirFromTranscriptPath('/home/u//.claude/./projects/slug/s.jsonl')).toBe(
+      '/home/u/.claude'
+    )
+    expect(configDirFromTranscriptPath('/home/u/x/../.claude/projects/slug/s.jsonl')).toBe(
+      '/home/u/.claude'
+    )
+  })
+
+  it('is null when there is no projects segment to walk up to', () => {
+    expect(configDirFromTranscriptPath('/home/u/.claude/settings.json')).toBeNull()
+    expect(configDirFromTranscriptPath('/home/u/projects')).toBeNull() // no parent-of-projects file
+    expect(configDirFromTranscriptPath('')).toBeNull()
+    expect(configDirFromTranscriptPath('   ')).toBeNull()
+    expect(configDirFromTranscriptPath(undefined as unknown as string)).toBeNull()
+    // A sibling-prefix segment is not a `projects` segment.
+    expect(configDirFromTranscriptPath('/home/u/.claude/projects-evil/s.jsonl')).toBeNull()
+  })
+
+  it('takes an explicit dialect when the caller knows the owning filesystem', () => {
+    // A relative Windows path has no drive letter to detect, so the caller must say.
+    expect(configDirFromTranscriptPath('x\\.claude\\projects\\s\\id.jsonl', 'win32')).toBe(
+      'x\\.claude'
+    )
+    // …and the same string read as POSIX is one segment with backslashes IN ITS NAME.
+    expect(configDirFromTranscriptPath('x\\.claude\\projects\\s\\id.jsonl', 'posix')).toBeNull()
+  })
+})
+
+describe('normalizeLinkedConfigDir', () => {
+  it('accepts an absolute path and normalizes it', () => {
+    expect(normalizeLinkedConfigDir('/home/u/.claude-2')).toBe('/home/u/.claude-2')
+    expect(normalizeLinkedConfigDir('/home/u/.claude-2/')).toBe('/home/u/.claude-2')
+    expect(normalizeLinkedConfigDir('  /home/u//./.claude-2  ')).toBe('/home/u/.claude-2')
+    expect(normalizeLinkedConfigDir('C:\\Users\\x\\.claude-2\\')).toBe('C:\\Users\\x\\.claude-2')
+    expect(normalizeLinkedConfigDir('C:/Users/x/.claude-2')).toBe('C:\\Users\\x\\.claude-2')
+  })
+
+  it('never strips a path down INTO its root', () => {
+    expect(normalizeLinkedConfigDir('/')).toBe('/')
+    expect(normalizeLinkedConfigDir('C:\\')).toBe('C:\\')
+  })
+
+  it('refuses anything that is not an absolute, `..`-free string', () => {
+    expect(normalizeLinkedConfigDir('.claude-2')).toBeNull()
+    expect(normalizeLinkedConfigDir('~/.claude-2')).toBeNull() // `~` is the caller's to expand
+    expect(normalizeLinkedConfigDir('../.claude-2')).toBeNull()
+    expect(normalizeLinkedConfigDir('')).toBeNull()
+    expect(normalizeLinkedConfigDir('   ')).toBeNull()
+    expect(normalizeLinkedConfigDir(undefined)).toBeNull()
+    expect(normalizeLinkedConfigDir(null)).toBeNull()
+    expect(normalizeLinkedConfigDir(42)).toBeNull()
+    expect(normalizeLinkedConfigDir({ configDir: '/x' })).toBeNull()
+  })
+
+  it('resolves a `..` that normalize can absorb rather than refusing it', () => {
+    expect(normalizeLinkedConfigDir('/home/u/x/../.claude-2')).toBe('/home/u/.claude-2')
+    // …and one that walks past the root is clamped by normalize, never left as `..`.
+    expect(normalizeLinkedConfigDir('/../../etc')).toBe('/etc')
+  })
+})
+
+describe('classifyClaudeConfigDir', () => {
+  const homeDir = '/home/u'
+  const userDataDir = '/home/u/.config/nodeterm'
+  const linked: ClaudeAccount = {
+    id: 'linked-1',
+    label: 'second',
+    configDir: '/home/u/.claude-2',
+    createdAt: 0
+  }
+  const at = (dir: string, accounts: ClaudeAccount[] = [linked]) =>
+    classifyClaudeConfigDir(dir, { homeDir, userDataDir, accounts })
+
+  it('names a MANAGED local dir by its id, without consulting settings', () => {
+    // The path IS nodeterm's own root, so the id in it is the id nodeterm minted — including for
+    // an account still `pending` its login, whose login node is the session posting from there.
+    expect(at(`${userDataDir}/claude-accounts/abc-1`, [])).toEqual({
+      configDir: `${userDataDir}/claude-accounts/abc-1`,
+      accountId: 'abc-1',
+      known: true
+    })
+  })
+
+  it('names a MANAGED REMOTE dir by its id (an SSH node posts the host path)', () => {
+    expect(at('/home/enes/.nodeterm/claude-accounts/xyz_2', [])).toEqual({
+      configDir: '/home/enes/.nodeterm/claude-accounts/xyz_2',
+      accountId: 'xyz_2',
+      known: true
+    })
+  })
+
+  it('names a LINKED dir by its account id, trailing slash and `.`-segments included', () => {
+    for (const p of ['/home/u/.claude-2', '/home/u/.claude-2/', '/home/u/./.claude-2']) {
+      expect(at(p)).toEqual({ configDir: '/home/u/.claude-2', accountId: 'linked-1', known: true })
+    }
+  })
+
+  it('ignores a linked row that is pending, host-scoped, or holds an unusable path', () => {
+    const unusable: ClaudeAccount[] = [
+      { ...linked, id: 'p', pending: true },
+      { ...linked, id: 'h', host: 'u@example' },
+      { ...linked, id: 'rel', configDir: '.claude-2' },
+      { ...linked, id: 'dots', configDir: '/home/u/../u/.claude-2' } // normalizes to the same dir
+    ]
+    // The first three contribute nothing; the fourth normalizes onto the observed dir and wins.
+    expect(at('/home/u/.claude-2', unusable).accountId).toBe('dots')
+    expect(at('/home/u/.claude-2', unusable.slice(0, 3))).toEqual({
+      configDir: '/home/u/.claude-2',
+      accountId: null,
+      known: false
+    })
+  })
+
+  it('calls the system dir system — this machine`s and a remote host`s alike', () => {
+    expect(at('/home/u/.claude')).toEqual({
+      configDir: '/home/u/.claude',
+      accountId: null,
+      known: true
+    })
+    // D2 is host-agnostic on purpose: an SSH node's `<remoteHome>/.claude` is that host's system
+    // account, and the observed dir is a label — nothing branches on it for permission.
+    expect(at('/home/enes/.claude')).toEqual({
+      configDir: '/home/enes/.claude',
+      accountId: null,
+      known: true
+    })
+  })
+
+  it('prefers a LINKED match over the `.claude` basename rule', () => {
+    const odd: ClaudeAccount = { id: 'odd', label: 'o', configDir: '/opt/profiles/.claude', createdAt: 0 }
+    expect(at('/opt/profiles/.claude', [odd]).accountId).toBe('odd')
+  })
+
+  it('leaves an unrecorded dir unknown — and never reads it', () => {
+    // The real motivating case BEFORE the user links it: the chip labels it `.claude-3` by path.
+    expect(at('/home/u/.claude-3', [])).toEqual({
+      configDir: '/home/u/.claude-3',
+      accountId: null,
+      known: false
+    })
+    // A forged POST aiming at a credential tree is unknown too — a label, and nothing is opened.
+    expect(at('/home/u/.ssh', [])).toEqual({
+      configDir: '/home/u/.ssh',
+      accountId: null,
+      known: false
+    })
+    // A bad id segment under the managed root is NOT a managed account.
+    expect(at(`${userDataDir}/claude-accounts/a.b`, [])).toEqual({
+      configDir: `${userDataDir}/claude-accounts/a.b`,
+      accountId: null,
+      known: false
+    })
+    // …nor is a dir two levels down inside one.
+    expect(at(`${userDataDir}/claude-accounts/a1/projects`, []).known).toBe(false)
+  })
+
+  it('classifies Windows-shaped dirs, case-insensitively as that filesystem is', () => {
+    const win = (dir: string, accounts: ClaudeAccount[] = []) =>
+      classifyClaudeConfigDir(dir, {
+        homeDir: 'C:\\Users\\x',
+        userDataDir: 'C:\\Users\\x\\AppData\\Roaming\\nodeterm',
+        accounts
+      })
+    expect(win('C:\\Users\\x\\.claude')).toEqual({
+      configDir: 'C:\\Users\\x\\.claude',
+      accountId: null,
+      known: true
+    })
+    expect(win('C:\\Users\\x\\AppData\\Roaming\\nodeterm\\claude-accounts\\a1').accountId).toBe('a1')
+    expect(
+      win('c:\\users\\X\\.claude-2\\', [
+        { id: 'w1', label: 'w', configDir: 'C:\\Users\\x\\.claude-2', createdAt: 0 }
+      ]).accountId
+    ).toBe('w1')
+  })
+
+  it('does not match a POSIX dir against a WINDOWS local root (or the reverse)', () => {
+    // A Windows desktop classifying an SSH node's POSIX path must not confuse the two trees —
+    // and `/home/u/.claude` still reads as a system dir through the host-agnostic basename rule.
+    const onWindows = classifyClaudeConfigDir('/home/u/.claude-2', {
+      homeDir: 'C:\\Users\\x',
+      userDataDir: 'C:\\Users\\x\\AppData\\Roaming\\nodeterm',
+      accounts: [{ id: 'w1', label: 'w', configDir: 'C:\\Users\\x\\.claude-2', createdAt: 0 }]
+    })
+    expect(onWindows).toEqual({ configDir: '/home/u/.claude-2', accountId: null, known: false })
+  })
+})
+
+describe('transcriptRootFor — linked accounts', () => {
+  it('uses the linked config dir`s projects when one is given', () => {
+    expect(transcriptRootFor('/Users/x', '/ud', 'a1', '/Users/x/.claude-2')).toBe(
+      '/Users/x/.claude-2/projects'
+    )
+    // A linked root does not need the account id to be resolvable as a managed one.
+    expect(transcriptRootFor('/Users/x', null, undefined, '/Users/x/.claude-2')).toBe(
+      '/Users/x/.claude-2/projects'
+    )
+  })
+  it('degrades to the managed/system root when the linked value is unusable', () => {
+    // "Never something more destructive than the default" — a hand-edited relative path must not
+    // resolve against the process cwd.
+    expect(transcriptRootFor('/Users/x', '/ud', 'a1', '.claude-2')).toBe(
+      '/ud/claude-accounts/a1/projects'
+    )
+    expect(transcriptRootFor('/Users/x', '/ud', undefined, '')).toBe('/Users/x/.claude/projects')
+  })
+})
+
+describe('isSafeLocalTranscriptPath — linked config dirs', () => {
+  const home = '/home/u'
+  const ud = '/home/u/.config/nodeterm'
+  const linkedDirs = ['/home/u/.claude-2']
+
+  it('accepts <linkedDir>/projects and everything under it', () => {
+    expect(isSafeLocalTranscriptPath(`${home}/.claude-2/projects`, home, ud, undefined, linkedDirs)).toBe(true)
+    expect(
+      isSafeLocalTranscriptPath(`${home}/.claude-2/projects/-repo/s.jsonl`, home, ud, undefined, linkedDirs)
+    ).toBe(true)
+  })
+
+  it('still refuses everything ELSE in that dir — the `.ssh` case §3 names', () => {
+    expect(isSafeLocalTranscriptPath(`${home}/.claude-2/.ssh`, home, ud, undefined, linkedDirs)).toBe(false)
+    expect(
+      isSafeLocalTranscriptPath(`${home}/.claude-2/.credentials.json`, home, ud, undefined, linkedDirs)
+    ).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${home}/.claude-2`, home, ud, undefined, linkedDirs)).toBe(false)
+    // A sibling-prefix root, as for every other allowed root.
+    expect(
+      isSafeLocalTranscriptPath(`${home}/.claude-2/projects-evil/x`, home, ud, undefined, linkedDirs)
+    ).toBe(false)
+    // The PARENT of a linked dir is not opened up by linking the child.
+    expect(isSafeLocalTranscriptPath(`${home}/projects/x.jsonl`, home, ud, undefined, linkedDirs)).toBe(false)
+  })
+
+  it('contributes no root for a value that fails re-validation at the point of use', () => {
+    // Hand-editable settings JSON: a relative or `..`-bearing dir is ignored, not resolved.
+    expect(isSafeLocalTranscriptPath(`${home}/.claude-2/projects/s.jsonl`, home, ud, undefined, ['.claude-2'])).toBe(
+      false
+    )
+    expect(isSafeLocalTranscriptPath('/etc/projects/x', home, ud, undefined, ['/etc/../etc'])).toBe(true)
+    expect(isSafeLocalTranscriptPath(`${home}/.ssh/id_rsa`, home, ud, undefined, ['/'])).toBe(false)
+  })
+
+  it('is bit-for-bit the old predicate when no linked dirs are passed', () => {
+    expect(isSafeLocalTranscriptPath(`${home}/.claude-2/projects/s.jsonl`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${home}/.claude-2/projects/s.jsonl`, home, ud, undefined, [])).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${home}/.claude/projects/s.jsonl`, home, ud, undefined, linkedDirs)).toBe(true)
   })
 })

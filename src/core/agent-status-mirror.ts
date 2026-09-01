@@ -4,6 +4,7 @@ import { writeFileAtomic } from './fs-atomic'
 import { platform } from './platform'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
+import type { ObservedClaudeAccount } from '@shared/types'
 import { WORKING_STALE_MS, isStaleWorking } from '@shared/agents/stale'
 
 /**
@@ -41,6 +42,18 @@ export interface MirrorEntry {
   state?: AgentState
   agentId?: AgentId
   sessionId?: string
+  /**
+   * Which Claude account this node was OBSERVED running under (`NormalizedAgentEvent.account`,
+   * derived by the hook server from the payload's `transcript_path` — see `ObservedClaudeAccount`).
+   *
+   * Captured off ANY event, exactly like `agentId`/`sessionId`, and for a sharper reason than
+   * either: for a hand-launched `claude` in a plain terminal the node's `data.accountId` is
+   * undefined forever, so this label is the ONLY record of which identity the pane is on. It rides
+   * the mirror file so a reader with no canvas (the phone) can render the same account chip.
+   *
+   * A LABEL, like `stateVerified` is not: nothing may gate on it.
+   */
+  account?: ObservedClaudeAccount
   /** The agent's own session name (the `/rename` name, read from its transcript) — published by
    *  the session-name sweep so a reader with no canvas (the phone) sees the CURRENT name, not
    *  whatever the node title was when it was last open. Absent until resolved. */
@@ -153,6 +166,9 @@ export interface MirrorFile {
       state?: AgentState
       agentId?: AgentId
       sessionId?: string
+      /** Observed Claude account (see MirrorEntry.account). Additive — absent on old files and
+       *  on every node that has never posted a claude hook payload. */
+      account?: ObservedClaudeAccount
       /** The agent's own session name (see MirrorEntry.name). Absent until resolved. */
       name?: string
       updatedAt: number
@@ -398,6 +414,12 @@ export function reduceEntry(
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
   if (ev.agentId) next.agentId = ev.agentId
   if (ev.sessionId) next.sessionId = ev.sessionId
+  // The observed Claude account is identity too, and follows the same rule as `agentId`: written
+  // by any event that carries one, never cleared by one that does not. Only claude events carry it
+  // (hook-server), and a claude session's config dir is fixed for the life of the process — an
+  // event without the label is a codex/gemini event or a payload with no transcript_path, neither
+  // of which is evidence that this node stopped being on the account it was last seen on.
+  if (ev.account) next.account = ev.account
 
   if (ev.kind === 'state' && ev.state) {
     // An `idle` done (Claude went quiet at its prompt) is a RESCUE, not a turn end: it may only
@@ -502,6 +524,9 @@ export function buildFile(
       state: e.state,
       agentId: e.agentId,
       sessionId: e.sessionId,
+      // Spread-when-present, like `name`/`hibernated`: a node that never posted a claude payload
+      // keeps the byte-for-byte file shape it had before this field existed.
+      ...(e.account ? { account: e.account } : {}),
       ...(e.name ? { name: e.name } : {}),
       updatedAt: e.updatedAt
     }
@@ -1096,6 +1121,18 @@ export function onMirrorFlush(cb: (doc: MirrorFile) => void): () => void {
  * behavior. Stale entries are dropped with the SAME expiry sweep `buildFile`/`flush` apply, so a
  * "working" from a long-dead session is never resurrected.
  */
+/** Minimal shape check for a restored `account` block (see the call site's comment). */
+function isObservedAccount(a: unknown): a is ObservedClaudeAccount {
+  if (!a || typeof a !== 'object') return false
+  const o = a as Record<string, unknown>
+  return (
+    typeof o.configDir === 'string' &&
+    !!o.configDir &&
+    (o.accountId === null || typeof o.accountId === 'string') &&
+    typeof o.known === 'boolean'
+  )
+}
+
 function loadPersisted(file: string): void {
   // Only seed empty memory — never clobber a live session (init runs once at boot, but guard so a
   // stray re-init can't wipe in-flight state).
@@ -1120,6 +1157,11 @@ function loadPersisted(file: string): void {
           state: e.state,
           agentId: e.agentId,
           sessionId: e.sessionId,
+          // Identity survives the restart like agentId/sessionId does — for a hand-launched
+          // claude it is the only record there is. SHAPE-CHECKED rather than trusted: this file
+          // can be hand-edited or written by another build, and a chip rendered off `{}` would
+          // read as "no account observed" while occupying the slot of one that was.
+          ...(isObservedAccount(e.account) ? { account: e.account } : {}),
           ...(e.name ? { name: e.name } : {}),
           updatedAt,
           // Marked, and FORCED unverified whatever the file said. `buildFile` writes neither field

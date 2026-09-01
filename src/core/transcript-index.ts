@@ -7,7 +7,7 @@ import os from 'os'
 import path from 'path'
 import { platform } from './platform'
 import type { ClaudeAccount } from '../shared/types'
-import { accountConfigDir } from './claude-accounts-core'
+import { accountConfigDir, normalizeLinkedConfigDir } from './claude-accounts-core'
 import { SESSION_ID_RE } from './transcript-reader'
 import {
   extractEntryFields,
@@ -37,7 +37,11 @@ function projectsRoots(): string[] {
   for (const acct of accountsGetter?.() ?? []) {
     if (acct.host || acct.pending) continue
     try {
-      roots.push(path.join(accountConfigDir(userData, acct.id), 'projects'))
+      // A LINKED account indexes the user's OWN dir (design D4). Re-validated here rather than
+      // trusted — settings.json is hand-editable — and an unusable value falls back to the managed
+      // path, which simply contributes an absent root.
+      const dir = normalizeLinkedConfigDir(acct.configDir) ?? accountConfigDir(userData, acct.id)
+      roots.push(path.join(dir, 'projects'))
     } catch {
       /* invalid account id → skip that root (fail-open) */
     }

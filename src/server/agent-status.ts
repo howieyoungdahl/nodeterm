@@ -21,6 +21,7 @@ import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { setNodeTranscript } from '../core/context-link'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
+import { linkedClaudeConfigDirs } from '../core/claude-config-dir'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
@@ -166,7 +167,16 @@ export function wireAgentStatus(
     const abs = resolve(tp)
     // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
     // before) would otherwise fail the jail and its meter would silently never fill.
-    return isSafeLocalTranscriptPath(abs, homedir(), platform.userDataDir, codexHome())
+    // Linked accounts' dirs come from SETTINGS, never from the POST — `<dir>/projects/**` only,
+    // so `~/.claude-2/.ssh` is as refused as it ever was. Without them the meter and the subagent
+    // cards silently never fill for a pane running the user's own CLAUDE_CONFIG_DIR.
+    return isSafeLocalTranscriptPath(
+      abs,
+      homedir(),
+      platform.userDataDir,
+      codexHome(),
+      linkedClaudeConfigDirs()
+    )
       ? abs
       : undefined
   }

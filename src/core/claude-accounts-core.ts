@@ -3,6 +3,7 @@
 import { createHash } from 'crypto'
 import path from 'path'
 import { MODEL_GATEWAY_ENV_KEYS } from '../shared/agents/model-gateway'
+import type { ClaudeAccount, ObservedClaudeAccount } from '../shared/types'
 
 /** Shape of a valid account id (uuid / opaque token). Shared by every path builder so a bad id
  *  can never traverse out of the accounts root — locally OR on a remote host over ssh. */
@@ -48,17 +49,200 @@ export function remoteAccountConfigDirAbs(remoteHome: string, accountId: string)
   return `${remoteHome.replace(/\/+$/, '')}/.nodeterm/claude-accounts/${accountId}`
 }
 
+// ---- Observed config dirs (D1/D2: which account a RUNNING session is actually on) -----------
+//
+// The hook payload's `transcript_path` is the only account signal that exists for a session
+// nodeterm did not launch — a hand-run `CLAUDE_CONFIG_DIR=~/.claude-2 claude` in a plain terminal
+// carries `data.accountId: undefined` forever. Everything below is pure string work on that path:
+// the observed dir is a LABEL (see `ObservedClaudeAccount`), nothing branches on it for
+// permission, so a host-agnostic match is correct and covers SSH nodes without a remote lookup.
+
+/** Which `path` implementation owns a given path string. */
+export type PathDialect = 'posix' | 'win32'
+
+/**
+ * Dialect of a path string, by SHAPE and only by shape: a drive letter (`C:\…`, `C:/…`) or a UNC
+ * prefix (`\\host\share`). Deliberately NOT "contains a backslash" — on POSIX a backslash is legal
+ * filename text, and treating the two separators as interchangeable there would split real names
+ * apart (CONTRIBUTING: "do not treat both separators as interchangeable unless the owning
+ * filesystem is known to be Windows"). Anything else is POSIX, which is also the right answer for
+ * the remote paths an SSH node's hooks post.
+ */
+export function pathDialectOf(p: string): PathDialect {
+  return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\') ? 'win32' : 'posix'
+}
+
+function pathFor(d: PathDialect): typeof path.posix {
+  return d === 'win32' ? path.win32 : path.posix
+}
+
+/**
+ * Normalize a directory path for COMPARISON: dialect-correct `normalize`, then trailing separators
+ * stripped down to (but never into) the root. Trailing-slash insensitivity is not cosmetic — the
+ * two spellings arrive from different places (a hook payload's `transcript_path` vs. a path the
+ * user typed into Settings), and CONTRIBUTING's rule is that BOTH sides of a path comparison go
+ * through one function.
+ */
+function normDir(p: string, d: PathDialect): string {
+  const P = pathFor(d)
+  let n = P.normalize(p)
+  const root = P.parse(n).root
+  // On win32 both separators end a path; on POSIX only `/` does (a trailing `\` is a filename).
+  const endsWithSep = (s: string): boolean => s.endsWith('/') || (d === 'win32' && s.endsWith('\\'))
+  while (n.length > root.length && endsWithSep(n)) n = n.slice(0, -1)
+  return n
+}
+
+/** Compare two already-`normDir`'d dirs. Case-insensitive on win32 — that IS the filesystem's own
+ *  rule there, and a chip that fails to match `C:\Users\X` against `c:\users\x` is a silent miss. */
+function sameDir(a: string, b: string, d: PathDialect): boolean {
+  return d === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+}
+
+/** Split a normalized dir into segments in its own dialect. */
+function segmentsOf(p: string, d: PathDialect): string[] {
+  return d === 'win32' ? p.split(/[\\/]/) : p.split('/')
+}
+
+/**
+ * The Claude config dir a `transcript_path` belongs to, or null when the path is not shaped like a
+ * Claude transcript. Claude writes `<configDir>/projects/<slug>/<session>.jsonl`, and a SUBAGENT
+ * transcript sits deeper under the same `projects` root — so the rule is "walk UP from the file to
+ * the nearest segment named `projects`, take its parent".
+ *
+ * Nearest going UP means the LAST `projects` segment, not the first. A config dir can itself live
+ * under a directory called `projects` (`~/projects/.claude/projects/<slug>/<id>.jsonl` is an
+ * ordinary layout for someone who keeps their checkouts in `~/projects`), and taking the first
+ * match there would name `~` as the config dir — i.e. hand the jail a $HOME-wide root.
+ *
+ * `dialect` is normally detected from the string (an SSH node posts a POSIX path to a Windows
+ * desktop, so the LOCAL platform is the wrong authority — CONTRIBUTING: "the browser's OS is NOT
+ * the filesystem's OS"); pass it explicitly when the caller knows the owning filesystem.
+ */
+export function configDirFromTranscriptPath(p: string, dialect?: PathDialect): string | null {
+  if (typeof p !== 'string' || !p.trim()) return null
+  const d = dialect ?? pathDialectOf(p)
+  const P = pathFor(d)
+  const segs = segmentsOf(P.normalize(p.trim()), d)
+  const i = segs.lastIndexOf('projects')
+  // `i < 1` covers both "no projects segment at all" and a `projects` with no parent to name.
+  // The trailing check is the other half of the same honesty: `transcript_path` is a FILE, so a
+  // `projects` with nothing under it is not a transcript and answering `/home/u` for `/home/u/
+  // projects` would invent a config dir out of an ordinary checkout directory.
+  if (i < 1 || i >= segs.length - 1) return null
+  // An absolute POSIX path splits to a leading '' — joining ['', 'home', 'x'] yields '/home/x'.
+  // `/projects/x.jsonl` slices to [''], which joins to '' and means the root itself.
+  const joined = segs.slice(0, i).join(P.sep)
+  return normDir(joined || P.sep, d)
+}
+
+/**
+ * Re-validate a hand-editable `ClaudeAccount.configDir` at the POINT OF USE (CONTRIBUTING: never
+ * by its TypeScript type — settings.json is hand-edited and git-shared). Absolute, normalized, no
+ * surviving `..`; anything else is `null`, and every caller degrades to the managed-dir default
+ * rather than to something wider ("degrade to nothing, never to something wrong").
+ *
+ * `..` cannot survive `normalize` on an absolute path, so the check is belt-and-braces — kept
+ * because this value ends up as a JAIL ROOT, where a survivor would walk straight out of it.
+ */
+export function normalizeLinkedConfigDir(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim()
+  if (!s) return null
+  const d = pathDialectOf(s)
+  if (!pathFor(d).isAbsolute(s)) return null
+  const n = normDir(s, d)
+  return segmentsOf(n, d).includes('..') ? null : n
+}
+
+/** The settings rows a linked-dir match may consult: local (a linked dir is local by definition —
+ *  see §7 of the plan), settled, and carrying a value that survives re-validation. */
+function linkedDirOf(acct: ClaudeAccount): string | null {
+  if (acct.host || acct.pending) return null
+  return normalizeLinkedConfigDir(acct.configDir)
+}
+
+/**
+ * Classify an observed config dir into an `ObservedClaudeAccount` (design D2). PURE string
+ * matching — no fs, and deliberately host-agnostic, because the same classification has to answer
+ * for a remote path an SSH node's hooks posted:
+ *   1. `<userData>/claude-accounts/<id>` — this app's own managed root on THIS machine.
+ *   2. `<anything>/.nodeterm/claude-accounts/<id>` — the same thing on a remote host (POSIX).
+ *   3. a settings row's linked `configDir` — the user declared this dir an account.
+ *   4. any `…/.claude` — the system default, on this machine or on the host (`accountId: null`).
+ *   5. anything else — `known: false`; the UI labels it by its last path segment and offers to
+ *      link it. NOTHING reads such a dir (D7): a forged POST must not make us open a file.
+ *
+ * (1) and (2) answer with the id WITHOUT consulting settings: the path IS nodeterm's own root, so
+ * the id in it is the id nodeterm minted — including for an account still `pending` its login,
+ * whose login node is precisely the session posting from that dir.
+ */
+export function classifyClaudeConfigDir(
+  dir: string,
+  ctx: { homeDir: string; userDataDir: string; accounts: readonly ClaudeAccount[] }
+): ObservedClaudeAccount {
+  const d = pathDialectOf(dir)
+  const configDir = normDir(dir, d)
+  const P = pathFor(d)
+
+  // 1. Managed, local. Compared in the LOCAL dialect on both sides: a POSIX remote path can never
+  //    match a Windows userData root, which is the correct answer, not a miss.
+  const udDialect = pathDialectOf(ctx.userDataDir)
+  if (udDialect === d) {
+    // Joined in the userData path's OWN dialect, not the local platform's: this module is pure
+    // path math and the LOCAL `path` is the wrong authority for a string that came off the wire.
+    const localRoot = normDir(pathFor(udDialect).join(ctx.userDataDir, 'claude-accounts'), udDialect)
+    const base = P.basename(configDir)
+    if (sameDir(normDir(P.dirname(configDir), d), localRoot, d) && isSafeAccountId(base)) {
+      return { configDir, accountId: base, known: true }
+    }
+  }
+  // 2. Managed, remote (`remoteAccountConfigDir`). Remote hosts are POSIX; matched by SHAPE rather
+  //    than against a resolved `$HOME`, because the hook payload is the only thing we have.
+  if (d === 'posix') {
+    const segs = segmentsOf(configDir, d)
+    const [a, b, c] = segs.slice(-3)
+    if (segs.length >= 3 && a === '.nodeterm' && b === 'claude-accounts' && isSafeAccountId(c)) {
+      return { configDir, accountId: c, known: true }
+    }
+  }
+  // 3. Linked. Before the `.claude` rule below so that linking a dir whose basename happens to be
+  //    `.claude` (another user's home, a relocated profile) reports the account the user declared.
+  for (const acct of ctx.accounts) {
+    const linked = linkedDirOf(acct)
+    if (linked && pathDialectOf(linked) === d && sameDir(configDir, linked, d)) {
+      return { configDir, accountId: acct.id, known: true }
+    }
+  }
+  // 4. System. `<home>/.claude` is the local one; the basename rule generalizes it to a remote
+  //    host's own system account, which is `known` for the same reason — the dir is a label.
+  const homeDialect = pathDialectOf(ctx.homeDir)
+  if (homeDialect === d && sameDir(configDir, normDir(P.join(ctx.homeDir, '.claude'), d), d)) {
+    return { configDir, accountId: null, known: true }
+  }
+  if (P.basename(configDir) === '.claude') return { configDir, accountId: null, known: true }
+  return { configDir, accountId: null, known: false }
+}
+
 /**
  * Transcript root for a session lookup: an account's `projects` dir under its config dir, or
  * the system default `~/.claude/projects` when no account. Pure path math (no fs) — the impure
  * wrapper in transcript-reader.ts feeds `os.homedir()` / `app.getPath('userData')`. Reuses
  * `accountConfigDir`'s id validation so a bad account id can never escape the accounts root.
+ *
+ * `linkedConfigDir` is a LINKED account's own dir (`ClaudeAccount.configDir`): its transcripts
+ * live in the user's directory, not under `{userData}`. Trailing and optional, so every
+ * pre-existing caller is unchanged. Re-validated here rather than trusted — an unusable value
+ * falls back to the managed/system root, which is the pre-existing behavior, never something wider.
  */
 export function transcriptRootFor(
   homeDir: string,
   userDataPath: string | null,
-  accountId?: string
+  accountId?: string,
+  linkedConfigDir?: string
 ): string {
+  const linked = normalizeLinkedConfigDir(linkedConfigDir)
+  if (linked) return path.join(linked, 'projects')
   return accountId
     ? path.join(accountConfigDir(userDataPath ?? '', accountId), 'projects')
     : path.join(homeDir, '.claude', 'projects')
@@ -83,12 +267,22 @@ export function transcriptRootFor(
  * PARAMETER rather than an env read because this module is pure path math: the shells own the env.
  * Getting it wrong fails CLOSED (a relocated codex home would silently never fill its meter, not
  * leak anything) — which is the quieter and therefore worse failure, hence the parameter.
+ *
+ * `linkedDirs` are the LINKED accounts' config dirs from settings (`ClaudeAccount.configDir`) —
+ * user-declared, so `<dir>/projects/**` is legitimate and the meter/subagent cards fill for a pane
+ * running `CLAUDE_CONFIG_DIR=~/.claude-2 claude`. Exactly the same two rules as the managed root:
+ * the dirs come from SETTINGS and never from the POST (a forged payload cannot name its own jail
+ * root), and the segment after the dir must be `projects` — `<linkedDir>/.ssh` and `<linkedDir>`
+ * itself stay refused. Each value is re-validated here (absolute, normalized, no `..`) rather than
+ * trusted for having a TypeScript type: it is hand-editable settings JSON, and an unusable one
+ * simply contributes no root.
  */
 export function isSafeLocalTranscriptPath(
   abs: string,
   homeDir: string,
   userDataPath: string,
-  codexHomeDir?: string
+  codexHomeDir?: string,
+  linkedDirs?: readonly string[]
 ): boolean {
   const legacyRoot = path.join(homeDir, '.claude', 'projects')
   if (abs === legacyRoot || abs.startsWith(legacyRoot + path.sep)) return true
@@ -101,6 +295,14 @@ export function isSafeLocalTranscriptPath(
   if (abs === geminiRoot || abs.startsWith(geminiRoot + path.sep)) return true
   const codexRoot = path.join(codexHomeDir || path.join(homeDir, '.codex'), 'sessions')
   if (abs === codexRoot || abs.startsWith(codexRoot + path.sep)) return true
+  // Linked accounts (D4). `<dir>/projects` and below only — the `+ path.sep` is what keeps a
+  // sibling-prefix root (`…/projects-evil`) out, exactly as for the two roots above.
+  for (const raw of linkedDirs ?? []) {
+    const dir = normalizeLinkedConfigDir(raw)
+    if (!dir) continue
+    const root = path.join(dir, 'projects')
+    if (abs === root || abs.startsWith(root + path.sep)) return true
+  }
   const accountsRoot = path.join(userDataPath, 'claude-accounts')
   if (abs !== accountsRoot && !abs.startsWith(accountsRoot + path.sep)) return false
   // Relative to the accounts root: expect `<accountId>/projects[/…]`. Because `abs` is normalized

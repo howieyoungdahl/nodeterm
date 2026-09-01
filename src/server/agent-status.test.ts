@@ -6,6 +6,10 @@ import { ServerPlatform } from './platform-server'
 import { wireAgentStatus } from './agent-status'
 import { _resetForTest } from '../core/agent-status-mirror'
 import { forgetGrokSession, grokSessionDirFor, readGrokSessionName } from '../core/grok-session'
+import {
+  registerClaudeAccountsSource,
+  resetClaudeAccountsSourceForTests
+} from '../core/claude-config-dir'
 import { IPC } from '../shared/ipc'
 import { decodePtyData } from '../shared/rpc'
 
@@ -73,6 +77,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true })
+  resetClaudeAccountsSourceForTests()
   _resetForTest()
 })
 
@@ -261,6 +266,56 @@ describe('wireAgentStatus', () => {
       ['n1']
     )
     expect(ctx.calls.length + sub.calls.length).toBe(before)
+  })
+})
+
+// The transcript jail on THIS shell, and the linked half of it (design D4 / §3). Both raw
+// listeners have to learn the same widening or the Server Edition silently keeps the pre-fix
+// behavior for a pane running the user's own `CLAUDE_CONFIG_DIR` — the "both raw listeners change
+// together" rule, which this repo has broken three times.
+describe('wireAgentStatus — the transcript jail admits LINKED config dirs', () => {
+  it('tracks a transcript under <linkedDir>/projects, and refuses everything else in that dir', () => {
+    const linked = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-linked-jail-'))
+    try {
+      registerClaudeAccountsSource(() => [
+        { id: 'linked-1', label: 'second', configDir: linked, createdAt: 0 }
+      ])
+      const fh = fakeHooks()
+      const ctx = recTail()
+      wireAgentStatus(platform, { hooks: fh.hooks as never, contextTail: ctx.tail as never })
+      const ok = path.join(linked, 'projects', '-repo', 's1.jsonl')
+      fh.fireRaw('claude', 'n1', {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        session_id: 's1',
+        transcript_path: ok
+      })
+      expect(ctx.calls.some((c) => c.m === 'track' && c.args[1] === ok)).toBe(true)
+      // The linked dir is not opened up wholesale: the segment after it must be `projects`.
+      const before = ctx.calls.length
+      fh.fireRaw('claude', 'n2', {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        session_id: 's2',
+        transcript_path: path.join(linked, '.ssh', 'id_rsa')
+      })
+      expect(ctx.calls.length).toBe(before)
+    } finally {
+      fs.rmSync(linked, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses that same path when the dir is NOT in settings (the jail reads settings, not the POST)', () => {
+    const fh = fakeHooks()
+    const ctx = recTail()
+    wireAgentStatus(platform, { hooks: fh.hooks as never, contextTail: ctx.tail as never })
+    fh.fireRaw('claude', 'n1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Read',
+      session_id: 's1',
+      transcript_path: path.join(os.tmpdir(), 'not-linked', 'projects', 's1.jsonl')
+    })
+    expect(ctx.calls.filter((c) => c.m === 'track' && c.args[1] !== undefined)).toEqual([])
   })
 })
 

@@ -19,6 +19,11 @@ import { fakePlatform, type FakePlatform } from './platform-fake'
 import { IPC } from '../shared/ipc'
 import { registerClaudeAccountsIpc, installHooksIntoLocalAccounts } from './claude-accounts-service'
 import { accountConfigDir } from './claude-accounts-core'
+import {
+  registerClaudeAccountsSource,
+  resetClaudeAccountsSourceForTests
+} from './claude-config-dir'
+import type { ClaudeAccount } from '../shared/types'
 
 // The hook + TUI writers are exercised by their own suites; here they only have to be OBSERVED,
 // and a real write would touch the account dir this file then asserts about.
@@ -48,16 +53,18 @@ beforeEach(() => {
 })
 afterEach(() => {
   resetPlatformForTests()
+  resetClaudeAccountsSourceForTests()
   rmSync(userDataDir, { recursive: true, force: true })
 })
 
-describe('registerClaudeAccountsIpc — the four channels', () => {
-  it('registers exactly the four claude-accounts channels', () => {
+describe('registerClaudeAccountsIpc — the five channels', () => {
+  it('registers exactly the five claude-accounts channels', () => {
     registerClaudeAccountsIpc()
     expect(Object.keys(fake.handlers).sort()).toEqual(
       [
         IPC.claudeAccountsAdd,
         IPC.claudeAccountsCancelWait,
+        IPC.claudeAccountsLink,
         IPC.claudeAccountsRemove,
         IPC.claudeAccountsWaitLogin
       ].sort()
@@ -178,5 +185,146 @@ describe('installHooksIntoLocalAccounts', () => {
     )
     expect(warn).toHaveBeenCalled()
     warn.mockRestore()
+  })
+})
+
+// ---- Linked accounts (design D4 / §3) --------------------------------------------------------
+//
+// A linked account is a config dir the USER already owns (`~/.claude-2` driven by their own
+// `CLAUDE_CONFIG_DIR` shell function). Two properties matter more than the rest and are pinned
+// against REAL temp directories rather than mocks: the validation actually refuses each bad shape,
+// and removing a linked account never deletes anything.
+describe('claudeAccounts.link', () => {
+  let linkDir = ''
+  beforeEach(() => {
+    linkDir = mkdtempSync(path.join(os.tmpdir(), 'nt-linked-'))
+    registerClaudeAccountsIpc()
+  })
+  afterEach(() => rmSync(linkDir, { recursive: true, force: true }))
+
+  it('links an existing dir: id + normalized path + email, hook and TUI installed into it', async () => {
+    writeFileSync(
+      path.join(linkDir, '.claude.json'),
+      JSON.stringify({ oauthAccount: { emailAddress: 'second@example.com' } })
+    )
+    const res = await call(IPC.claudeAccountsLink, `${linkDir}/`)
+    expect(res.id).toMatch(/^[A-Za-z0-9-]+$/)
+    expect(res.configDir).toBe(linkDir) // trailing slash normalized away
+    expect(res.email).toBe('second@example.com')
+    // The same two writes an ADDED account gets — or the linked identity reports no agent status.
+    expect(installed).toEqual([linkDir])
+    expect(tui).toEqual([linkDir])
+  })
+
+  it('is email: null — not a failure — when the dir is not signed in yet', async () => {
+    await expect(call(IPC.claudeAccountsLink, linkDir)).resolves.toMatchObject({ email: null })
+    writeFileSync(path.join(linkDir, '.claude.json'), 'not json at all')
+    await expect(call(IPC.claudeAccountsLink, linkDir)).resolves.toMatchObject({ email: null })
+    writeFileSync(path.join(linkDir, '.claude.json'), JSON.stringify({ oauthAccount: {} }))
+    await expect(call(IPC.claudeAccountsLink, linkDir)).resolves.toMatchObject({ email: null })
+  })
+
+  it('expands a leading ~ (the value is typed, not shell-expanded by anything else)', async () => {
+    // Proved through the REFUSAL rather than by linking something inside the real home: the
+    // message names the path we actually resolved, so an unexpanded `~` would read as
+    // `No such directory: ~/nodeterm-link-probe` and this assertion would fail.
+    await expect(call(IPC.claudeAccountsLink, '~/nodeterm-link-probe-does-not-exist')).rejects.toThrow(
+      `No such directory: ${path.join(os.homedir(), 'nodeterm-link-probe-does-not-exist')}`
+    )
+    // A bare `~` is the home dir itself; `~evil` is NOT a home-relative path and stays literal
+    // (so it is refused as relative, never resolved against $HOME).
+    await expect(call(IPC.claudeAccountsLink, '~notauser/.claude-2')).rejects.toThrow(
+      /Not an absolute path/
+    )
+  })
+
+  it('refuses a relative path, a `..` path, and a non-string', async () => {
+    for (const bad of ['.claude-2', '../.claude-2', 'claude', '', '   ']) {
+      await expect(call(IPC.claudeAccountsLink, bad)).rejects.toThrow()
+    }
+    await expect(call(IPC.claudeAccountsLink, 42 as unknown as string)).rejects.toThrow()
+    expect(installed).toEqual([]) // nothing was written for any refusal
+  })
+
+  it('refuses the system ~/.claude by name, without stat-ing anything', async () => {
+    await expect(call(IPC.claudeAccountsLink, path.join(os.homedir(), '.claude'))).rejects.toThrow(
+      /system Claude config dir/
+    )
+    // Same dir spelled differently must give the same refusal — both sides go through one
+    // normalizer (CONTRIBUTING: normalize BOTH sides of a path comparison).
+    await expect(
+      call(IPC.claudeAccountsLink, path.join(os.homedir(), 'x', '..', '.claude') + '/')
+    ).rejects.toThrow(/system Claude config dir/)
+  })
+
+  it('refuses a nodeterm-managed account dir (one dir must not have two account ids)', async () => {
+    const managed = accountConfigDir(userDataDir, 'abc')
+    mkdirSync(managed, { recursive: true })
+    await expect(call(IPC.claudeAccountsLink, managed)).rejects.toThrow(/nodeterm-managed/)
+    await expect(call(IPC.claudeAccountsLink, path.join(userDataDir, 'claude-accounts'))).rejects.toThrow(
+      /nodeterm-managed/
+    )
+  })
+
+  it('refuses a dir already linked — by NORMALIZED path, not by the string typed', async () => {
+    registerClaudeAccountsSource(() => [
+      { id: 'existing', label: 'first', configDir: linkDir, createdAt: 0 } as ClaudeAccount
+    ])
+    await expect(call(IPC.claudeAccountsLink, `${linkDir}/`)).rejects.toThrow(/already linked/)
+    await expect(call(IPC.claudeAccountsLink, path.join(linkDir, 'x', '..'))).rejects.toThrow(
+      /already linked/
+    )
+  })
+
+  it('refuses a path that does not exist, and a path that is a FILE', async () => {
+    await expect(call(IPC.claudeAccountsLink, path.join(linkDir, 'nope'))).rejects.toThrow(
+      /No such directory/
+    )
+    const file = path.join(linkDir, 'a-file')
+    writeFileSync(file, 'x')
+    await expect(call(IPC.claudeAccountsLink, file)).rejects.toThrow(/Not a directory/)
+    expect(installed).toEqual([])
+  })
+})
+
+describe('removing a LINKED account never deletes the directory', () => {
+  it('forgets the record and leaves a REAL directory (and its contents) on disk', async () => {
+    const linkDir = mkdtempSync(path.join(os.tmpdir(), 'nt-linked-rm-'))
+    const credentials = path.join(linkDir, '.credentials.json')
+    writeFileSync(credentials, '{"token":"the user\'s own login"}')
+    try {
+      registerClaudeAccountsIpc()
+      const res = await call(IPC.claudeAccountsLink, linkDir)
+      registerClaudeAccountsSource(() => [
+        { id: res.id, label: 'second', configDir: linkDir, createdAt: 0 } as ClaudeAccount
+      ])
+      await call(IPC.claudeAccountsRemove, res.id)
+      // THE assertion of this whole work package: the dir is the user's, and it is still there.
+      expect(existsSync(linkDir)).toBe(true)
+      expect(existsSync(credentials)).toBe(true)
+      // …and no managed dir was invented and deleted in its place either.
+      expect(existsSync(accountConfigDir(userDataDir, res.id))).toBe(false)
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true })
+    }
+  })
+
+  it('still deletes a MANAGED dir — the rm path is unchanged for the accounts nodeterm created', async () => {
+    registerClaudeAccountsIpc()
+    const { id, configDir } = await call(IPC.claudeAccountsAdd)
+    // A settings list that mentions the id but carries NO configDir must not turn off the delete.
+    registerClaudeAccountsSource(() => [{ id, label: 'm', createdAt: 0 } as ClaudeAccount])
+    await call(IPC.claudeAccountsRemove, id)
+    expect(existsSync(configDir)).toBe(false)
+  })
+})
+
+describe('installHooksIntoLocalAccounts covers linked accounts', () => {
+  it('installs into the linked dir, not into a managed dir that does not exist', () => {
+    registerClaudeAccountsSource(() => [
+      { id: 'linked', label: 'l', configDir: '/home/u/.claude-2', createdAt: 0 } as ClaudeAccount
+    ])
+    installHooksIntoLocalAccounts([{ id: 'linked' }, { id: 'managed' }])
+    expect(installed).toEqual(['/home/u/.claude-2', accountConfigDir(userDataDir, 'managed')])
   })
 })

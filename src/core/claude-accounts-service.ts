@@ -2,19 +2,29 @@
 // (poll .claude.json), CLI version check, per-account hook install. The account LIST lives in
 // settings.json (renderer-owned via useSettings); this module only owns the filesystem.
 //
-// Lives in core so BOTH shells serve it. Before this the four channels were registered only by
+// Lives in core so BOTH shells serve it. Before this the channels were registered only by
 // src/main, so the Server Edition's bridge answered E_UNSUPPORTED for every one of them: a
 // browser-only deployment could select a managed account (env injection, transcript readers,
 // usage and the pickers are all core already) but could never CREATE, log into or remove one
 // (issue #313).
 import { randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
+import { homedir } from 'os'
 import path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { IPC } from '../shared/ipc'
-import { isSupportedClaudeVersion, parseLoginCapture } from './claude-accounts-core'
-import { claudeConfigDirFor } from './claude-config-dir'
+import {
+  accountConfigDir,
+  isSupportedClaudeVersion,
+  normalizeLinkedConfigDir,
+  parseLoginCapture
+} from './claude-accounts-core'
+import {
+  claudeAccountsSnapshot,
+  claudeConfigDirFor,
+  linkedClaudeConfigDirFor
+} from './claude-config-dir'
 import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from './agents/hooks/claude'
 import { findInLoginPath } from './pty-manager'
 import { platform } from './platform'
@@ -79,7 +89,7 @@ async function checkClaudeVersion(): Promise<boolean> {
   }
 }
 
-/** Register the four `claude-accounts:*` channels on the core platform seam. */
+/** Register the five `claude-accounts:*` channels on the core platform seam. */
 export function registerClaudeAccountsIpc(deps: ClaudeAccountsDeps = {}): void {
   const pollMs = deps.pollMs ?? LOGIN_POLL_MS
   // Resolve the live remote legs for a context, or null when the context is local / not connected.
@@ -153,8 +163,93 @@ export function registerClaudeAccountsIpc(deps: ClaudeAccountsDeps = {}): void {
       await remote.r.remove(remote.projectId, id)
       return
     }
-    const configDir = claudeConfigDirFor(id) // id validation prevents traversal
+    // LINKED account (design D4/§3): the directory is the USER's — `~/.claude-2` with their real
+    // login in it — and removing the account only forgets the settings row (the renderer owns the
+    // list). Forgetting is the whole operation here; `rm -rf` would delete a second Claude
+    // identity the app never created.
+    if (linkedClaudeConfigDirFor(id)) return
+    // `accountConfigDir`, NOT `claudeConfigDirFor`: the resolver now answers with a LINKED dir for
+    // a linked account, and the one call in this file that deletes recursively must be incapable
+    // of naming anything but `{userData}/claude-accounts/<id>` — id-validated, as it always was.
+    // The early return above is the behaviour; this line is the structural guarantee behind it.
+    const configDir = accountConfigDir(platform().userDataDir, id)
     await fs.rm(configDir, { recursive: true, force: true })
+  })
+
+  /**
+   * Link a PRE-EXISTING Claude config dir as an account (design D4; validation is §3 verbatim).
+   * The renderer owns the settings list, so this returns the record and appends nothing itself.
+   *
+   * Every refusal is a distinct `Error` message because the Settings UI shows it: "that path does
+   * not exist" and "that is already linked" need different fixes from the user, and one generic
+   * "invalid config dir" would make the second one look like a typo in the first.
+   */
+  platform().handle(IPC.claudeAccountsLink, async (rawDir: string) => {
+    if (typeof rawDir !== 'string' || !rawDir.trim()) {
+      throw new Error('Enter the path to a Claude config directory.')
+    }
+    // `~` expansion is ours to do: the value is typed into a text field, not passed through a
+    // shell, so nothing else would ever expand it — and `~/.claude-2` is exactly how the user
+    // refers to the dir their own shell function exports.
+    const typed = rawDir.trim()
+    const expanded =
+      typed === '~' || typed.startsWith('~/') ? path.join(homedir(), typed.slice(1)) : typed
+    const configDir = normalizeLinkedConfigDir(expanded)
+    if (!configDir) {
+      throw new Error(`Not an absolute path: ${typed}`)
+    }
+    // The three STRING refusals run before the fs is touched at all. §3 lists exists/isDirectory
+    // first, but the order here is deliberate: a path we are going to refuse on its shape alone is
+    // a path we should not be stat'ing, and refusing `~/.claude` needs to say so even on a machine
+    // where the dir has not been created yet ("no such directory" would be a misleading answer to
+    // "why can't I link my system account?").
+    if (configDir === normalizeLinkedConfigDir(path.join(homedir(), '.claude'))) {
+      throw new Error('That is the system Claude config dir — it is already the default account.')
+    }
+    const managedRoot = normalizeLinkedConfigDir(
+      path.join(platform().userDataDir, 'claude-accounts')
+    )
+    // Under the managed root ⇒ it is an account nodeterm created. Linking it would give one dir two
+    // account ids, and the second one would be removable-without-delete while the first still
+    // `rm -rf`s the same directory.
+    if (managedRoot && (configDir === managedRoot || configDir.startsWith(managedRoot + path.sep))) {
+      throw new Error('That is a nodeterm-managed account directory — add it with Add account.')
+    }
+    // Duplicate by NORMALIZED path, not by the string typed: `~/.claude-2/` and `/home/u/.claude-2`
+    // are the same dir, and two rows for one dir would show two chips for one identity.
+    for (const a of claudeAccountsSnapshot()) {
+      if (!a.host && normalizeLinkedConfigDir(a.configDir) === configDir) {
+        throw new Error(`That config dir is already linked (${a.label || a.email || a.id}).`)
+      }
+    }
+    // EXISTS and IS A DIRECTORY, checked before anything is written into it. `stat`, not `lstat`:
+    // a symlinked config dir is a normal way to keep one, and the target is what everything else
+    // — the CLI, the jail, the transcript reader — resolves through.
+    let isDir = false
+    try {
+      isDir = (await fs.stat(configDir)).isDirectory()
+    } catch {
+      throw new Error(`No such directory: ${configDir}`)
+    }
+    if (!isDir) throw new Error(`Not a directory: ${configDir}`)
+    // The ONLY read of the dir's contents, and only after the user asked for this dir by name.
+    // Missing / not-logged-in is `email: null`, NOT a failure (§3): linking a dir the user has not
+    // signed into yet is legitimate — the CLI writes the email when they do.
+    let email: string | null = null
+    try {
+      const raw = await fs.readFile(path.join(configDir, '.claude.json'), 'utf-8')
+      email = parseLoginCapture(raw)?.email ?? null
+    } catch {
+      email = null
+    }
+    // Same two writes an ADDED account gets, so a linked account reports agent status from its
+    // very next session. `installClaudeHooksInto` MERGES into an existing settings.json and writes
+    // it back through `writeFileSync`, which follows a symlink — the two-profile layout where
+    // `<dir>/settings.json` is a symlink into `~/.claude/` keeps its symlink and the shared target
+    // gains the managed hook (pinned by test).
+    installClaudeHooksInto(configDir)
+    void ensureClaudeFullscreenTuiInto(configDir)
+    return { id: randomUUID(), configDir, email }
   })
 }
 
@@ -164,6 +259,12 @@ export function registerClaudeAccountsIpc(deps: ClaudeAccountsDeps = {}): void {
  * CLAUDE_CONFIG_DIR), so an app update's new hook version must reach them too. Best-effort per
  * account: one failing account must never block launch (matches installManagedAgentHooks'
  * fail-open). `extra` is the shell's per-account addition — desktop installs the canvas skill.
+ *
+ * LINKED accounts (`ClaudeAccount.configDir`) are covered by the same loop and need no branch:
+ * they carry no `host`, and `claudeConfigDirFor` answers with the user's own dir — which is the
+ * point, because an app update's new hook version has to reach `~/.claude-2` too or that identity
+ * silently stops reporting agent status. The shells register the accounts source BEFORE calling
+ * this, or the resolver would hand back a managed dir that does not exist for those rows.
  */
 export function installHooksIntoLocalAccounts(
   accounts: readonly { id: string; host?: string }[],

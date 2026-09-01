@@ -94,7 +94,7 @@ import { startSessionMemoryService, sshScopePredicate } from '../core/session-me
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
-import { claudeConfigDirFor } from '../core/claude-config-dir'
+import { claudeConfigDirFor, registerClaudeAccountsSource } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
 import { initCanvasSync, publishCanvasMutation } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
@@ -205,6 +205,12 @@ export async function startServer(
   const workspaceMutationQueue = new WorkspaceMutationQueue()
 
   settingsStore.init()
+  // The linked-account resolver's one source of truth on this shell (design D4). Registered as
+  // soon as settings exist and BEFORE anything that resolves a config dir — the mirror settings
+  // provider, `installHooksIntoLocalAccounts`, the transcript jail — because an unregistered
+  // source means "no linked accounts", i.e. a linked row would resolve to a managed dir that does
+  // not exist. The desktop registers the identical getter next to `initTranscriptIndex`.
+  registerClaudeAccountsSource(() => settingsStore.get().claudeAccounts ?? [])
   const gatewayCredentials = new ModelGatewayCredentialService(
     new ServerSecretStore(config.dataDir, MODEL_GATEWAY_SECRET_FILE)
   )

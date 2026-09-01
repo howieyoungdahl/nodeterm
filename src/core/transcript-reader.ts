@@ -6,6 +6,7 @@ import os from 'os'
 import path from 'path'
 import type { TranscriptLine, ChatMessage, ChatPart } from '../shared/types'
 import { transcriptRootFor } from './claude-accounts-core'
+import { linkedClaudeConfigDirFor } from './claude-config-dir'
 import { platform } from './platform'
 
 // Transcript root for a managed account (its `projects` dir) or the system default
@@ -14,7 +15,12 @@ import { platform } from './platform'
 // (and only for the account branch) so this module — and its vitest test — stays electron-free.
 function transcriptRoot(accountId?: string): string {
   const userData = accountId ? platform().userDataDir : null
-  return transcriptRootFor(os.homedir(), userData, accountId)
+  // A LINKED account's transcripts live in the dir the USER owns (`~/.claude-2/projects`), not
+  // under `{userData}`. Resolved through the registry so this — and with it `resolveTranscriptPath`,
+  // `readSessionName`, `transcriptPathForCwd`, and therefore handoff/locate, agent-session-name,
+  // context-link and the session-name sweep — is the ONE place the answer moved.
+  const linked = accountId ? linkedClaudeConfigDirFor(accountId) : null
+  return transcriptRootFor(os.homedir(), userData, accountId, linked ?? undefined)
 }
 
 // Only read the last ~5 MB of a transcript so a very large session can't block the main
