@@ -1559,8 +1559,8 @@ else, and its context links must keep classifying across restarts).
     `renderer/lib/nodeterm-events.test.ts`, which fails on any `nodeterm:*` event that is sent but
     never heard.
   - **The lifecycle is CORE, and both shells register it** (issue #313) —
-    `core/claude-accounts-service.ts` owns the four `claude-accounts:*` channels (add / wait-login
-    / cancel-wait / remove) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop
+    `core/claude-accounts-service.ts` owns the five `claude-accounts:*` channels (add / wait-login
+    / cancel-wait / remove / link) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop
     wrapper and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`. Two optional
     deps carry everything core cannot reach: `installSkill` (desktop passes `installCanvasSkillInto`;
     an enabled Server canvas-control runtime installs its Server-specific skill separately) and
@@ -1600,6 +1600,49 @@ else, and its context links must keep classifying across restarts).
     correct (their credentials aren't on the host) but read as "multi-account is broken on SSH".
   - **Remote accounts** — selection + login + env injection, plus **usage** (below); no
     per-account transcript readers beyond env.
+  - **Linked accounts** (`ClaudeAccount.configDir`, design:
+    `docs/superpowers/plans/2026-09-01-claude-account-tracking.md`) — a PRE-EXISTING local config
+    dir the user already drives themselves (`export CLAUDE_CONFIG_DIR=~/.claude-2; claude …` in a
+    plain terminal) adopted as a first-class account without a login node. Settings → Accounts →
+    **Link existing config dir…** (or one click on a **Detected** dir) calls `claude-accounts:link`
+    (core service): `~` expansion → `normalizeLinkedConfigDir` → string-only refusals (the system
+    `~/.claude`, anything under `{userData}/claude-accounts`, an already-linked path) → `stat` →
+    email from `<dir>/.claude.json` (missing = `email: null`, not an error) → managed hook install.
+    `claudeConfigDirFor(id)` consults a **registered accounts source**
+    (`registerClaudeAccountsSource`, both shells right after `settingsStore.init()` — BEFORE the
+    mirror settings provider can flush, or the phone would be advertised a non-existent managed
+    dir), so env injection, `transcriptRootFor`, the transcript index, usage rows and the pickers
+    all resolve a linked id to the user's own dir with no per-caller branch. The transcript jails
+    (`isSafeLocalTranscriptPath`, both raw listeners) accept `<linkedDir>/projects/**` for dirs
+    **from settings only** — never a dir named by the POST. **Removing a linked account only
+    forgets the record**: the `rm -rf` names `accountConfigDir(userData, id)` directly, so it is
+    structurally incapable of reaching outside the managed root even if the settings row is gone
+    before the IPC lands. The hook installer writes `settings.json` THROUGH a symlink
+    (`writeFileSync`) — a profile whose `settings.json` symlinks to `~/.claude/settings.json` (the
+    two-profile layout) stays a symlink; pinned by `claude-accounts-link-symlink.test.ts`, and
+    switching that write to `renameAtomic` would be the regression (it replaces the link).
+  - **Observed account** (`ObservedClaudeAccount`, `NormalizedAgentEvent.account`) — which account
+    a session is ACTUALLY on, derived by the hook server from the payload's `transcript_path`
+    (`<configDir>/projects/<slug>/<session>.jsonl`; `configDirFromTranscriptPath` walks up to the
+    LAST `projects` segment, so `~/projects/.claude/projects/…` names `~/projects/.claude`, not
+    `~`). `classifyClaudeConfigDir` is pure string matching, host-agnostic: managed local root →
+    managed remote pattern (`…/.nodeterm/claude-accounts/<id>`) → linked (settings) → any
+    `…/.claude` ⇒ system (`accountId: null`) → else `known: false`. It is a **LABEL** exactly like
+    `verified`/`clientRevision`: attached to the normalized event in ONE place (the hook server),
+    so both shells inherit it and neither raw listener changes; claude events only; never throws;
+    **never reads the filesystem** (a forged POST naming `~/.ssh/projects/x` gets `known: false`
+    and nothing is opened). Recorded by the mirror (`MirrorEntry.account`) and the renderer store
+    (`agentStatus.account`, persisted like `agentId` — a hand-launched claude's identity exists
+    nowhere else). **Effective account for READERS** = `data.accountId ?? observed.accountId`
+    (`renderer/lib/accountChip.ts` `effectiveAccountId`): `readSessionName`, `context.ensure`, the
+    transcript search and the ⌘M view use it; **spawn/env never does** (launch identity stays
+    creation-time). The **account chip** (`components/AccountChip.tsx`, ONE component on the node
+    header, kanban card, card modal and sidebar row) shows for any non-system account, and for
+    system panes only when ≥ 2 distinct account keys (`sys` / `<id>` / `ext:<dir>`) are live on the
+    core (`hasMultipleAccountKeys`, a primitive selector so headers don't re-render on every hook
+    event). An unlinked dir is named by its last path segment (`.claude-2`, dashed chip) with a
+    tooltip pointing at Settings → Accounts, where **Detected config dirs** lists it for one-click
+    linking. Mobile: N/A (additive mirror fields).
 
 - **The usage indicator is scoped to the ACTIVE project** (`renderer/lib/usageScope.ts`, pure +
   unit-tested) — it describes **the machine that project runs on**, and nothing else. A local

@@ -671,8 +671,8 @@ transcript readers, the usage rows and the account pickers are all `src/core` â€
 *lifecycle* was welded to `ipcMain`, so a browser-only deployment could pick an account it had no
 way to create (issue #313).
 
-- **The lifecycle is core.** `src/core/claude-accounts-service.ts` owns the four
-  `claude-accounts:*` channels (add / wait-login / cancel-wait / remove) and registers them
+- **The lifecycle is core.** `src/core/claude-accounts-service.ts` owns the five
+  `claude-accounts:*` channels (add / wait-login / cancel-wait / remove / link) and registers them
   through the platform seam, so **both shells serve them**: `src/main/claude-accounts.ts` is now a
   thin desktop wrapper, and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`.
   The browser reaches them through a real `buildClaudeAccountsApi` in the ws-bridge instead of the
