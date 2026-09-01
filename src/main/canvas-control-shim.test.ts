@@ -171,6 +171,81 @@ describe('canvas-control shim', () => {
     expect(received.length).toBe(before)
   })
 
+  it('self-heals discovery for an agent hand-launched inside an identified terminal', async () => {
+    const endpoint = hookServer.endpointFilePath()
+    const { stdout } = await callShim(['list'], {
+      NODETERM_CANVAS_CONTROL: '',
+      NODETERM_AGENT_ID: '',
+      NODETERM_HOOK_PORT: '',
+      NODETERM_HOOK_TOKEN: '',
+      NODETERM_HOOK_ENDPOINT: endpoint
+    })
+    expect(stdout.trim()).toBe('did list')
+    expect(received.at(-1)).toMatchObject({ verb: 'list', nodeId: 'node-1' })
+  })
+
+  it('still refuses a pane with no node id even when a hook endpoint is visible', async () => {
+    const before = received.length
+    await expect(
+      run('/bin/sh', [shim, 'list'], {
+        env: {
+          PATH: process.env.PATH ?? '',
+          NODETERM_HOOK_ENDPOINT: hookServer.endpointFilePath()
+        }
+      })
+    ).rejects.toMatchObject({ stderr: expect.stringContaining('not a nodeterm agent node') })
+    expect(received.length).toBe(before)
+  })
+
+  it.each([
+    ['claude', 'claude'],
+    ['codex', 'codex'],
+    ['gemini', 'gemini'],
+    ['node', 'claude']
+  ])('derives hand-launch agent identity from parent %s (or defaults)', async (parent, expected) => {
+    const bin = path.join(dir, `agent-detect-${parent}`)
+    const agentLog = path.join(bin, 'agent.log')
+    fs.mkdirSync(bin, { recursive: true })
+    fs.writeFileSync(
+      path.join(bin, 'ps'),
+      '#!/bin/sh\nprintf \'%s\\n\' "$NT_FAKE_PARENT"\n',
+      { mode: 0o755 }
+    )
+    fs.writeFileSync(
+      path.join(bin, 'curl'),
+      '#!/bin/sh\ncat >/dev/null\nprintf \'%s\' "$NODETERM_AGENT_ID" > "$NT_AGENT_LOG"\nprintf 200\n',
+      { mode: 0o755 }
+    )
+    await callShim(['list'], {
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      NODETERM_CANVAS_CONTROL: '',
+      NODETERM_AGENT_ID: '',
+      NODETERM_HOOK_ENDPOINT: path.join(dir, 'advertised-but-unreadable.env'),
+      NT_FAKE_PARENT: parent,
+      NT_AGENT_LOG: agentLog
+    })
+    expect(fs.readFileSync(agentLog, 'utf8')).toBe(expected)
+  })
+
+  it('preserves an explicitly supplied hand-launch agent id', async () => {
+    const bin = path.join(dir, 'agent-detect-explicit')
+    const agentLog = path.join(bin, 'agent.log')
+    fs.mkdirSync(bin, { recursive: true })
+    fs.writeFileSync(
+      path.join(bin, 'curl'),
+      '#!/bin/sh\ncat >/dev/null\nprintf \'%s\' "$NODETERM_AGENT_ID" > "$NT_AGENT_LOG"\nprintf 200\n',
+      { mode: 0o755 }
+    )
+    await callShim(['list'], {
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      NODETERM_CANVAS_CONTROL: '',
+      NODETERM_AGENT_ID: 'custom:operator',
+      NODETERM_HOOK_ENDPOINT: path.join(dir, 'advertised-but-unreadable.env'),
+      NT_AGENT_LOG: agentLog
+    })
+    expect(fs.readFileSync(agentLog, 'utf8')).toBe('custom:operator')
+  })
+
   it('rejects a wrong token (the server answers 403, the shim exits non-zero)', async () => {
     await expect(callShim(['list'], { NODETERM_HOOK_TOKEN: 'wrong' })).rejects.toMatchObject({
       code: 1

@@ -47,6 +47,8 @@ export interface WireAgentStatusOptions {
   /** One tap on the normalized, mirror-enriched stream for in-process consumers such as the
    * Server Edition delivery queue and `--after` scheduler. */
   onEvent?: (event: NormalizedAgentEvent) => void
+  /** Authenticated normalized hook arrival, so a verified hand launch can register its node. */
+  onRegistration?: (agentId: string, nodeId: string, verified: boolean) => void
 }
 
 /**
@@ -147,6 +149,10 @@ export function wireAgentStatus(
   const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
 
   hooks.setListener((e) => {
+    // Queue registration before the same event reaches the delivery/arming consumer below. Stop
+    // is the fake/real hand-launch registration event and normalizes on every supported provider;
+    // the HookServer remains the sole producer of the verified label.
+    opts.onRegistration?.(e.agentId, e.nodeId, e.verified === true)
     // Record FIRST: recordAgentEvent computes the stash-priority classification and returns the
     // event ENRICHED for a needs-you edge (a question strips its pendingId), so the browser canvas
     // keys off the same single source of truth as the mirror/phone. Then broadcast the enriched one.
@@ -172,11 +178,9 @@ export function wireAgentStatus(
   }
 
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
-  // `meta` carries the per-node `verified` flag and is deliberately UNUSED here: A13 moved
-  // enforcement into the hook server, which refuses before a listener is ever called. This shell
-  // used to keep a `nodeVerified` map written on every event and read by nothing. The parameter
-  // stays because the flag is part of the listener contract and both shells must take it
-  // (invariant 4, pinned by hook-verified-parity.test.ts); a second copy of the answer is not.
+  // `meta` carries the per-node verified flag, but the raw tail/parser branches do not consume it.
+  // Registration reads the same label from the normalized stream above, preserving both-shell
+  // raw-listener parity while HookServer remains the one authority that computes the answer.
   hooks.setRawListener((agentId, nodeId, payload, _meta) => {
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.

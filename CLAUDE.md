@@ -1306,8 +1306,11 @@ else, and its context links must keep classifying across restarts).
   **form-urlencoded** (`nodeId` + `arg.<flag>` fields; `curl --data-urlencode` is the only
   escaping sh can be trusted with — `parseControlBody` reads both this and the JSON dialect) to
   the hook server's `/control/<verb>` routes; `Accept: text/plain` makes the server render the
-  reply (sh has no JSON parser). Env-gated on `NODETERM_CANVAS_CONTROL` (set by
-  `buildPtyEnv`/`remoteHookEnvArgs` per `canControlCanvas`). Discovery: claude gets a
+  reply (sh has no JSON parser). Normally env-gated on `NODETERM_CANVAS_CONTROL` (set by
+  `buildPtyEnv`/`remoteHookEnvArgs` per `canControlCanvas`). A hand-relaunched agent in a terminal
+  has node + hook discovery but no spawn-time grant, so the shim repairs the missing discovery bit
+  and agent id (parent-process `claude`/`codex`/`gemini`, otherwise Claude); the Server still owns
+  authorization. Discovery: claude gets a
   `skills/manage-nodeterm-canvas/SKILL.md` (system `~/.claude` + each managed account dir);
   codex/gemini/opencode plus Copilot's `copilot-instructions.md` get a marker block
   (`<!-- nodeterm:manage-canvas:start/end -->`); **grok needs
@@ -1327,9 +1330,15 @@ else, and its context links must keep classifying across restarts).
   (`tmux attach-session` / session-host attach-existing). Neither path can create a context-free
   shell, including if the backend disappears between boot and browser mount. Only node ids created
   during the current Server run retain the normal fresh-spawn path. `open-terminal` and
-  `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
-  node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
-  identity never defaults to Claude.
+  `open-agent` are verified-only at the Server handler boundary. A plain terminal starts with only
+  generic node hook wiring. Its first verified hand-launched-agent registration durably marks the
+  card for the process lifetime, enables status/queue/dependency semantics, and permits self-card
+  metadata updates without changing creator ownership of any other node. If an unversioned stale
+  whole-workspace save removed its card while the pane survived, that verified registration may
+  restore the card only from an alive backend plus the current-run pane-to-project provenance and
+  emits one warning. With no such provenance, control returns an actionable instruction to open the
+  terminal from the canvas inside the target project. Hook history, a tmux name, and project JSON
+  never reconstruct creator ownership.
   **Creation liveness (2026-08 incident hardening):** the serialized section of
   `HeadlessNodeFactory.open` ends after the card is saved/published. PTY creation and initial-command
   delivery run outside it behind one 15s deadline, so an unresponsive tmux/session-host operation

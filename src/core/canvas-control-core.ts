@@ -314,6 +314,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     'a caller may mutate or message only nodes it opened during the current server run.',
     'Restarting the server clears that creator proof; persisted nodes and queued launches are never',
     'auto-adopted, relaunched, or controlled at boot. An unowned target receives a named refusal.',
+    'An agent relaunched by hand inside a terminal reuses that pane\'s node and hook discovery. The',
+    'shim reconstructs missing agent discovery variables, but the Server still authorizes from the',
+    'verified hook, live pane, saved project or current-run pane provenance, and creator ledger. A',
+    'verified hook promotes a plain terminal to that agent for the node\'s lifetime; it may update',
+    'its own card, while every node previously spawned by that node id keeps the same owner and no',
+    'other node is adopted. If project provenance cannot be established, open the terminal from the',
+    'canvas inside the target project.',
     '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
@@ -488,6 +495,26 @@ export const helpVerbList = (): string => VERBS.join(' ')
 export const VERBS_FOR_TEST: readonly ControlVerb[] = VERBS
 
 const CONTROL_SHIM_BODY = `# nodeterm canvas-control CLI (auto-generated — do not edit).
+
+# A hand-launched agent inherits the pane's node + hook discovery, but the two agent-only bits were
+# historically injected only by nodeterm's launch path. Recover discovery here; authorization still
+# belongs entirely to the server (per-node token, live hook registration, project provenance and
+# creator ownership). A shell with no node id remains outside nodeterm and is refused below.
+if [ -z "$NODETERM_CANVAS_CONTROL" ] && [ -n "$NODETERM_NODE_ID" ] && \
+   { [ -n "$NODETERM_HOOK_ENDPOINT" ] || [ -n "$NODETERM_HOOK_SOCK" ]; }; then
+  NODETERM_CANVAS_CONTROL=1
+  export NODETERM_CANVAS_CONTROL
+  if [ -z "$NODETERM_AGENT_ID" ]; then
+    nt_parent_agent=$(ps -o comm= -p "$PPID" 2>/dev/null || :)
+    case "$nt_parent_agent" in
+      *codex*) NODETERM_AGENT_ID=codex ;;
+      *gemini*) NODETERM_AGENT_ID=gemini ;;
+      *claude*) NODETERM_AGENT_ID=claude ;;
+      *) NODETERM_AGENT_ID=claude ;;
+    esac
+    export NODETERM_AGENT_ID
+  fi
+fi
 
 if [ -z "$NODETERM_CANVAS_CONTROL" ]; then
   echo "Canvas control is not available in this session (not a nodeterm agent node)." >&2
@@ -721,6 +748,14 @@ Server Edition ownership is fail-closed: every request requires verified node id
 caller may mutate or message only nodes it opened during the current server run. Restarting
 the server clears that creator proof; persisted nodes and queued launches are never auto-adopted,
 relaunched, or controlled at boot. An unowned target receives a named refusal.
+
+An agent relaunched by hand inside a terminal reuses that pane's node and hook discovery. The shim
+reconstructs missing agent discovery variables, but the Server still authorizes from the verified
+hook, live pane, saved project or current-run pane provenance, and creator ledger. A verified hook
+promotes a plain terminal to that agent for the node's lifetime; it may update its own card, while
+every node previously spawned by that node id keeps the same owner and no other node is adopted. If
+project provenance cannot be established, open the terminal from the canvas inside the target
+project.
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.

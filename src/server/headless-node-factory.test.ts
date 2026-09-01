@@ -37,15 +37,23 @@ class FakePty implements HeadlessPty {
   }> = []
   readonly live = new Set<string>()
   readonly alreadyDead = new Set<string>()
+  readonly paneProjects = new Map<string, string>()
 
   async createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult> {
     this.creates.push(options)
-    if (options.persistKey) this.live.add(options.persistKey)
+    if (options.persistKey) {
+      this.live.add(options.persistKey)
+      if (options.ownerProjectId) this.paneProjects.set(options.persistKey, options.ownerProjectId)
+    }
     return { sessionId: `pty-${options.persistKey}`, fresh: true, persistent: true }
   }
 
   async sessionExists(persistKey: string): Promise<boolean> {
     return this.live.has(persistKey)
+  }
+
+  async sessionPresence(persistKey: string): Promise<'alive' | 'dead'> {
+    return this.live.has(persistKey) ? 'alive' : 'dead'
   }
 
   async sendText(nodeId: string, text: string): Promise<boolean> {
@@ -175,6 +183,7 @@ describe('HeadlessNodeFactory', () => {
       ownership,
       spawnHandlerState,
       stateOf: (id) => states[id],
+      paneProjectOf: (id) => pty.paneProjects.get(id),
       publishNode: (_projectId, node) => published.push(node),
       publishRemoval: (_projectId, nodeId) => removed.push(nodeId),
       publishProject: (project) => publishedProjects.push(structuredClone(project))
@@ -221,6 +230,90 @@ describe('HeadlessNodeFactory', () => {
     const reloaded = await new WorkspaceStore().load({ sideline: false })
     expect(reloaded.projects[0].nodes.find((node) => node.id === id)).toMatchObject({
       cwd: projectDir
+    })
+  })
+
+  it('re-attaches a verified hand launch after a stale save drops its live card', async () => {
+    // Reproduce the field shape: a browser serialized this snapshot before Server control added
+    // the terminal, then its whole-workspace save landed after the add. The card disappears while
+    // the independently persistent pane — and its current-run pane provenance — remain alive.
+    const staleBrowserSnapshot = await store.load({ sideline: false })
+    const opened = await factory.openTerminal('term-source', {}, true)
+    const nodeId = (opened.result as { id: string }).id
+    expect(pty.live.has(nodeId)).toBe(true)
+    await store.save(staleBrowserSnapshot)
+    expect((await store.load({ sideline: false })).projects[0].nodes
+      .some((node) => node.id === nodeId)).toBe(false)
+
+    await factory.onHookRegistration('claude', nodeId, true)
+
+    const recovered = (await store.load({ sideline: false })).projects[0].nodes
+      .find((node) => node.id === nodeId)
+    expect(recovered).toMatchObject({ id: nodeId, kind: 'terminal', agentId: 'claude' })
+    // Promotion never rewrites creator provenance: the director that originally spawned this
+    // terminal still owns it, while the verified hand launch gets the narrow self-card mutation.
+    expect(ownership.ownerOf(nodeId)).toEqual({
+      sourceNodeId: 'term-source',
+      projectId: 'project-1'
+    })
+    await expect(
+      factory.rename(nodeId, { node: nodeId, title: 'Relaunched director' })
+    ).resolves.toMatchObject({ ok: true })
+    await expect(
+      factory.rename(nodeId, { node: 'term-upstream', title: 'Must not land' })
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/owner/i)
+    })
+  })
+
+  it('promotes an existing plain terminal only from a verified hook registration', async () => {
+    const workspace = await store.load({ sideline: false })
+    const plain = terminal('term-plain', 'Plain terminal')
+    delete plain.agentId
+    workspace.projects[0].nodes.push(plain)
+    await store.save(workspace)
+
+    await factory.onHookRegistration('codex', plain.id, false)
+    expect((await store.load({ sideline: false })).projects[0].nodes
+      .find((node) => node.id === plain.id)?.agentId).toBeUndefined()
+
+    pty.live.add(plain.id)
+    pty.paneProjects.set(plain.id, 'project-1')
+    await factory.onHookRegistration('codex', plain.id, true)
+    expect((await store.load({ sideline: false })).projects[0].nodes
+      .find((node) => node.id === plain.id)?.agentId).toBe('codex')
+  })
+
+  it('does not turn a non-terminal canvas record into an agent from a forged route label', async () => {
+    const workspace = await store.load({ sideline: false })
+    workspace.projects[0].nodes.push({
+      id: 'sticky-source',
+      kind: 'sticky',
+      position: { x: 0, y: 0 },
+      size: { width: 260, height: 180 },
+      title: 'Not a pane',
+      color: '#ffd60a',
+      group: null,
+      text: 'still not a pane'
+    })
+    await store.save(workspace)
+
+    await factory.onHookRegistration('claude', 'sticky-source', true)
+    await expect(
+      factory.rename('sticky-source', { node: 'sticky-source', title: 'Must not control' })
+    ).resolves.toEqual({ ok: false, error: 'source node is not a control-capable agent' })
+  })
+
+  it('names an unresolvable hand-launched source and tells the operator how to recover', async () => {
+    const nodeId = 'term-live-without-project'
+    pty.live.add(nodeId)
+    await factory.onHookRegistration('claude', nodeId, true)
+    await expect(factory.openTerminal(nodeId, {}, true)).resolves.toEqual({
+      ok: false,
+      error:
+        `source-node-project-unavailable: ${nodeId} has no saved project; ` +
+        'open the terminal from the canvas inside the target project'
     })
   })
 
