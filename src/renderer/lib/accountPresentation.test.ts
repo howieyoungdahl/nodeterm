@@ -47,4 +47,22 @@ describe('presentAccount', () => {
     // absent the raw `user@host` must still read as SSH, never as Local.
     expect(presentAccount({ email: 'r@x', host: 'me@box' }).provenance).toBe('SSH · me@box')
   })
+
+  it('gives a linked config dir its own provenance, with the path in the tooltip', () => {
+    // A linked account is local, but "Local" alone loses the one fact that identifies it: WHICH
+    // dir. Removing it keeps that folder, so the path is what the user is deciding about.
+    expect(
+      presentAccount({ label: 'second', email: 'me@x.com', linked: true, configDir: '/home/me/.claude-2' })
+    ).toEqual({
+      identity: 'second',
+      provenance: 'Linked',
+      tooltip: 'second (me@x.com) · Linked /home/me/.claude-2'
+    })
+  })
+
+  it('never calls a remote account linked (a linked dir is local by definition)', () => {
+    const p = presentAccount({ email: 'r@x', host: 'me@box', linked: true, configDir: '/nope' })
+    expect(p.provenance).toBe('SSH · me@box')
+    expect(p.tooltip).toBe('r@x · SSH me@box')
+  })
 })

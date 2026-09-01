@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { AccountChip, useAccountChip } from './AccountChip'
 import { IconBellFilled, IconCircleCheck } from './icons'
 import { ProjectGlyph } from './ProjectGlyph'
 import type { SessionRowVM } from '../lib/sessionList'
@@ -44,6 +45,9 @@ export function SessionRow({
   const naming = useSessionNaming((s) => !!s.byId[row.id])
   const usage = useContextWindow((s) => (row.sessionId ? s.bySessionId[row.sessionId] : undefined))
   const percentMode = useSettings((s) => s.settings.usagePercentMode)
+  // The sidebar is one more view of the same nodes, so it gets the canvas header's account chip
+  // under the same visibility rule — two rows on two Claude logins are otherwise indistinguishable.
+  const accountChip = useAccountChip(row.accountId, row.account)
 
   const commit = (): void => {
     const t = draft.trim()
@@ -139,6 +143,7 @@ export function SessionRow({
             </span>
           )}
           {row.session && <span className="ss-chip">{row.session}</span>}
+          <AccountChip chip={accountChip} />
           {row.loop && (
             <span className="ss-loop">
               {row.loop.kind} · {row.loop.count}

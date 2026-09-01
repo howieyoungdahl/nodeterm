@@ -1962,6 +1962,9 @@ export function Canvas() {
               title: n.data.title ?? n.id,
               color: n.data.color ?? '#888',
               agentId: n.data.agentId,
+              // The node's creation-time account, for the sidebar row's account chip (the
+              // serialized nodes of inactive projects carry it already).
+              accountId: n.data.accountId,
               cwd: n.data.cwd,
               ssh: n.data.ssh,
               parentId: n.parentId
@@ -10152,6 +10155,10 @@ export function Canvas() {
     return api.onAgentStatus((e: NormalizedAgentEvent) => {
       const cs = useAgentStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
+      // Which Claude account the posting session is ACTUALLY on (hook-derived label, D3). Captured
+      // off any event that carries one, exactly like `sessionId` above: a plain terminal running
+      // `CLAUDE_CONFIG_DIR=~/.claude-2 claude` announces its identity nowhere else.
+      if (e.account) cs.setAccount(e.nodeId, e.account)
       const agentLabel = agentConfig(e.agentId)?.label ?? 'Agent'
       // "<folder> — Claude finished" + last assistant message as the body.
       const alert = (statusText: string, fallbackBody: string, sound: 'done' | 'needsYou') => {

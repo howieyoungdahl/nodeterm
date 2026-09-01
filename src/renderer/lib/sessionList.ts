@@ -1,6 +1,6 @@
 import type { AgentNodeStatus } from '../state/agentStatus'
 import type { AgentId } from '@shared/agents/config'
-import type { NodeKind } from '@shared/types'
+import type { NodeKind, ObservedClaudeAccount } from '@shared/types'
 import { hasUsage } from '@shared/agents/config'
 import type { SshConnection } from '@shared/ssh'
 import type { ProjectIcon } from '@shared/project-icon'
@@ -12,6 +12,10 @@ export interface SessionNodeInput {
   title: string
   color: string
   agentId?: AgentId
+  /** The node's creation-time managed/linked Claude account (`data.accountId`), for the row's
+   *  account chip. Absent for a plain terminal — which is exactly the case the OBSERVED account
+   *  on the status entry covers. */
+  accountId?: string
   cwd?: string
   ssh?: SshConnection
   /** Parent group node id when this node lives inside a canvas group frame. */
@@ -234,6 +238,10 @@ export interface SessionRowVM {
   cwd?: string
   sshHost?: string
   sessionId?: string
+  /** Creation-time account + what the session was OBSERVED running as — the two halves the
+   *  account chip resolves (`lib/accountChip`). */
+  accountId?: string
+  account?: ObservedClaudeAccount
   usesContext: boolean
   /** Populated only when the sidebar is grouped by status (rows are flattened across projects):
    *  the project the session belongs to, so the row can show a project monogram and route
@@ -307,6 +315,8 @@ function toRow(
     cwd: n.cwd,
     sshHost: n.ssh?.host,
     sessionId: status?.sessionId,
+    accountId: n.accountId,
+    account: status?.account,
     usesContext: n.agentId ? hasUsage(n.agentId) : false,
     // Only populated in status mode (flattened across projects); absent in project mode.
     projectId: project?.id,

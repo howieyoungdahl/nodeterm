@@ -1367,6 +1367,30 @@ body,
   background: rgba(255, 159, 10, 0.16);
 }
 
+/* Observed-account variants. The base chip is the managed-account look; these keep the three
+   other cases distinguishable at a glance, before anyone hovers for the tooltip. */
+
+/* The system account (~/.claude). Shown only when a second identity is in play, so it must read
+   as "the ordinary one" next to the account that is the exception. */
+.node-account-chip--system {
+  background: rgba(var(--tint-rgb), 0.08);
+}
+
+/* A config dir the user linked: theirs, not one nodeterm minted — a hairline instead of a fill. */
+.node-account-chip--linked {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.35);
+}
+
+/* A config dir nodeterm has no record of. Dashed = provisional: the tooltip says to link it in
+   Settings → Accounts. The padding drops by the border's width so the chip keeps the height of
+   the filled chips beside it. */
+.node-account-chip--unlinked {
+  background: transparent;
+  border: 1px dashed var(--border);
+  padding: 0 7px;
+}
+
 /* Claude Code status: RUNNING badge while working, unread dot when finished. */
 .term-node__status {
   display: inline-flex;

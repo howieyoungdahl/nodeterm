@@ -336,7 +336,8 @@ export function buildStubApi(): Omit<
       add: U('claudeAccounts.add'),
       waitLogin: U('claudeAccounts.waitLogin'),
       cancelWaitLogin: U('claudeAccounts.cancelWaitLogin'),
-      remove: U('claudeAccounts.remove')
+      remove: U('claudeAccounts.remove'),
+      link: U('claudeAccounts.link')
     },
     codexAccounts: {
       add: U('codexAccounts.add'),

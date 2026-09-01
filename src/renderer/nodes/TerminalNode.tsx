@@ -150,7 +150,9 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { isBrowserRuntime } from '../bridge/runtime'
-import { accountChipLabel, agentLaunchOverride, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { agentLaunchOverride, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { AccountChip, useAccountChip } from '../components/AccountChip'
+import { effectiveAccountId } from '../lib/accountChip'
 import {
   hasHooks,
   canRecur,
@@ -1069,12 +1071,10 @@ export function TerminalNode({
   // Scoped to the OWNING project so its `terminal.theme` / `terminal.fontFamily` layer over the
   // global settings for this node, and for no other project's nodes.
   const visual = useXtermVisualSettings(owningProjectId())
-  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
   // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move
   // button are absent from `isHidden`'s inventory and stay put whatever the list says.
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
-  const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
   /** Where a press on the hover guard started, for the click-vs-drag test in `onGuardUp`. */
   const guardDownAt = useRef<{ x: number; y: number } | null>(null)
@@ -1439,6 +1439,22 @@ export function TerminalNode({
     !remoteSession &&
     (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
+  /**
+   * Which Claude account this node is ACTUALLY on (D5). `data.accountId` is what nodeterm launched
+   * it as and is immutable; `status.account` is what the session's hooks reported — the only
+   * identity a plain terminal running `CLAUDE_CONFIG_DIR=~/.claude-2 claude` ever has.
+   *
+   * The chip and every READER below use the effective id, so a node that was never created AS an
+   * account but runs as one reads that account's transcripts. NOT the spawn env: launch identity
+   * stays creation-time (`transport.create` keeps passing `data.accountId`).
+   */
+  const observedAccount = status?.account
+  const accountChip = useAccountChip(data.accountId, observedAccount)
+  const accountForReads = effectiveAccountId(data.accountId, observedAccount)
+  /** Mirror for the session-name poll, whose effect must not restart when a late hook event
+   *  finally reveals the account (see its comment). */
+  const accountForReadsRef = useRef(accountForReads)
+  accountForReadsRef.current = accountForReads
   // Fan-out (subagent/loop card) visibility + tidy — any agent capable of either kind of card.
   const fanoutCapable = !!agentId && (canSubagent(agentId) || canRecur(agentId))
   const hideFanout = !!data.hideFanout
@@ -1568,8 +1584,11 @@ export function TerminalNode({
   useEffect(() => {
     const sid = status?.sessionId
     if (claudeTranscript && sid)
-      window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined, data.accountId)
-  }, [claudeTranscript, status?.sessionId, data.cwd, data.accountId])
+      window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined, accountForReads)
+    // `accountForReads`, not `data.accountId`: the transcript this meter tails lives under the
+    // account the session is RUNNING as, which for a plain terminal is only ever the observed one.
+    // It can arrive after mount (the first hook event), hence its place in the deps.
+  }, [claudeTranscript, status?.sessionId, data.cwd, accountForReads])
   const updateNodeInternals = useUpdateNodeInternals()
 
   const [searchOpen, setSearchOpen] = useState(false)
@@ -1672,7 +1691,9 @@ export function TerminalNode({
     nodeId: id,
     sessionId: status?.sessionId,
     cwd: data.cwd as string | undefined,
-    accountId: data.accountId,
+    // A READER: the search hits the transcript index under whichever account the session is
+    // actually running as (D5), not the one the node was created with.
+    accountId: accountForReads,
     // The transcript index reads claude's JSONL through the same resolver, so it is gated on the
     // claude-transcript fact, NOT on the meter's `showUsage` — see lib/transcriptGates.ts.
     searchTranscript: claudeTranscript,
@@ -4321,8 +4342,13 @@ export function TerminalNode({
   // Gated on canReadTitleNode (TITLE_READ_CAPABLE), NOT on canRenameNode: reading a session's name
   // and being able to set one are different capabilities, and gemini has only the first. `agentId`
   // rides along so main picks the right reader: claude's transcript .jsonl vs grok's summary.json vs
-  // gemini's update_topic tool call. It is resolved at node creation and immutable thereafter —
-  // same as `data.accountId` beside it — so neither belongs in the dep array.
+  // gemini's update_topic tool call. It is resolved at node creation and immutable thereafter, so
+  // it does not belong in the dep array.
+  //
+  // The ACCOUNT does not get that treatment any more: it is the effective one (D5), which for a
+  // plain terminal arrives with the first hook event, i.e. AFTER this effect mounted. It rides a
+  // ref (`accountForReadsRef`, refreshed every render) rather than the deps so a late observation
+  // is picked up by the very next poll instead of tearing down and restarting the timer chain.
   useEffect(() => {
     if (!canReadTitleNode || data.titleAuto === false) return
     const sid = status?.sessionId ?? ''
@@ -4335,7 +4361,7 @@ export function TerminalNode({
     let timer: ReturnType<typeof setTimeout> | undefined
     const sync = async () => {
       if (!titleAutoRef.current || editingTitleRef.current) return
-      const name = await api.pty.readSessionName(sid, data.accountId, agentId)
+      const name = await api.pty.readSessionName(sid, accountForReadsRef.current, agentId)
       if (cancelled) return
       if (name) delayMs = 15000
       if (
@@ -4556,18 +4582,19 @@ export function TerminalNode({
             plain codex
           </span>
         )}
-        {accountChip && (
-          <span
-            className={`node-account-chip${accountFallback ? ' node-account-chip--warning' : ''}`}
-            title={
-              accountFallback
-                ? 'Account folder missing — running on system account'
-                : accountChip.tooltip
-            }
-          >
-            {accountChip.short}
-          </span>
-        )}
+        {/* Which Claude account this pane is on — the same component the board card, the card
+            modal and the sessions sidebar render (CONTRIBUTING: two views of the same nodes).
+            The spawn-time fallback branch is kept: when the account folder was missing the session
+            IS on the system account, and the chip must say so rather than name the account we
+            failed to launch under. */}
+        <AccountChip
+          chip={
+            accountChip && accountFallback
+              ? { ...accountChip, tooltip: 'Account folder missing — running on system account' }
+              : accountChip
+          }
+          warning={accountFallback}
+        />
         {data.ssh ? (
           <span
             className="term-ssh-chip"
@@ -4959,7 +4986,9 @@ export function TerminalNode({
                 nodeId={id}
                 sessionId={status?.sessionId}
                 cwd={data.cwd as string | undefined}
-                accountId={data.accountId}
+                // A READER (the ⌘M transcript view): the account the session RUNS as (D5), so a
+                // plain terminal on ~/.claude-2 reads ITS transcript instead of an empty system one.
+                accountId={accountForReads}
               />
             </Suspense>
           ) : (

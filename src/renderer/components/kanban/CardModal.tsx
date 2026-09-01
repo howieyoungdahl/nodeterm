@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
 import { IconChat, IconMic, IconSearch } from '../icons'
 import { ContextMeter } from '../ContextMeter'
+import { AccountChip, useAccountChip } from '../AccountChip'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useCardPanel } from '../../state/cardPanel'
 import {
@@ -57,6 +58,10 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   // StickyNode's toggle, so the canvas and the card can't disagree about how a note reads).
   const [editingNote, setEditingNote] = useState(false)
   const agentSessionId = useAgentStatus((st) => st.byId[session.id]?.sessionId)
+  // Same chip as the card and the canvas node header — the modal is where a user checks WHICH
+  // session this is, so the account belongs in its header chips, not only two views away.
+  const observedAccount = useAgentStatus((st) => st.byId[session.id]?.account)
+  const accountChip = useAccountChip(session.spawn.accountId, observedAccount)
   const [naming, setNaming] = useState(false)
   // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it. The
   // choice is remembered (localStorage) — once collapsed, later cards open collapsed too.
@@ -249,6 +254,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
             </span>
           )}
           <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>
+          {isTerminal && <AccountChip chip={accountChip} />}
           {/* The driving chip, so a user watching a browser card THROUGH the modal is not
               driving-blind. The lease is keyed by node id (not by webview object), so this shows
               when the node is being driven even though the drive lands on the CANVAS webview, not

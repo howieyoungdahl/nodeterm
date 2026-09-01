@@ -2,17 +2,18 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState } from '@shared/agents/normalize'
-import type { NodeTerminalApi } from '@shared/types'
+import type { NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
 
 /**
  * Transient per-node status for agent (e.g. Claude Code) sessions, driven by the agent's hooks.
- * `unread`, `session`, `sessionId`, `agentId`, `loop` and `hibernated` are persisted to
+ * `unread`, `session`, `sessionId`, `agentId`, `account`, `loop` and `hibernated` are persisted to
  * localStorage so they survive a reload/restart; the live `state` (working/waiting/…) is not
  * (it'd be stale on relaunch), and neither are its two clocks (`stateAt`, `lastEventAt`).
  * `agentId` is durable because a PLAIN terminal's agent identity exists nowhere else: an
  * explicit agent node re-derives it from `data.agentId`, but a hand-launched `claude` in a
  * plain terminal is only known here, and its context links must keep classifying across
- * restarts (tmux keeps the session — and the agent — alive through them).
+ * restarts (tmux keeps the session — and the agent — alive through them). `account` is durable
+ * for exactly that reason too — see its field comment.
  *
  * ONE STORE PER CORE (stage 4): `createAgentStatusSession(persistKey?)` builds an isolated
  * instance — node ids are per-core, so status tables from two cores must never mix. The module
@@ -93,6 +94,23 @@ export interface AgentNodeStatus {
   hibernatedPane?: string
   /** Which agent this node is running (claude/codex/gemini/…), when known. */
   agentId?: AgentId
+  /**
+   * Which Claude account this node's session was OBSERVED running under, off any hook event that
+   * carried one (`NormalizedAgentEvent.account`, derived from the hook's `transcript_path`).
+   *
+   * PERSISTED beside `agentId`, and durable for the same reason: a hand-launched
+   * `CLAUDE_CONFIG_DIR=~/.claude-2 claude` in a PLAIN terminal has its identity nowhere else —
+   * the node carries no `data.accountId`, and tmux keeps the session alive across an app restart
+   * that will see no further event until the user next talks to it. Without this the chip and the
+   * account-scoped transcript readers would silently fall back to the system account after every
+   * relaunch.
+   *
+   * Deliberately NOT cleared at a session end (same rule as `agentId`): identity survives turn
+   * boundaries, and a new session in the same pane overwrites it with its own observation.
+   *
+   * A LABEL, never a gate — see `ObservedClaudeAccount` in shared/types.
+   */
+  account?: ObservedClaudeAccount
   /** A turn finished / needs attention while the user wasn't looking. */
   unread: boolean
   /** Claude's own session name/title (from the terminal title), shown beside the title. */
@@ -155,6 +173,9 @@ export interface AgentStatusStore {
   sweepStaleWorking(staleMs?: number): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
+  /** Record the Claude account a hook event says this node is running under. Persisted; see
+   *  `account`. Idempotent — a re-assert of the same account writes nothing. */
+  setAccount(id: string, account: ObservedClaudeAccount): void
   /** Mark the node's agent CLI as exited-for-RAM (true) or live again (false). Persisted.
    *  Waking also restarts the idle clock (`lastEventAt`), so a quiet resumed session is not
    *  re-hibernated on the next sweep. */
@@ -257,6 +278,20 @@ export function createAgentStatusSession(
       const out: Record<string, AgentNodeStatus> = {}
       for (const [id, v] of Object.entries(data)) {
         out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId, agentId: v.agentId }
+        // Minimal shape check, like `loop` below: this file is on disk and hand-editable, and a
+        // half-written entry must not put a chip on a node claiming an identity it never had.
+        if (
+          v.account &&
+          typeof v.account === 'object' &&
+          typeof v.account.configDir === 'string' &&
+          typeof v.account.known === 'boolean'
+        ) {
+          out[id].account = {
+            configDir: v.account.configDir,
+            accountId: typeof v.account.accountId === 'string' ? v.account.accountId : null,
+            known: v.account.known
+          }
+        }
         // Only when set: an absent flag stays absent, so an entry saved before this field
         // existed hydrates byte-identically (and `hibernated: false` never grows in the file).
         if (v.hibernated) out[id].hibernated = true
@@ -291,12 +326,16 @@ export function createAgentStatusSession(
     try {
       const out: Record<string, Partial<AgentNodeStatus>> = {}
       for (const [id, v] of Object.entries(byId)) {
-        if (v.unread || v.session || v.sessionId || v.loop || v.agentId || v.hibernated) {
+        if (v.unread || v.session || v.sessionId || v.loop || v.agentId || v.account || v.hibernated) {
           out[id] = {
             unread: v.unread,
             session: v.session,
             sessionId: v.sessionId,
             agentId: v.agentId,
+            // Durable beside `agentId`, and for the same reason (see the field comment): a plain
+            // terminal's observed account exists nowhere else, and the tmux session that knows it
+            // outlives the app.
+            account: v.account,
             loop: v.loop,
             hibernated: v.hibernated,
             // Never written without the flag it belongs to (see `hibernatedPane`).
@@ -446,6 +485,26 @@ export function createAgentStatusSession(
         const prev = s.byId[id] ?? EMPTY
         if (prev.sessionId === sessionId) return s
         const byId = { ...s.byId, [id]: { ...prev, sessionId } }
+        save(byId)
+        return { byId }
+      }),
+
+    setAccount: (id, account) =>
+      set((s) => {
+        const prev = s.byId[id] ?? EMPTY
+        const cur = prev.account
+        // Same-account events are the common case (every hook POST of every turn carries one), so
+        // bail before allocating: a new object here would re-render every consumer of this node's
+        // status on each tool event, for a value that did not change.
+        if (
+          cur &&
+          cur.configDir === account.configDir &&
+          cur.accountId === account.accountId &&
+          cur.known === account.known
+        ) {
+          return s
+        }
+        const byId = { ...s.byId, [id]: { ...prev, account } }
         save(byId)
         return { byId }
       }),

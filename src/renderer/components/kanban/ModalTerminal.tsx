@@ -5,6 +5,7 @@ import { SearchAddon } from '@xterm/addon-search'
 import { quantizeCharSize } from '../../terminal/char-size-quantize'
 import { reportsOwnCopy } from '@shared/agents/config'
 import type { AgentId } from '@shared/agents/config'
+import { effectiveAccountId } from '../../lib/accountChip'
 import { readsClaudeTranscript } from '../../lib/transcriptGates'
 import { liveProjectJumpTarget } from '../../lib/projectJump'
 import { terminalChordBubbles, terminalShortcutPolicy } from '../../lib/keybindingOverrides'
@@ -100,6 +101,10 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   const fitRef = useRef<FitAddon | null>(null)
   const transportRef = useRef<LocalTransport | null>(null)
   const agentSessionId = useAgentStatus((s) => s.byId[nodeId]?.sessionId)
+  // MIRROR TerminalNode: transcript READS go to the account the session is actually running as
+  // (D5), which for a plain terminal is only ever the observed one. The spawn below keeps
+  // `spawn.accountId` — launch identity stays creation-time.
+  const observedAccount = useAgentStatus((s) => s.byId[nodeId]?.account)
   // One shallow-compared subscription for the whole appearance slice — see useXtermVisualSettings.
   // MIRROR TerminalNode: scoped to the OWNING project (`owningProjectId`, the active one — a modal
   // only ever opens over it), deliberately NOT this card's connection scope. `sshConnectionScope`
@@ -128,7 +133,7 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     nodeId,
     sessionId: agentSessionId,
     cwd: spawn.cwd,
-    accountId: spawn.accountId,
+    accountId: effectiveAccountId(spawn.accountId, observedAccount),
     // MIRROR TerminalNode: the transcript index reads claude's JSONL through claude's resolver, so
     // it is gated on the claude-transcript fact, NOT on the context meter's `hasUsage` (which now
     // spans codex and gemini too) — see lib/transcriptGates.ts.

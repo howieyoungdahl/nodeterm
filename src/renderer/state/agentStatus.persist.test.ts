@@ -269,3 +269,73 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     expect(useAgentStatus.getState().byId['n3'].loop).toBeUndefined()
   })
 })
+
+describe('observed Claude account persistence (a plain terminal knows it nowhere else)', () => {
+  const claude2 = { configDir: '/home/me/.claude-2', accountId: null, known: false }
+
+  it('persists the observed account and restores it on load', async () => {
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setAccount('n1', claude2)
+    expect(JSON.parse(store.getItem('nodeterm.agentStatus')!).n1.account).toEqual(claude2)
+
+    // …and it comes back on the next launch. Without this the chip on a hand-launched
+    // `CLAUDE_CONFIG_DIR=~/.claude-2 claude` pane would vanish on every restart, while the tmux
+    // session it describes carried straight on.
+    vi.resetModules()
+    vi.stubGlobal(
+      'localStorage',
+      memStorage({ 'nodeterm.agentStatus': store.getItem('nodeterm.agentStatus')! })
+    )
+    const reloaded = await import('./agentStatus')
+    expect(reloaded.useAgentStatus.getState().byId['n1']?.account).toEqual(claude2)
+  })
+
+  it('is the ONLY durable field an account-only entry needs to survive', async () => {
+    // `save` skips entries carrying nothing durable — an observed account on an otherwise blank
+    // node (no unread, no session id, no agent) has to be enough to keep the entry.
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setAccount('n2', claude2)
+    expect(JSON.parse(store.getItem('nodeterm.agentStatus')!).n2).toBeTruthy()
+  })
+
+  it('ignores a corrupt account entry on load rather than chipping a node wrongly', async () => {
+    vi.stubGlobal(
+      'localStorage',
+      memStorage({
+        'nodeterm.agentStatus': JSON.stringify({
+          n3: { unread: false, account: { accountId: 'a1' } }, // no configDir / known
+          n4: { unread: false, account: 'nonsense' }
+        })
+      })
+    )
+    const { useAgentStatus } = await import('./agentStatus')
+    expect(useAgentStatus.getState().byId['n3']?.account).toBeUndefined()
+    expect(useAgentStatus.getState().byId['n4']?.account).toBeUndefined()
+  })
+
+  it('a new session in the same pane overwrites the account; a turn boundary does not', async () => {
+    vi.stubGlobal('localStorage', memStorage())
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setAccount('n5', claude2)
+    // Turns come and go; identity does not (same rule as `agentId`).
+    useAgentStatus.getState().setState('n5', 'working', 'claude')
+    useAgentStatus.getState().setState('n5', 'done', 'claude')
+    expect(useAgentStatus.getState().byId['n5'].account).toEqual(claude2)
+    const system = { configDir: '/home/me/.claude', accountId: null, known: true }
+    useAgentStatus.getState().setAccount('n5', system)
+    expect(useAgentStatus.getState().byId['n5'].account).toEqual(system)
+  })
+
+  it('re-asserting the same account changes nothing (no re-render per hook event)', async () => {
+    vi.stubGlobal('localStorage', memStorage())
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setAccount('n6', claude2)
+    const before = useAgentStatus.getState().byId
+    useAgentStatus.getState().setAccount('n6', { ...claude2 })
+    expect(useAgentStatus.getState().byId).toBe(before)
+  })
+})

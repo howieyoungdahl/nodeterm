@@ -3,6 +3,7 @@ import type { ClaudeAccount } from '@shared/types'
 import type { CodexAccount } from '@shared/codex-account'
 import { E_UNSUPPORTED } from '@shared/rpc'
 import { sshHostKey } from '@shared/ssh'
+import { useAgentStatus } from '../../../state/agentStatus'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
 import { useSystemCodexAccount } from '../../../state/systemCodexAccount'
@@ -19,6 +20,7 @@ import {
   groupCodexAccountsByMachine,
   strayCodexAccounts
 } from '../../../lib/codexMachineGroups'
+import { configDirLabel, unlinkedConfigDirs } from '../../../lib/accountChip'
 import { presentAccount } from '../../../lib/accountPresentation'
 import { codexAccountSelectable } from '../../../canvas/codex-account-switch'
 import { AccountIdentityPills } from '../../AccountIdentityPills'
@@ -31,7 +33,18 @@ import { Input } from '@renderer/ui/Input'
 const ROWS = {
   accounts: {
     title: 'Claude accounts',
-    keywords: ['account', 'claude', 'login', 'isolated', 'multi', 'email']
+    keywords: [
+      'account',
+      'claude',
+      'login',
+      'isolated',
+      'multi',
+      'email',
+      'link',
+      'config dir',
+      'existing',
+      'detected'
+    ]
   },
   codex: {
     title: 'Codex accounts',
@@ -44,6 +57,15 @@ const ENTRIES = Object.values(ROWS)
  *  a fact about the SURFACE, not about this account — worth a different sentence than a failure. */
 const isUnsupported = (e: unknown): boolean =>
   !!e && typeof e === 'object' && (e as { code?: string }).code === E_UNSUPPORTED
+
+/** The rejection's own message when it has one, else `fallback`. `link` refuses for a handful of
+ *  specific, user-fixable reasons (not a directory, already linked, that IS the system account) and
+ *  every one of them is worth more than a generic failure line. Errors arrive as plain objects over
+ *  the WS bridge, so this reads the field rather than testing `instanceof Error`. */
+const errorText = (e: unknown, fallback: string): string => {
+  const m = e && typeof e === 'object' ? (e as { message?: unknown }).message : undefined
+  return typeof m === 'string' && m.trim() ? m.trim() : fallback
+}
 
 /** One machine's card in the accounts UI: a connectivity dot, the machine label, a Local/SSH pill,
  *  and (for a remote machine) its `user@host` subtitle. Children are the provider account rows. */
@@ -143,6 +165,25 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
    */
   const [addingOn, setAddingOn] = useState<string | null>(null)
   const [addError, setAddError] = useState<string | null>(null)
+  // "Link existing config dir…": the typed path, the in-flight guard, and the inline error.
+  const [linkPath, setLinkPath] = useState('')
+  const [linking, setLinking] = useState(false)
+  const [linkError, setLinkError] = useState<string | null>(null)
+  // A surface whose bridge registers no folder picker (a relay tab, an older server) answers
+  // E_UNSUPPORTED once — after that the button is hidden rather than offered and broken. Typing
+  // the path still works, which is why Browse is a convenience and never the only way in.
+  const [browseUnsupported, setBrowseUnsupported] = useState(false)
+  /**
+   * Config dirs SEEN running on this core that we have no account for (D7) — the one-click Link
+   * candidates. A primitive selector (newline-joined) so the settings page does not re-render on
+   * every hook event of every node just to discover the same list again.
+   */
+  const detectedDirs = useAgentStatus((s) =>
+    // NUL-joined, not newline-joined: a path may legally contain a newline, and splitting one back
+    // into two rows would offer the user a dir that does not exist.
+    unlinkedConfigDirs(s.byId, accounts.map((a) => a.configDir)).join('\u0000')
+  )
+  const detected = detectedDirs ? detectedDirs.split('\u0000') : []
 
   const setLabel = (id: string, label: string): void =>
     applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
@@ -277,6 +318,18 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       }))
     }))
   }
+
+  /** The presented Claude account for a row. Mirrors `presentCodex` — one contract, so a linked
+   *  account reads the same here as it would anywhere else it is shown. */
+  const presentClaude = (account: ClaudeAccount): ReturnType<typeof presentAccount> =>
+    presentAccount({
+      label: account.label,
+      email: account.email,
+      host: account.host,
+      machineLabel: sshServers.find((entry) => sshHostKey(entry) === account.host)?.label,
+      linked: !!account.configDir,
+      configDir: account.configDir
+    })
 
   // The presented account for a row, resolving the friendly machine label from saved servers.
   const presentCodex = (account: CodexAccount) => {
@@ -436,6 +489,58 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     await runLogin(account)
   }
 
+  /**
+   * Adopt a config dir the user already owns (`~/.claude-2` and friends) as a real account: core
+   * validates the path, reads its `.claude.json` for the signed-in email, and installs the managed
+   * status hook into it. From then on the dir has an id, so env injection, the transcript jail, the
+   * usage rows, the pickers and the node chip all treat it like any other account.
+   *
+   * `~` is expanded by CORE, not here: the renderer does not know the home dir of the machine that
+   * owns the files (the Server Edition's browser is not the filesystem's host).
+   */
+  const onLink = async (dir: string): Promise<void> => {
+    const path = dir.trim()
+    if (!path || linking) return
+    setLinking(true)
+    setLinkError(null)
+    try {
+      const linked = await window.nodeTerminal.claudeAccounts.link(path)
+      applyAccounts((accs) => [
+        ...accs,
+        {
+          id: linked.id,
+          // Named by its login when the dir is signed in; otherwise by the folder, which is how
+          // the user thinks of it anyway ("the .claude-2 one"). Never a generated placeholder.
+          label: linked.email ?? configDirLabel(linked.configDir),
+          ...(linked.email ? { email: linked.email } : {}),
+          // The NORMALIZED path core resolved, never the raw text typed here: it is re-validated
+          // at every point of use, and the two must be the same string for the jail to match.
+          configDir: linked.configDir,
+          createdAt: Date.now()
+        }
+      ])
+      setLinkPath('')
+    } catch (e) {
+      setLinkError(
+        isUnsupported(e)
+          ? 'Linking a config dir is not available on this surface — do it from the desktop app or the Server Edition directly.'
+          : errorText(e, 'Could not link that config dir.')
+      )
+    } finally {
+      setLinking(false)
+    }
+  }
+
+  const onBrowse = async (): Promise<void> => {
+    try {
+      const folder = await window.nodeTerminal.dialog.selectFolder()
+      if (folder) setLinkPath(folder)
+    } catch (e) {
+      if (isUnsupported(e)) setBrowseUnsupported(true)
+      else setLinkError(errorText(e, 'Could not open the folder picker.'))
+    }
+  }
+
   const confirmRemove = async (account: ClaudeAccount): Promise<void> => {
     setPendingRemove(null)
     // Removing a pending account: stop the 5-minute waitLogin poll loop first.
@@ -467,7 +572,14 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
   const removeMessage = (a: ClaudeAccount): string => {
     const n = countNodesUsing(a.id)
-    return `Remove account "${a.label}"? Its logged-in credentials and all its Claude transcripts will be deleted. ${n} node(s) currently use it and will fall back to the system account.`
+    const fallout = `${n} node(s) currently use it and will fall back to the system account.`
+    // A LINKED dir is the user's own folder — removing the account forgets the record and deletes
+    // NOTHING (core refuses to `rm -rf` anything outside its own managed dirs). Saying "will be
+    // deleted" here would be a lie that stops people unlinking.
+    if (a.configDir) {
+      return `Unlink account "${a.label}"? nodeterm forgets it — the folder ${a.configDir} keeps its login and transcripts exactly as they are. ${fallout}`
+    }
+    return `Remove account "${a.label}"? Its logged-in credentials and all its Claude transcripts will be deleted. ${fallout}`
   }
 
   return (
@@ -546,6 +658,18 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                         {account.host}
                       </span>
                     ) : null}
+                    {/* A LINKED account: the user's own dir, adopted rather than minted. The path
+                        is the identifying fact (no label reliably tells `.claude-2` from
+                        `.claude-work`), so it rides the tooltip — through `presentAccount`, so
+                        this row says the same thing every other account surface would. */}
+                    {account.configDir ? (
+                      <span
+                        className="rounded-full bg-fill-weak px-2 py-0.5 text-[11px] font-medium text-muted"
+                        title={presentClaude(account).tooltip}
+                      >
+                        {presentClaude(account).provenance}
+                      </span>
+                    ) : null}
                   </div>
                   {account.email && !account.pending ? (
                     <p className="text-[12px] text-muted">{account.email}</p>
@@ -575,7 +699,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                     : null}
                   <Button
                     variant="ghost"
-                    aria-label="Remove account"
+                    // "Unlink" for a linked dir: the action really is different (the folder stays),
+                    // and the label is what a screen reader and the tests both go by.
+                    aria-label={account.configDir ? 'Unlink account' : 'Remove account'}
                     onClick={() => setPendingRemove(account)}
                   >
                     ×
@@ -643,6 +769,77 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
             </div>
           )}
 
+          {/* LINK an existing config dir (D4). The other half of "several Claude logins": a user
+              who already keeps `~/.claude-2` and drives it from their own shell function does not
+              want a new managed dir — they want THIS one to have an id, so the chip, the transcript
+              readers and the pickers stop treating their second login as a stranger. Local only:
+              a linked dir is a path on the machine that owns the files. */}
+          <div className="space-y-2 rounded-md border border-border p-3">
+            <div className="text-[13px] font-medium text-text">Link existing config dir…</div>
+            <p className="text-[12px] leading-relaxed text-muted">
+              Already have a second login in its own folder (say <code>~/.claude-2</code>)? Link it
+              and nodeterm will label its terminals, read its transcripts, and offer it in the add
+              menus. Nothing is copied or moved, and unlinking later leaves the folder alone.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                className="w-72"
+                placeholder="~/.claude-2"
+                value={linkPath}
+                onChange={(e) => setLinkPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void onLink(linkPath)
+                }}
+              />
+              {browseUnsupported ? null : (
+                <Button disabled={linking} onClick={() => void onBrowse()}>
+                  Browse…
+                </Button>
+              )}
+              <Button
+                variant="primary"
+                // Named: the detected list below repeats the word "Link" once per row, and a
+                // bare label leaves both the user's screen reader and the tests guessing which.
+                aria-label="Link config dir"
+                disabled={linking || !linkPath.trim()}
+                onClick={() => void onLink(linkPath)}
+              >
+                {linking ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="ui-spinner" aria-hidden />
+                    Linking…
+                  </span>
+                ) : (
+                  'Link'
+                )}
+              </Button>
+            </div>
+            {linkError ? <p className="text-[12px] text-[color:var(--danger)]">{linkError}</p> : null}
+
+            {/* DETECTED dirs: config dirs whose sessions actually posted hooks here and that we
+                have no account for. Derived from observations only — nothing on disk is read for
+                an unlinked dir (a forged POST must not make us stat anything), so the path is all
+                that is shown. Empty ⇒ this whole block is absent. */}
+            {detected.length > 0 ? (
+              <div className="space-y-2 pt-1">
+                <div className="text-[12px] font-medium text-text">Detected config dirs</div>
+                {detected.map((dir) => (
+                  <div
+                    key={dir}
+                    className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-2"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-muted" title={dir}>
+                      {dir}
+                    </span>
+                    <Button aria-label={`Link ${dir}`} disabled={linking} onClick={() => void onLink(dir)}>
+                      Link
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
           <p className="text-[12px] leading-relaxed text-muted">
             Accounts are isolated Claude logins. New Claude nodes pick an account from the add
             menus; each node keeps its account for life. Remote accounts live on an SSH host and are
@@ -709,7 +906,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       {pendingRemove ? (
         <ConfirmDialog
           message={removeMessage(pendingRemove)}
-          confirmLabel="Remove"
+          confirmLabel={pendingRemove.configDir ? 'Unlink' : 'Remove'}
           onConfirm={() => void confirmRemove(pendingRemove)}
           onCancel={() => setPendingRemove(null)}
         />
