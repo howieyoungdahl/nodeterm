@@ -1,4 +1,5 @@
 import type { AgentId } from './config'
+import type { ObservedClaudeAccount } from '../types'
 
 export type AgentState = 'working' | 'waiting' | 'blocked' | 'done'
 
@@ -74,6 +75,13 @@ export interface NormalizedAgentEvent {
    * Like `verified` it is a LABEL: nothing may refuse a POST because of it.
    */
   clientRevision?: number
+  /**
+   * Which Claude account the posting session was OBSERVED to run under, derived by the hook server
+   * from the payload's `transcript_path` (claude events only). Set by the hook server, never by a
+   * normalizer. A LABEL like `verified`: it drives the per-node account chip and the account-scoped
+   * transcript readers for nodes that carry no `data.accountId`; nothing may refuse or grant on it.
+   */
+  account?: ObservedClaudeAccount
   // recurring
   recurringKind?: 'loop' | 'schedule' | 'cron'
   /** The recurring job was REMOVED (e.g. CronDelete) — take the card down. */

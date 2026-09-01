@@ -530,7 +530,8 @@ const api: NodeTerminalApi = {
     add: (ctx) => ipcRenderer.invoke(IPC.claudeAccountsAdd, ctx),
     waitLogin: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsWaitLogin, id, ctx),
     cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsCancelWait, id),
-    remove: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id, ctx)
+    remove: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id, ctx),
+    link: (configDir) => ipcRenderer.invoke(IPC.claudeAccountsLink, configDir)
   },
   codexAccounts: {
     add: () => ipcRenderer.invoke(IPC.codexAccountsAdd),

@@ -873,7 +873,13 @@ export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi,
         client.request(IPC.claudeAccountsWaitLogin, id, ctx) as Promise<{ email: string } | null>,
       cancelWaitLogin: (id) =>
         client.request(IPC.claudeAccountsCancelWait, id) as Promise<void>,
-      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>
+      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>,
+      link: (configDir) =>
+        client.request(IPC.claudeAccountsLink, configDir) as Promise<{
+          id: string
+          configDir: string
+          email: string | null
+        }>
     }
   }
 }

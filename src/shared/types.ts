@@ -1132,7 +1132,34 @@ export interface ClaudeAccount {
   host?: string
   /** True until `claude /login` completes in the account dir and the email is captured. */
   pending?: boolean
+  /**
+   * LINKED account: an ABSOLUTE local path to a pre-existing Claude config dir the user already
+   * owns (e.g. `~/.claude-2` driven by their own `CLAUDE_CONFIG_DIR` shell setup). Set only by
+   * `claudeAccounts.link`; never combined with `host`. A linked account has no managed dir under
+   * `{userData}/claude-accounts/` — `claudeConfigDirFor` resolves it to this path — and REMOVING
+   * it only forgets the record: the directory is the user's and is never deleted. Hand-editable
+   * (settings.json), so it is re-validated at every point of use (absolute, normalized).
+   */
+  configDir?: string
   createdAt: number
+}
+
+/**
+ * Which Claude account a RUNNING session was observed to use — derived by the hook server from
+ * the `transcript_path` its hooks report (`<configDir>/projects/<slug>/<session>.jsonl`), never
+ * from anything the node was created with. A LABEL, exactly like `NormalizedAgentEvent.verified`:
+ * it tells the UI which identity a pane is on (a hand-launched `claude` in a plain terminal, an
+ * account switched by the user's own shell), it never grants anything.
+ *  - `accountId === null` ⇒ the system default (`<home>/.claude`).
+ *  - `accountId` set + `known` ⇒ a managed or linked `ClaudeAccount` from settings.
+ *  - `known === false` ⇒ a config dir nodeterm has no record of (`accountId` is null); the UI
+ *    labels it by its path and offers to link it. No filesystem read is ever made for such a dir.
+ */
+export interface ObservedClaudeAccount {
+  /** The config dir as the hook reported it (normalized string; may be a REMOTE path for SSH nodes). */
+  configDir: string
+  accountId: string | null
+  known: boolean
 }
 
 export interface SpeechSettings {
@@ -2389,8 +2416,16 @@ export interface ClaudeAccountsApi {
   waitLogin(id: string, ctx?: AccountSshCtx): Promise<{ email: string } | null>
   /** Cancel an in-flight `waitLogin` for this account. */
   cancelWaitLogin(id: string): Promise<void>
-  /** Delete a managed account's config dir (recursive). With an SSH `ctx`, `rm -rf` on the host. */
+  /** Delete a managed account's config dir (recursive). With an SSH `ctx`, `rm -rf` on the host.
+   *  For a LINKED account (`configDir` set) this only forgets the record — the dir is untouched. */
   remove(id: string, ctx?: AccountSshCtx): Promise<void>
+  /**
+   * Link a PRE-EXISTING local Claude config dir as an account (see `ClaudeAccount.configDir`).
+   * Validates the path (absolute, exists, is a directory, not the system `~/.claude`, not a managed
+   * dir, not already linked), reads its `.claude.json` for the signed-in email (null when not logged
+   * in yet), and installs the managed status hook into it. Local only — no SSH ctx.
+   */
+  link(configDir: string): Promise<{ id: string; configDir: string; email: string | null }>
 }
 
 /**
