@@ -2,7 +2,7 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState } from '@shared/agents/normalize'
-import type { NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
+import type { AgentStatusSnapshot, NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
 
 /**
  * Transient per-node status for agent (e.g. Claude Code) sessions, driven by the agent's hooks.
@@ -14,6 +14,14 @@ import type { NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
  * plain terminal is only known here, and its context links must keep classifying across
  * restarts (tmux keeps the session — and the agent — alive through them). `account` is durable
  * for exactly that reason too — see its field comment.
+ *
+ * `state` still comes back after a reload — just not from disk. The shell's status MIRROR keeps
+ * the last state across a Server/app restart and serves it on request, and `seedFromSnapshot`
+ * paints those badges once at bootstrap (`lib/seedAgentStatus.ts` does the call). Before it every
+ * pane on a reconnected canvas read idle until it happened to post again, which for a session
+ * waiting on the user is forever. A display SEED and deliberately NOT an event: it bypasses
+ * `setState`, so it fires no completion alert, counts as no turn, and marks nothing unread — and
+ * it is still not persisted here, because the mirror is the thing that survives, not this table.
  *
  * ONE STORE PER CORE (stage 4): `createAgentStatusSession(persistKey?)` builds an isolated
  * instance — node ids are per-core, so status tables from two cores must never mix. The module
@@ -171,6 +179,14 @@ export interface AgentStatusStore {
   ): void
   /** Clear `working` entries whose last event is older than `staleMs` (lost-Stop safety net). */
   sweepStaleWorking(staleMs?: number): void
+  /**
+   * Paint badges from the shell's status mirror after a reload/restart (`AgentStatusSnapshot`).
+   * DISPLAY ONLY, and deliberately not routed through `setState`: that path is the alert /
+   * loop-count / Eco edge, and a seed is not an event — nothing chirps, nothing is marked unread,
+   * no turn is counted. Entries past the freshness cut are dropped and a LIVE state is never
+   * clobbered; `now` is injected so the cut is testable. Writes nothing to localStorage.
+   */
+  seedFromSnapshot(snapshot: AgentStatusSnapshot, now?: number): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
   /** Record the Claude account a hook event says this node is running under. Persisted; see
@@ -225,6 +241,12 @@ export const DONE_HOLDOFF_MS = 3000
 // the decider (it fires a synthetic end edge). This local sweeper stays as the renderer's own
 // safety net for a badge whose events never reached the mirror.
 export const STALE_WORKING_MS = WORKING_STALE_MS
+// Freshness cut for a mirror SEED in a state other than `working` (which uses the shared
+// WORKING_STALE_MS instead — anything older than that window is swept the moment it lands, so
+// seeding it would only paint a badge for one sweep interval). A `done` or `waiting` from hours
+// ago is not something the user is still waiting on: it would put a stale green dot on a canvas
+// the user just reloaded, and there is no event coming to correct it.
+export const SEED_MAX_AGE_MS = 30 * 60_000
 // Esc/Ctrl-C interrupt inference: how long to wait for a hook event before concluding the
 // turn was cancelled without a final Stop.
 export const INTERRUPT_SETTLE_MS = 1500
@@ -469,6 +491,62 @@ export function createAgentStatusSession(
           }
         }
         return changed ? { byId } : s
+      }),
+
+    seedFromSnapshot: (snapshot, now = Date.now()) =>
+      set((s) => {
+        // Built lazily and only when something actually changes: a snapshot whose every entry is
+        // stale or already live must return the SAME byId, or a bootstrap seed would re-render
+        // every node header for nothing (and seeding twice would never settle).
+        let byId: Record<string, AgentNodeStatus> | null = null
+        for (const [id, entry] of Object.entries(snapshot?.nodes ?? {})) {
+          // No state = nothing to paint. The mirror also holds identity-only rows.
+          if (!entry?.state) continue
+          // A `working` past the shared stale window would be swept back to idle by the very next
+          // sweepStaleWorking (60 s), so seeding it only flickers; everything else uses the
+          // shorter cut above.
+          const cut = entry.state === 'working' ? STALE_WORKING_MS : SEED_MAX_AGE_MS
+          if (now - entry.updatedAt > cut) continue
+          const prev = (byId ?? s.byId)[id]
+          // Never clobber a LIVE state. The snapshot is one async round-trip old by the time it
+          // lands, so a hook event for this node may already have arrived on this run — and the
+          // mirror's copy is then strictly the older fact. `>=` (not `>`) is what makes a second
+          // seed a no-op: an entry we just seeded carries exactly `updatedAt` on both clocks.
+          if (
+            prev?.state !== undefined &&
+            Math.max(prev.stateAt ?? 0, prev.lastEventAt ?? 0) >= entry.updatedAt
+          ) {
+            continue
+          }
+          // Both clocks get the mirror's stamp, not `now`: the sidebar age and the Eco idle clock
+          // must read "quiet since the last real event", not "since the page reloaded" — the
+          // latter would hide a long-idle session from the hibernation sweep for a full window.
+          const next: AgentNodeStatus = {
+            ...(prev ?? EMPTY),
+            state: entry.state,
+            stateAt: entry.updatedAt,
+            lastEventAt: entry.updatedAt,
+            // A seed presents no per-node token, so it asserts nothing — and a `true` left over
+            // from an earlier, now-overwritten state would claim proof for a transition we did
+            // not witness (same rule as `stateVerified`'s field comment).
+            stateVerified: undefined,
+            // Same rule as setState: the approval ticket is retained only while blocked, so a
+            // seeded `done` cannot leave the header's Approve/Deny buttons pointing at a dead
+            // answer file.
+            pendingId: entry.state === 'blocked' ? prev?.pendingId : undefined
+          }
+          // Fill identity only when we have none: a hand-launched agent's `agentId`/`sessionId`
+          // hydrate from localStorage and are the LOCAL truth (the mirror may lag a pane that was
+          // relaunched under a different agent while the app was down).
+          if (next.agentId === undefined && entry.agentId) next.agentId = entry.agentId
+          if (next.sessionId === undefined && entry.sessionId) next.sessionId = entry.sessionId
+          byId = byId ?? { ...s.byId }
+          byId[id] = next
+        }
+        // No save(): `state` and its clocks stay transient (see the module docblock). The seed's
+        // source — the mirror — is what survives a restart; a copy on disk here would be a second,
+        // staler one.
+        return byId ? { byId } : s
       }),
 
     setSession: (id, session) =>

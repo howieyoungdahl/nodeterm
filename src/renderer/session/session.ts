@@ -3,6 +3,7 @@ import type { NodeTerminalApi } from '@shared/types'
 import type { PeerIdentity } from '@shared/presence'
 import { createPresenceSession, defaultPresence, type PresenceSession } from '../state/presence'
 import { agentStatusForApi, type AgentStatusSession } from '../state/agentStatus'
+import { seedAgentStatusFromHost } from '../lib/seedAgentStatus'
 import { useProjects } from '../state/projects'
 
 export type SessionSource = 'local' | 'relay' | 'server'
@@ -52,10 +53,18 @@ let remoteSeq = 0
  *  gets a keyless in-memory instance — a remote core's per-node status must never clobber the
  *  local user's persisted unread/session under `nodeterm.agentStatus`. */
 function buildStores(api: NodeTerminalApi): SessionStores {
-  return {
+  const stores: SessionStores = {
     presence: createPresenceSession(api),
     agentStatus: agentStatusForApi(api)
   }
+  // Each core's badges are seeded from ITS OWN mirror — node ids are per-core, so a snapshot may
+  // only ever reach the store that api resolves to. Fire-and-forget and never throws: an api
+  // without the member (a stub, an older host) or a rejecting one simply seeds nothing, which is
+  // the pre-existing behavior. The local session repeats what Canvas's listener effect does a
+  // moment later, on purpose: this is the earliest point a store for a core exists, and the seed
+  // is idempotent (the second pass refuses to overwrite what the first one wrote).
+  void seedAgentStatusFromHost(api, stores.agentStatus.store)
+  return stores
 }
 
 /** Idempotent per id: if the id already exists, the EXISTING session is returned and nothing is

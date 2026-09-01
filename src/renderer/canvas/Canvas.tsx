@@ -309,6 +309,7 @@ import {
 } from '../lib/explorerPinHint'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { seedAgentStatusFromHost } from '../lib/seedAgentStatus'
 import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useCodexIdentity, codexFallbackText } from '../state/codexIdentity'
@@ -10152,7 +10153,7 @@ export function Canvas() {
       const t = (s ?? '').replace(/\s+/g, ' ').trim()
       return t.length <= max ? t : `${t.slice(0, max - 1)}…`
     }
-    return api.onAgentStatus((e: NormalizedAgentEvent) => {
+    const unsubscribe = api.onAgentStatus((e: NormalizedAgentEvent) => {
       const cs = useAgentStatus.getState()
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       // Which Claude account the posting session is ACTUALLY on (hook-derived label, D3). Captured
@@ -10296,6 +10297,15 @@ export function Canvas() {
           break
       }
     })
+    // …and paint whatever the host's mirror already knows, so a canvas that just reloaded (the
+    // Server Edition does a full location.reload() when the socket comes back) is not a wall of
+    // idle badges until each pane next posts — a pane sitting on `waiting` has no next post,
+    // because it is waiting on the user staring at that blank canvas. AFTER the subscription, so
+    // any event arriving during the round-trip wins (the store refuses to clobber a live state).
+    // Fire-and-forget and never throws: no snapshot (older host, E_UNSUPPORTED, dropped socket)
+    // simply leaves the badges as they were.
+    void seedAgentStatusFromHost(api, useAgentStatus)
+    return unsubscribe
   }, [])
 
   // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
