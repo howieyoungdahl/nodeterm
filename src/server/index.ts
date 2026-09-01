@@ -49,7 +49,7 @@ import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
 import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
-import { createHeadlessNodeOwnership } from './headless-node-factory'
+import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
 import { ServerNodeOps } from './node-ops'
 import { ServerDeadCardReaper } from './dead-card-reaper'
 import { createOpsApiHandler } from './ops-api'
@@ -72,6 +72,7 @@ import {
   flush as flushAgentStatusMirror,
   recordAgentEvent,
   ackDone,
+  registerAgentStatusSnapshotIpc,
   setMirrorSettingsProvider,
   setMirrorServerProvider,
   onInboxActionable,
@@ -200,7 +201,19 @@ export async function startServer(
   const settingsStore = new SettingsStore()
   const ptyManager = new PtyManager()
   const workspaceStore = new WorkspaceStore()
-  const nodeOwnership = createHeadlessNodeOwnership()
+  // Creator ownership for canvas control, DURABLE across a restart (node-ownership-store.ts).
+  // A server-authored 0600 file in our own dataDir is the same trust class as `node-tokens/` next
+  // to it, so it may reassert who created a node where canvas state never could — the difference
+  // that lets a director loop keep the grants for the children it spawned before an upgrade.
+  //
+  // The prune set is filled in AFTER the boot workspace load further down; `undefined` until then
+  // means "not known yet", so a load that never happens (or fails) preserves the ledger rather
+  // than emptying it — a failed read is not evidence of absence.
+  let bootWorkspaceNodeIds: ReadonlySet<string> | undefined
+  const nodeOwnership = createPersistentHeadlessNodeOwnership(
+    path.join(config.dataDir, 'node-ownership.json'),
+    { prune: () => bootWorkspaceNodeIds }
+  )
   const spawnHandlerState = new SpawnHandlerState()
   const workspaceMutationQueue = new WorkspaceMutationQueue()
 
@@ -504,6 +517,11 @@ export async function startServer(
   platform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
   })
+  // Last-known status for every node the mirror can still speak for — a PULL seed so a freshly
+  // (re)loaded browser tab paints badges before the next hook event. The mirror restores its map at
+  // boot but only ever pushes on a live event, so without this every pane read idle after a Server
+  // restart. Registered in both shells (see src/main/index.ts) from one core body.
+  registerAgentStatusSnapshotIpc()
   // Phone→host read-acks: the phone drops `~/.nodeterm/acks/<nodeId>.seen` on this host when it READS
   // a finished session. Sweep it (15s cadence, cheap dir-mtime gate) and for each ack: `ackDone`
   // (mirror resolve + phone Live-Activity dismiss) + broadcast `agent:unread-clear` so the browser
@@ -643,6 +661,11 @@ export async function startServer(
     return undefined
   })
   if (bootWorkspace) {
+    // Arms the ownership ledger's prune (see its construction above): every node id the persisted
+    // workspace still knows about. Grants for anything else name a node nobody can address.
+    bootWorkspaceNodeIds = new Set(
+      bootWorkspace.projects.flatMap((project) => project.nodes.map((node) => node.id))
+    )
     const persistedLocalTerminals = bootWorkspace.projects.flatMap((project) =>
       project.ssh
         ? []
@@ -784,6 +807,9 @@ export async function startServer(
         pressure.stop()
         ptyPressure.stop()
         canvasControl?.stop()
+        // Land the last grant: the ownership ledger's write is debounced, and a stop inside that
+        // window would silently revoke a node the agent just opened.
+        await nodeOwnership.flush().catch(() => undefined)
         workspaceWatcher.dispose()
         await contextLink.stop()
         await ptyManager.killAll()
@@ -861,6 +887,9 @@ export async function startServer(
       pressure.stop()
       ptyPressure.stop()
       canvasControl?.stop()
+      // Land the last grant: the ownership ledger's write is debounced, and a stop inside that
+      // window would silently revoke a node the agent just opened.
+      await nodeOwnership.flush().catch(() => undefined)
       workspaceWatcher.dispose()
       await contextLink.stop()
       await ptyManager.killAll()

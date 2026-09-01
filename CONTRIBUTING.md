@@ -125,10 +125,16 @@ reporting "no sessions" on a host running thirty.
 never a substituted nearest match. A hand-editable value that is unrecognised must yield the safe
 default, never something more destructive than the default.
 
-**A Server Edition agent owns only nodes it freshly opened in this server run.** The
-creator ledger is process-local and must never be rebuilt from `.nodeterm/project.json`, titles,
-hook history, or a surviving tmux name: all are writable or stale. A restart therefore clears
-ownership and leaves durable queued launches dormant. Before listening, Server boot classifies
+**A Server Edition agent owns only nodes it opened through this Server.** The creator ledger must
+never be rebuilt from `.nodeterm/project.json`, titles, hook history, or a surviving tmux name: all
+are writable or stale. The server does, however, write it DOWN itself — a 0600
+`<dataDir>/node-ownership.json` (`src/server/node-ownership-store.ts`), the same trust class as the
+`node-tokens/` beside it — so a restart no longer revokes an orchestrator's grants over the children
+it spawned. A missing, unreadable or wrong-shaped ledger loads EMPTY: unknown ownership still fails
+closed, and every id is re-validated with `isSafeNodeId` on the way in. Durable ownership grants no
+extra SPAWN authority: whether a persisted node may fresh-spawn remains the boot classification's
+decision, below, and the delivery queue is memory-only, so a restart still sends no queued command.
+Before listening, Server boot classifies
 every saved local terminal id. A definitively absent backend becomes an inert dead card; a live or
 unreadable backend may be reached only through an attach-only primitive. Neither branch may
 attach-or-create, and only node ids created during the current Server run may fresh-spawn. Metadata

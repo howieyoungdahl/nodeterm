@@ -4,6 +4,9 @@ import os from 'os'
 import path from 'path'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import { syntheticAnsweredEvent } from './agents/pending-approvals'
+import { initPlatform, resetPlatformForTests } from './platform'
+import { fakePlatform } from './platform-fake'
+import { IPC } from '../shared/ipc'
 import {
   reduceEntry,
   buildFile,
@@ -32,6 +35,8 @@ import {
   isEventUnresolved,
   trimInboxFeed,
   workingNodes,
+  agentStatusSnapshot,
+  registerAgentStatusSnapshotIpc,
   _resetForTest,
   _snapshot,
   _inboxSnapshot,
@@ -2278,5 +2283,122 @@ describe('MirrorEntry.account (observed Claude account)', () => {
     const now = EXPIRE_MS + 100_000
     const doc = buildFile({ stale: { state: 'working', account, updatedAt: now - EXPIRE_MS - 1 } }, now)
     expect(Object.keys(doc.nodes)).toEqual([])
+  })
+})
+
+// The pull channel that fixes "every pane reads idle after a restart". The mirror already RESTORES
+// every entry at boot; what it never did was let a freshly loaded renderer ASK.
+describe('agentStatusSnapshot (the restart display seed)', () => {
+  let dir = ''
+  let file = ''
+  beforeEach(() => {
+    _resetForTest()
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-snapshot-'))
+    file = path.join(dir, 'agent-status.json')
+  })
+  afterEach(() => {
+    _resetForTest()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  /** Write a mirror file and boot off it — the restart, as the mirror actually experiences one. */
+  function restore(nodes: Record<string, Partial<MirrorEntry>>): void {
+    fs.writeFileSync(file, JSON.stringify({ v: 1, updatedAt: Date.now(), nodes }))
+    initAgentStatusMirror(file)
+  }
+
+  it('carries the restored flag rather than filtering restored entries out', () => {
+    restore({ n1: { state: 'done', agentId: 'claude', sessionId: 's-1', updatedAt: Date.now() } })
+    const snap = agentStatusSnapshot()
+    // Hiding restored entries would reinstate the blank canvas this exists to fix; DROPPING the
+    // flag would be worse — messaging's gate 2 refuses a restored entry and must keep being able to.
+    expect(snap.nodes.n1).toMatchObject({
+      state: 'done',
+      agentId: 'claude',
+      sessionId: 's-1',
+      restored: true
+    })
+  })
+
+  it('reports restored:false for an entry this run observed live', () => {
+    initAgentStatusMirror(file)
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    expect(agentStatusSnapshot().nodes.n1?.restored).toBe(false)
+  })
+
+  it('a live event that commits a state clears restored IN THE SNAPSHOT too', () => {
+    restore({ n1: { state: 'done', agentId: 'claude', updatedAt: Date.now() } })
+    expect(agentStatusSnapshot().nodes.n1?.restored).toBe(true)
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    expect(agentStatusSnapshot().nodes.n1).toMatchObject({ state: 'working', restored: false })
+  })
+
+  it('excludes an entry with no state — idle/unknown is what a seedless renderer already paints', () => {
+    // `buildFile` writes agentId/sessionId for a node whose `state` went undefined (a session
+    // reset), and `loadPersisted` restores exactly that. It is a real on-disk shape, not a fixture.
+    restore({
+      n1: { state: 'done', updatedAt: Date.now() },
+      n2: { agentId: 'codex', sessionId: 's-2', updatedAt: Date.now() }
+    })
+    const snap = agentStatusSnapshot()
+    expect(Object.keys(snap.nodes)).toEqual(['n1'])
+  })
+
+  it('excludes an entry past the mirror expiry', () => {
+    const at = Date.now()
+    restore({ n1: { state: 'working', updatedAt: at } })
+    expect(Object.keys(agentStatusSnapshot(at).nodes)).toEqual(['n1'])
+    expect(Object.keys(agentStatusSnapshot(at + EXPIRE_MS).nodes)).toEqual(['n1'])
+    expect(Object.keys(agentStatusSnapshot(at + EXPIRE_MS + 1).nodes)).toEqual([])
+  })
+
+  it('stamps takenAt from the caller clock and applies no other freshness cut', () => {
+    const at = Date.now()
+    // An hour old is stale for a badge and the renderer will cut it — but the cut is the
+    // renderer's to make, against the clock the user is looking at.
+    restore({ n1: { state: 'working', updatedAt: at - 3_600_000 } })
+    const snap = agentStatusSnapshot(at)
+    expect(snap.takenAt).toBe(at)
+    expect(snap.nodes.n1?.updatedAt).toBe(at - 3_600_000)
+  })
+
+  it('answers empty on a mirror that restored nothing', () => {
+    initAgentStatusMirror(file)
+    expect(agentStatusSnapshot().nodes).toEqual({})
+  })
+})
+
+describe('registerAgentStatusSnapshotIpc', () => {
+  let fake: ReturnType<typeof fakePlatform>
+  beforeEach(() => {
+    _resetForTest()
+    fake = fakePlatform()
+    initPlatform(fake)
+  })
+  afterEach(() => {
+    _resetForTest()
+    resetPlatformForTests()
+  })
+
+  // Both shells call this one body (src/main/index.ts and src/server/index.ts). A shell that
+  // stopped calling it would leave that surface with no seed and no error — see CONTRIBUTING,
+  // "Both raw listeners change together".
+  it('registers the snapshot channel and answers it from the live mirror', async () => {
+    registerAgentStatusSnapshotIpc()
+    const handler = fake.handlers[IPC.agentStatusSnapshot]
+    expect(handler).toBeDefined()
+
+    initAgentStatusMirror(path.join(fake.userDataDir, 'agent-status.json'))
+    recordAgentEvent(ev({ nodeId: 'n1', agentId: 'codex', state: 'working', newTurn: true }))
+    const snap = (await handler()) as ReturnType<typeof agentStatusSnapshot>
+    expect(snap.nodes.n1).toMatchObject({ state: 'working', agentId: 'codex', restored: false })
+    expect(snap.takenAt).toBeGreaterThan(0)
+  })
+
+  it('is a pull only — it registers no listener and broadcasts nothing', () => {
+    registerAgentStatusSnapshotIpc()
+    expect(fake.listeners[IPC.agentStatusSnapshot]).toBeUndefined()
+    expect(fake.senderListeners[IPC.agentStatusSnapshot]).toBeUndefined()
+    expect(fake.sent).toEqual([])
   })
 })

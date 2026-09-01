@@ -92,7 +92,8 @@ export interface HeadlessNodeFactoryDeps {
   spawnHandlerState?: SpawnHandlerState
   /** Shared with operator mutations so two stale workspace snapshots cannot overwrite each other. */
   mutationQueue?: WorkspaceMutationQueue
-  /** Injectable only so tests can seed creator facts; production uses a fresh process-local ledger. */
+  /** Injectable so tests can seed creator facts and so the Server shell can supply the DURABLE
+   *  ledger (`createPersistentHeadlessNodeOwnership`); the default is the in-memory one. */
   ownership?: HeadlessNodeOwnership
 }
 
@@ -109,9 +110,21 @@ export interface HeadlessNodeOwnership {
 }
 
 /**
- * Creator proof for Server Edition canvas mutations. Deliberately process-local: after a service
- * restart, a git-shared/hand-editable project file cannot reassert who created a node. Unknown
- * ownership therefore fails closed until this server run records a fresh agent-requested spawn.
+ * Creator proof for Server Edition canvas mutations, held in memory for this process only.
+ *
+ * The rule this encodes is unchanged and still absolute: ownership may never be rebuilt from
+ * CANVAS state — a git-shared/hand-editable project file, a node title, hook history or a
+ * surviving tmux name are all writable or stale, so none of them can reassert who created a node.
+ * Unknown ownership fails closed.
+ *
+ * What that rule never said is that ownership may not be WRITTEN DOWN by the server itself.
+ * `createPersistentHeadlessNodeOwnership` (node-ownership-store.ts) does exactly that, in a 0600
+ * file in the Server's own data dir — the same trust class as `node-tokens/` and
+ * `node-auth-key.bin`, which already carry identity across restarts — and that is what the Server
+ * shell wires up, so a director loop keeps its grants over a restart.
+ *
+ * This in-memory version remains the default for tests and for any desktop-less path with no data
+ * directory to own: same interface, same fail-closed semantics, nothing durable.
  */
 export function createHeadlessNodeOwnership(): HeadlessNodeOwnership {
   const owners = new Map<string, HeadlessNodeOwner>()

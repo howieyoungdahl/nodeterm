@@ -1315,13 +1315,25 @@ else, and its context links must keep classifying across restarts).
   (which sets `NODETERM_CANVAS_CONTROL`) is the whole wiring. That premise rests on grok's shipped
   docs and is **unverified** (`grok inspect --json` never run); if it does not hold, grok takes the
   marker-block route instead — see docs/grok-agent.md.
-  **Server creator ownership (2026-08 incident hardening):** enabled Server control accepts only
-  verified node identity. `HeadlessNodeFactory` records which source node opened each new node in a
-  process-local ledger; link/group/rename/resize/color/sticky-update, message delivery, and close validate
-  the whole target set as current-run creations before writing or killing anything. Queued messages
-  revalidate creator ownership before flush. The ledger is intentionally empty after restart —
-  project JSON, titles, hook history and tmux names are not creator proof — so
-  boot sends no persisted queued command. Before the Server starts listening,
+  **Server creator ownership (2026-08 incident hardening; ledger made DURABLE 2026-09):** enabled
+  Server control accepts only verified node identity. `HeadlessNodeFactory` records which source
+  node opened each new node; link/group/rename/resize/color/sticky-update, message delivery, and close validate
+  the whole target set as creations of THIS Server before writing or killing anything. Queued
+  messages revalidate creator ownership before flush. The ledger now SURVIVES a restart:
+  `createPersistentHeadlessNodeOwnership` (`server/node-ownership-store.ts`) publishes it 0600 to
+  `<dataDir>/node-ownership.json` behind a 300 ms debounce, loads it synchronously at boot, and
+  drops entries whose node id the persisted workspace no longer has. Without it a director loop
+  lost control of every child it had spawned the moment the service was upgraded.
+  This is NOT a relaxation of the rule it replaces. Project JSON, titles, hook history and tmux
+  names are still not creator proof and are still never read back as ownership; what changed is
+  that a **server-authored 0600 file in the Server's own data dir** is a different trust class —
+  the same one as the `node-tokens/` and `node-auth-key.bin` beside it, which already carry node
+  identity across restarts. An attacker who can rewrite it can mint identity directly next door.
+  A missing, unreadable or wrong-shaped file loads EMPTY (unknown ownership still fails closed) and
+  every id is re-validated with `isSafeNodeId` on the way in and out. Durable ownership grants no
+  extra SPAWN authority — whether a persisted node may fresh-spawn is `PtyManager.bootPersisted`'s
+  decision, below, not the ledger's — and the delivery queue is memory-only, so
+  boot still sends no persisted queued command. Before the Server starts listening,
   `PtyManager.protectPersistedSessionsAtBoot` classifies every saved local terminal id: a missing
   backend becomes an inert `deadCard`, while a surviving or unreadable backend is attach-only
   (`tmux attach-session` / session-host attach-existing). Neither path can create a context-free

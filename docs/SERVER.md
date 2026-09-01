@@ -556,8 +556,9 @@ Consequences worth knowing:
   it needs Electron's `<webview>` + CDP, which this edition has none of, so there is no
   browser driving here at all. See `src/server/control-unsupported.ts`.
   The agent-messaging verbs (`send`/`reply`/`notify`) are verified-only. When Server control is
-  enabled they additionally require process-local proof that the caller spawned the target in this
-  run; with control disabled they receive `control-unsupported-on-this-edition`.
+  enabled they additionally require ledger proof that the caller spawned the target through this
+  Server — durable across a restart, see below; with control disabled they receive
+  `control-unsupported-on-this-edition`.
 - The **`ptyDestroy` tail-teardown** — *resolved in Phase 3c.* Phase 3b left this skipped
   (agent tails self-cleared only on `SessionEnd`, so a node closed *without* one left an
   idle file-tail); the server now untracks agent tails on node close, at desktop parity.
@@ -595,7 +596,7 @@ Server canvas control is disabled by default. Set `NODETERM_SERVER_CANVAS_CONTRO
 Every enabled request requires verified node identity.
 
 Ownership is intentionally narrower than the desktop confirmation UI: an agent may mutate, message,
-or close only a node it opened during the current Server process run. Link, group, rename, resize, color,
+or close only a node it opened through this Server. Link, group, rename, resize, color,
 sticky updates, dependency targets, message delivery, and close validate their complete target set
 before any write or PTY kill; an unowned member refuses the whole operation. Queued messages repeat
 the creator check at flush time in addition to the existing verified and per-project switch gates.
@@ -612,9 +613,21 @@ legacy shape, stamps it compact, and persists the result. Browser/manual creatio
 source and are never rewritten; new-server explicit `normal` creations carry the marker and are also
 preserved. This lets the next connected control spawn compact before the Server process restart.
 
-The creator ledger is memory-only and is never reconstructed from a project file, title, hook
-record, or tmux session name. After a service restart it is empty, and the headless factory performs
-no session adoption or persisted queued-command delivery. Before the HTTP listener opens, Server
+The creator ledger is never reconstructed from a project file, title, hook record, or tmux session
+name — every one of those is writable or stale. It is instead written by the Server itself to
+`<dataDir>/node-ownership.json`, mode `0600`, atomically, behind a 300 ms debounce, and read back
+synchronously at boot (`src/server/node-ownership-store.ts`). That file is the same trust class as
+the `node-tokens/` directory and `node-auth-key.bin` beside it, which already carry node identity
+across restarts, so an orchestrator keeps control of the children it spawned across a service
+restart or upgrade. Entries whose node id the persisted workspace no longer contains are dropped
+and the file rewritten; a workspace that could not be read prunes nothing, because a failed read is
+not evidence of absence. A missing, unreadable, or wrong-shaped file yields an EMPTY ledger —
+unknown ownership still fails closed — and each id is re-validated against the same `isSafeNodeId`
+predicate the node-token derivation uses. Delete the file to revoke every grant.
+
+Durable ownership grants no additional spawn authority, and the headless factory still performs no
+session adoption or persisted queued-command delivery (the delivery queue is in memory only).
+Before the HTTP listener opens, Server
 boot separately classifies every saved local terminal id. A definitively missing backend is marked
 as an inert dead card; the browser shows that state and never asks for a replacement shell. A
 surviving or unreadable backend is guarded by an attach-only primitive (`tmux attach-session` or

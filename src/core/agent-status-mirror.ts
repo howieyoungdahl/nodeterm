@@ -4,7 +4,12 @@ import { writeFileAtomic } from './fs-atomic'
 import { platform } from './platform'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
-import type { ObservedClaudeAccount } from '@shared/types'
+import { IPC } from '@shared/ipc'
+import type {
+  AgentStatusSnapshot,
+  AgentStatusSnapshotEntry,
+  ObservedClaudeAccount
+} from '@shared/types'
 import { WORKING_STALE_MS, isStaleWorking } from '@shared/agents/stale'
 
 /**
@@ -1688,6 +1693,57 @@ export function workingNodes(): { nodeId: string; agentId?: string; sessionId?: 
     if (e.state === 'working') out.push({ nodeId, agentId: e.agentId, sessionId: e.sessionId })
   }
   return out
+}
+
+/**
+ * Every node the mirror can still speak for, as a DISPLAY SEED for a freshly (re)loaded renderer.
+ *
+ * The problem it solves: the mirror restores its whole map at boot (`loadPersisted`), but only ever
+ * PUSHES on a live hook event, so after a Server/app restart the canvas painted every pane idle
+ * until each one happened to post again — which, for a pane sitting at a prompt, could be hours.
+ * A pull channel is the right shape here precisely because the data already exists; nothing new is
+ * observed, it is just finally readable.
+ *
+ * Two deliberate omissions:
+ *  - `restored` is CARRIED, not filtered on. It is 6-hour-old evidence and the renderer must be
+ *    able to tell; hiding restored entries here would reintroduce the blank canvas this exists to
+ *    fix, and silently dropping the flag would be far worse (see `MirrorEntry.restored`: gate 2 of
+ *    agent messaging refuses a restored entry outright, and this must never become the channel
+ *    that launders one into looking fresh).
+ *  - No freshness cut beyond the mirror's own expiry sweep. The renderer applies its own, because
+ *    the cut is a display decision and it owns the clock the user is looking at.
+ *
+ * Entries with NO `state` are skipped: "idle/unknown" is exactly what a renderer with no seed
+ * already shows, so sending them is bytes for no pixels.
+ */
+export function agentStatusSnapshot(now = Date.now()): AgentStatusSnapshot {
+  const nodes: Record<string, AgentStatusSnapshotEntry> = {}
+  for (const [nodeId, e] of state) {
+    if (!e.state) continue
+    if (now - e.updatedAt > EXPIRE_MS) continue
+    nodes[nodeId] = {
+      state: e.state,
+      agentId: e.agentId,
+      sessionId: e.sessionId,
+      updatedAt: e.updatedAt,
+      restored: !!e.restored
+    }
+  }
+  return { takenAt: now, nodes }
+}
+
+/**
+ * The one registration for the snapshot channel, called by BOTH shells (`src/main/index.ts` and
+ * `src/server/index.ts`) next to their `IPC.agentAckDone` handler — the mirror's other pull-shaped
+ * channel, which is registered the same way for the same reason.
+ *
+ * It lives in core rather than being typed out twice because the two shells have shipped a
+ * hook/mirror change to exactly one of them three times (CONTRIBUTING, "Both raw listeners change
+ * together"); a shared body means the only thing that can drift is whether a shell calls it, which
+ * is one greppable line instead of a behavioural difference.
+ */
+export function registerAgentStatusSnapshotIpc(): void {
+  platform().handle(IPC.agentStatusSnapshot, () => agentStatusSnapshot())
 }
 
 /** The entries the session-name sweep walks: id + what it needs to resolve and dedupe. */

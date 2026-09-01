@@ -145,6 +145,7 @@ import {
   flush as flushAgentStatusMirror,
   recordAgentEvent,
   ackDone,
+  registerAgentStatusSnapshotIpc,
   recordRawToolEvent,
   recordContextUsage,
   setMirrorSettingsProvider,
@@ -2410,6 +2411,11 @@ app.whenReady().then(async () => {
   corePlatform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
   })
+  // Last-known status for every node the mirror can still speak for — a PULL seed so a freshly
+  // (re)loaded renderer paints badges before the next hook event. The mirror restores its map at
+  // boot but only ever pushes on a live event, so without this the canvas showed every pane idle
+  // after a restart. Registered in both shells (see src/server/index.ts) from one core body.
+  registerAgentStatusSnapshotIpc()
   // Phone→host read-acks (this feature, the other direction): the phone drops
   // `~/.nodeterm/acks/<nodeId>.seen` on the SESSION host when it READS a finished session. For each
   // ack: `ackDone` (mirror resolves the done event → phone Inbox archives it + the paired phone's
