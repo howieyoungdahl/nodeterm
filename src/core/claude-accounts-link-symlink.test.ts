@@ -39,6 +39,8 @@ import { resetClaudeAccountsSourceForTests } from './claude-config-dir'
 let fake: FakePlatform
 let root = ''
 let userDataDir = ''
+/** The real `$HOME`, put back after each case. */
+let realHome: string | undefined
 
 const call = (channel: string, ...args: unknown[]): Promise<any> =>
   Promise.resolve(fake.handlers[channel](...args))
@@ -47,11 +49,23 @@ beforeEach(() => {
   root = mkdtempSync(path.join(os.tmpdir(), 'nt-link-symlink-'))
   userDataDir = path.join(root, 'userData')
   mkdirSync(userDataDir, { recursive: true })
+  // The REAL installer runs here, and its managed script lives per MACHINE at
+  // `$HOME/.nodeterm/agent-hooks/<agent>.sh` (install-helper.ts) — not under userData. Without a
+  // scratch HOME this test overwrote the developer's live hook script with one that embeds THIS
+  // test's temp userData path (measured 2026-09-01: a running nodeterm Server's Codex identity
+  // recovery pointed at a deleted tmp dir). `os.homedir()` honours $HOME on POSIX; on Windows it
+  // reads USERPROFILE, so both are pointed at the fixture.
+  realHome = process.env.HOME
+  process.env.HOME = root
+  process.env.USERPROFILE = root
   fake = fakePlatform({ userDataDir })
   initPlatform(fake)
   registerClaudeAccountsIpc()
 })
 afterEach(() => {
+  if (realHome === undefined) delete process.env.HOME
+  else process.env.HOME = realHome
+  delete process.env.USERPROFILE
   resetPlatformForTests()
   resetClaudeAccountsSourceForTests()
   rmSync(root, { recursive: true, force: true })
