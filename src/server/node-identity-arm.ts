@@ -8,6 +8,7 @@ import { setCodexThreadIdentityAuthSecret } from '../core/codex-identity-proxy'
 import { initNodeTokens } from '../core/agents/node-token-service'
 
 type Canvases = Parameters<typeof initNodeTokens>[0]['canvases']
+type RetainMissing = NonNullable<Parameters<typeof initNodeTokens>[0]['retainMissing']>
 
 /**
  * Arm node identity for the Server Edition: load/create the raw node-auth secret, hand it to the
@@ -18,7 +19,8 @@ type Canvases = Parameters<typeof initNodeTokens>[0]['canvases']
  */
 export async function armServerNodeIdentity(
   hookServer: { setNodeAuthSecret(secret: Uint8Array): void },
-  canvases: Canvases
+  canvases: Canvases,
+  retainMissing?: RetainMissing
 ): Promise<void> {
   const nodeAuthSecret = await loadOrCreateNodeAuthSecret()
   hookServer.setNodeAuthSecret(nodeAuthSecret)
@@ -28,5 +30,5 @@ export async function armServerNodeIdentity(
   setCodexThreadIdentityAuthSecret(nodeAuthSecret)
   // Already-running sessions become verified at their next hook event with no restart. No-ops into
   // legacy mode without a secret.
-  initNodeTokens({ canvases })
+  initNodeTokens({ canvases, retainMissing })
 }

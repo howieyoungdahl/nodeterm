@@ -4,6 +4,8 @@ import { writeNodeTokenFile, sweepNodeTokenFile, nodeTokenFilePresent } from './
 
 type Canvases = () => Array<{ id?: string; nodes: Array<{ id: string }> }>
 let canvases: Canvases = () => []
+type RetainMissing = (nodeId: string) => boolean
+let retainMissing: RetainMissing = () => false
 
 /**
  * Node ids this run has SEEN on a canvas. The orphan sweep's only source of authority.
@@ -157,8 +159,9 @@ function materialiseOne(secret: Buffer, nodeId: string, force: boolean): void {
  * cost. Without it, the migration warning window would be the only path and every running node
  * would spend it unverified.
  */
-export function initNodeTokens(deps: { canvases: Canvases }): void {
+export function initNodeTokens(deps: { canvases: Canvases; retainMissing?: RetainMissing }): void {
   canvases = deps.canvases
+  retainMissing = deps.retainMissing ?? (() => false)
   // A new provider is a new world: nothing observed under the old one is evidence about this one.
   // It also means the boot pass records without sweeping, which is what keeps a workspace index
   // that is still loading from costing every live node its token.
@@ -259,6 +262,12 @@ export function ensureRemoteNodeToken(controlPath: string, nodeId: string): void
 function sweepDepartedNodes(live: ReadonlySet<string>): void {
   for (const id of seenNodeIds) {
     if (live.has(id)) continue
+    // Server Edition can have one narrow, recoverable absence: a stale whole-workspace snapshot
+    // dropped a card while the pane this process genuinely spawned is still alive. Keep its token
+    // long enough for the next verified hook to restore the card from pane-to-project provenance.
+    // The predicate is runtime provenance, not serialized state; an actual PTY delete clears that
+    // provenance and explicitly sweeps its token through PtyManager.endSession.
+    if (retainMissing(id)) continue
     seenNodeIds.delete(id)
     sweepToken(id)
   }

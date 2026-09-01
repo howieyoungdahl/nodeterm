@@ -57,6 +57,7 @@ import { loadOrCreateOpsToken, OPS_TOKEN_FILE } from './ops-token'
 import { SpawnHandlerState } from './spawn-handler-state'
 import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 import { refreshNodeTokens } from '../core/agents/node-token-service'
+import { paneOwnerProject } from '../core/agents/pane-ownership'
 import { armServerNodeIdentity } from './node-identity-arm'
 import { wireServerCodexSharedIdentity } from './codex-shared-identity'
 import {
@@ -457,6 +458,8 @@ export async function startServer(
     sweep: (dryRun) => nodeOps.sweep(dryRun)
   })
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
+    onRegistration: (agentId, nodeId, verified) =>
+      canvasControl?.onHookRegistration(agentId, nodeId, verified),
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
@@ -595,7 +598,14 @@ export async function startServer(
     // re-implementation of it (constraint 8). It arms `setCodexThreadIdentityAuthSecret` with the
     // same secret so a MANAGED Codex account on a headless host signs/verifies its ownership records
     // instead of throwing "identity authentication is unavailable" (Decision 1, both-shells).
-    await armServerNodeIdentity(hookServer, () => workspaceStore.persistedCanvases())
+    await armServerNodeIdentity(
+      hookServer,
+      () => workspaceStore.persistedCanvases(),
+      // A current-run fresh-spawn record is the only safe reason a card may disappear while its
+      // identity token remains. The next verified hook either restores it from that provenance or
+      // gets the actionable no-project refusal; ordinary deletes clear the record and token.
+      (nodeId) => paneOwnerProject(nodeId) !== undefined
+    )
   } catch (error) {
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }

@@ -86,6 +86,24 @@ function lastAgentStatus(): Record<string, unknown> | undefined {
 }
 
 describe('wireAgentStatus', () => {
+  it('reports normalized hook registration with the verified identity label', () => {
+    const fh = fakeHooks()
+    const registrations: Array<[string, string, boolean]> = []
+    wireAgentStatus(platform, {
+      hooks: fh.hooks as never,
+      onRegistration: (agentId, nodeId, verified) =>
+        registrations.push([agentId, nodeId, verified])
+    })
+    fh.fireNormalized({
+      nodeId: 'plain-node',
+      agentId: 'claude',
+      kind: 'state',
+      state: 'done',
+      verified: true
+    })
+    expect(registrations).toEqual([['claude', 'plain-node', true]])
+  })
+
   it('broadcasts a normalized agent event on agent:status', () => {
     const fh = fakeHooks()
     wireAgentStatus(platform, { hooks: fh.hooks as never })

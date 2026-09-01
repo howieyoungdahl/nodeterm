@@ -157,9 +157,13 @@ composed pane after Enter; if it did not advance, send one bounded retry and cap
 target's verified next-turn hook remains the delivery receipt. Never report the paste as delivered
  from a successful tmux command alone, and never loop Enter against somebody else's composer.
 
-**A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
-a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
-`NODETERM_CANVAS_CONTROL` until the serialized node explicitly names an agent.
+**A plain terminal starts without an agent identity or canvas-control grant.** It carries only the
+generic node/endpoint wiring needed for a hand-launched agent to report hooks. A generated shim may
+repair its missing discovery variables, but the Server remains authoritative: only a verified hook
+promotes that terminal to the reporting agent for the node's remaining lifetime. Promotion permits
+self-card metadata updates and preserves the node's existing creator ledger; it never adopts another
+node. If a stale whole-workspace save dropped the live card, recovery additionally requires the
+current-run pane-to-project provenance and an alive backend.
 
 **Re-validate hand-editable values at the point of use**, not by their TypeScript type. Settings
 come from git-shared JSON and can end up interpolated into a shell command line.

@@ -56,6 +56,8 @@ export interface HeadlessPty {
   createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult>
   /** Probe only. Boot reconciliation must never turn absence into a fresh session. */
   sessionExists(persistKey: string): Promise<boolean>
+  /** Strict recovery probe. Only `alive` may restore a card missing from the workspace. */
+  sessionPresence?(persistKey: string): Promise<'alive' | 'dead' | 'unknown'>
   sendText(nodeId: string, text: string, opts?: { enter?: boolean }): Promise<boolean>
   destroySession(
     clientId: number | null,
@@ -77,6 +79,8 @@ export interface HeadlessNodeFactoryDeps {
   /** Hook-mirror lookups. A stored agentId wins; these cover a plain terminal running an agent. */
   stateOf(nodeId: string): AgentState | undefined
   agentIdOf?(nodeId: string): string | undefined
+  /** Current-run pane provenance recorded at the pane's genuine spawn. Never file-derived. */
+  paneProjectOf?(nodeId: string): string | undefined
   env?: Record<string, string | undefined>
   now?: () => number
   publishNode?: (projectId: string, node: CanvasNodeState) => void
@@ -219,13 +223,16 @@ function unsupportedFlags(
   return unknown ? `--${unknown} is not supported by Server Edition canvas control` : undefined
 }
 
-function sourceProject(workspace: Workspace, nodeId: string): { project: Project; node: CanvasNodeState } | null {
+function sourceProjects(
+  workspace: Workspace,
+  nodeId: string
+): Array<{ project: Project; node: CanvasNodeState }> {
   const matches: Array<{ project: Project; node: CanvasNodeState }> = []
   for (const project of workspace.projects) {
     const node = project.nodes.find((candidate) => candidate.id === nodeId)
     if (node) matches.push({ project, node })
   }
-  return matches.length === 1 ? matches[0] : null
+  return matches
 }
 
 function effectiveAgentId(
@@ -557,6 +564,14 @@ export class HeadlessNodeFactory {
   private launchesInFlight = new Set<string>()
   /** A close/stop that wins the race: a late backend must be killed, never orphaned. */
   private cancelledLaunches = new Set<string>()
+  /** Verified hook identity learned at runtime, including agents started inside plain terminals. */
+  private runtimeAgents = new Map<string, AgentId>()
+  /** Plain/missing terminal records promoted by a verified hand launch. */
+  private handLaunchedNodes = new Set<string>()
+  /** Current-run terminal snapshots used only to reconstruct a live pane lost by a stale save. */
+  private runtimeNodes = new Map<string, { projectId: string; node: CanvasNodeState }>()
+  /** Keep the missing-card recovery warning to one line once per source. */
+  private warnedRecoveredSources = new Set<string>()
   /**
    * Server-local `open-project` grants. The browser shell's grant ledger is process-local too,
    * but Server Edition has its own process and handler. A service restart deliberately clears
@@ -595,6 +610,137 @@ export class HeadlessNodeFactory {
     return this.spawnHandlerState.snapshot()
   }
 
+  private runtimeAgentId = (nodeId: string): string | undefined =>
+    this.runtimeAgents.get(nodeId) ?? this.deps.agentIdOf?.(nodeId)
+
+  private rememberRuntimeNode(projectId: string, node: CanvasNodeState): void {
+    if (node.kind !== 'terminal') return
+    this.runtimeNodes.set(node.id, { projectId, node: structuredClone(node) })
+  }
+
+  private sourceProjectError(nodeId: string, ambiguous = false): ServerControlReply {
+    return {
+      ok: false,
+      error: ambiguous
+        ? `source-node-project-ambiguous: ${nodeId} is saved in multiple projects; ` +
+          'open the terminal from the canvas inside the target project'
+        : `source-node-project-unavailable: ${nodeId} has no saved project; ` +
+          'open the terminal from the canvas inside the target project'
+    }
+  }
+
+  private async paneIsAlive(nodeId: string): Promise<boolean> {
+    try {
+      if (this.deps.ptyManager.sessionPresence) {
+        return (await this.deps.ptyManager.sessionPresence(nodeId)) === 'alive'
+      }
+      return await this.deps.ptyManager.sessionExists(nodeId)
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Recover the one safe missing-card shape: this process saw a verified hook from the node, the
+   * pane still exists, and the fresh-spawn provenance ledger names one loaded local project. The
+   * project file alone can prove none of those facts, so it never participates in this decision.
+   */
+  private async recoverMissingSource(
+    workspace: Workspace,
+    nodeId: string,
+    agentId: AgentId
+  ): Promise<{ project: Project; node: CanvasNodeState } | null> {
+    const projectId = this.deps.paneProjectOf?.(nodeId)
+    const project = projectId
+      ? workspace.projects.find((candidate) => candidate.id === projectId && !candidate.ssh)
+      : undefined
+    if (!project || !(await this.paneIsAlive(nodeId))) return null
+
+    const remembered = this.runtimeNodes.get(nodeId)
+    const normalSize = terminalSize(this.deps.settings())
+    const right = project.nodes.reduce(
+      (edge, node) => Math.max(edge, node.position.x + (node.size?.width ?? normalSize.width)),
+      0
+    )
+    const node: CanvasNodeState =
+      remembered?.projectId === project.id && remembered.node.kind === 'terminal'
+        ? { ...structuredClone(remembered.node), agentId }
+        : {
+            id: nodeId,
+            kind: 'terminal',
+            position: { x: right + H_GAP, y: 120 },
+            size: normalSize,
+            title: `${agentId} (recovered)`,
+            titleAuto: true,
+            color: '#d97757',
+            group: null,
+            tags: [],
+            ...(project.cwd ? { cwd: project.cwd } : {}),
+            agentId
+          }
+    project.nodes.push(node)
+    this.handLaunchedNodes.add(nodeId)
+    await this.deps.workspaceStore.save(workspace)
+    this.publish(project, [node])
+    if (!this.warnedRecoveredSources.has(nodeId)) {
+      this.warnedRecoveredSources.add(nodeId)
+      console.warn(
+        `[server-canvas-control] source ${nodeId} was missing from the workspace; ` +
+          `restored it to project ${project.id} from live pane provenance`
+      )
+    }
+    return { project, node }
+  }
+
+  private async resolveSource(
+    workspace: Workspace,
+    nodeId: string
+  ): Promise<{ project: Project; node: CanvasNodeState } | ServerControlReply> {
+    const matches = sourceProjects(workspace, nodeId)
+    if (matches.length === 1) return matches[0]
+    if (matches.length > 1) return this.sourceProjectError(nodeId, true)
+    const agentId = this.runtimeAgents.get(nodeId)
+    if (agentId) {
+      const recovered = await this.recoverMissingSource(workspace, nodeId, agentId)
+      if (recovered) return recovered
+    }
+    return this.sourceProjectError(nodeId)
+  }
+
+  /**
+   * A verified hook is the registration event for an agent started by hand in a terminal. Promote
+   * only an existing plain terminal, or recover the strict live-pane/provenance case above. This
+   * never records creator ownership: children already keyed to this source id stay keyed to it,
+   * and unrelated nodes remain unrelated.
+   */
+  onHookRegistration(agentId: string, nodeId: string, verified: boolean): Promise<void> {
+    if (this.stopped || !verified || !agentId || !nodeId) return Promise.resolve()
+    const runtimeAgent = agentId as AgentId
+    if (!canControlCanvas(runtimeAgent)) return Promise.resolve()
+    return this.runExclusive('hook-registration', async () => {
+      if (this.stopped) return
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const matches = sourceProjects(workspace, nodeId)
+      if (matches.length === 0) {
+        const recovered = await this.recoverMissingSource(workspace, nodeId, runtimeAgent)
+        if (recovered) this.runtimeAgents.set(nodeId, runtimeAgent)
+        return
+      }
+      if (matches.length !== 1) return
+      const source = matches[0]
+      if (source.node.kind !== 'terminal') return
+      this.runtimeAgents.set(nodeId, runtimeAgent)
+      this.rememberRuntimeNode(source.project.id, source.node)
+      if (source.node.agentId) return
+      source.node.agentId = runtimeAgent
+      this.handLaunchedNodes.add(nodeId)
+      await this.deps.workspaceStore.save(workspace)
+      this.publish(source.project, [source.node])
+    }).catch((error) => {
+      console.warn(`[server-canvas-control] could not register hand-launched agent ${nodeId}`, error)
+    })
+  }
+
   /** Clear process-local state for cards the operator management plane removed. */
   forgetNodes(nodeIds: readonly string[]): void {
     for (const id of nodeIds) {
@@ -605,6 +751,10 @@ export class HeadlessNodeFactory {
       this.ownership.forget(id)
       this.attached.delete(id)
       this.awaitingFirstWorking.delete(id)
+      this.runtimeAgents.delete(id)
+      this.handLaunchedNodes.delete(id)
+      this.runtimeNodes.delete(id)
+      this.warnedRecoveredSources.delete(id)
       this.retryCount.delete(id)
       const timer = this.retryTimers.get(id)
       if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
@@ -624,8 +774,14 @@ export class HeadlessNodeFactory {
     const publishRemoval = this.deps.publishRemoval ?? ((projectId: string, nodeId: string) => {
       publishCanvasMutation(projectId, { op: 'remove', id: nodeId })
     })
-    for (const node of nodes) publishNode(project.id, node)
-    for (const nodeId of removedIds) publishRemoval(project.id, nodeId)
+    for (const node of nodes) {
+      this.rememberRuntimeNode(project.id, node)
+      publishNode(project.id, node)
+    }
+    for (const nodeId of removedIds) {
+      this.runtimeNodes.delete(nodeId)
+      publishRemoval(project.id, nodeId)
+    }
   }
 
   private publish(project: Project, nodes: readonly CanvasNodeState[]): void {
@@ -637,9 +793,17 @@ export class HeadlessNodeFactory {
     return this.ownership.ownerOf(nodeId)?.sourceNodeId === sourceNodeId
   }
 
-  /** A verified caller may mutate only a node it freshly created during this server run. */
+  /**
+   * A verified caller may mutate only a node it freshly created during this server run. A terminal
+   * promoted from a verified hand launch gets one narrow addition: its own card metadata. This is
+   * not creator ownership and never changes `ownerOf`, so the original director and every sibling
+   * retain exactly their prior provenance.
+   */
   private ownsMutation(sourceNodeId: string, nodeId: string): boolean {
-    return this.ownsSpawn(sourceNodeId, nodeId)
+    return (
+      this.ownsSpawn(sourceNodeId, nodeId) ||
+      (sourceNodeId === nodeId && this.handLaunchedNodes.has(sourceNodeId))
+    )
   }
 
   /** All-or-nothing ownership gate: validate every id before any canvas or session mutation. */
@@ -715,7 +879,7 @@ export class HeadlessNodeFactory {
     for (const id of ids) {
       const node = project.nodes.find((candidate) => candidate.id === id)
       if (!node) return { ok: false, error: `${verb}: --after names no existing node (${id})` }
-      const agentId = effectiveAgentId(node, this.deps.agentIdOf)
+      const agentId = effectiveAgentId(node, this.runtimeAgentId)
       if (!agentId || !hasHooks(agentId)) {
         return {
           ok: false,
@@ -757,9 +921,9 @@ export class HeadlessNodeFactory {
       }
 
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
       if (source.project.ssh) {
@@ -833,9 +997,9 @@ export class HeadlessNodeFactory {
       }
 
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
 
@@ -940,9 +1104,9 @@ export class HeadlessNodeFactory {
       }
 
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
 
@@ -975,7 +1139,7 @@ export class HeadlessNodeFactory {
         targets,
         (id) => {
           const node = byId.get(id)
-          return node ? headlessLinkEndpoint(node, this.deps.agentIdOf) : null
+          return node ? headlessLinkEndpoint(node, this.runtimeAgentId) : null
         },
         existing
       )
@@ -1013,9 +1177,9 @@ export class HeadlessNodeFactory {
         color = args.color
       }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
 
@@ -1063,9 +1227,9 @@ export class HeadlessNodeFactory {
       const flagError = unsupportedFlags(args, new Set(['node', 'title']))
       if (flagError) return { ok: false, error: `rename: ${flagError}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
 
@@ -1117,9 +1281,9 @@ export class HeadlessNodeFactory {
       if (!sizeName || !size) return { ok: false, error: controlNodeSizeError('resize') }
 
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
 
@@ -1161,9 +1325,9 @@ export class HeadlessNodeFactory {
       if (!isNodeColor(args.color)) return { ok: false, error: invalidNodeColorMessage() }
 
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
 
@@ -1223,9 +1387,9 @@ export class HeadlessNodeFactory {
       }
 
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
       const target = this.resolveTarget(workspace, source, verb, args, verified)
@@ -1384,13 +1548,13 @@ export class HeadlessNodeFactory {
         addEdge(ropes, source.node.id, id, 'ctrl')
 
         if (verb === 'open-agent') {
-          const sourceAgent = effectiveAgentId(source.node, this.deps.agentIdOf)
+          const sourceAgent = effectiveAgentId(source.node, this.runtimeAgentId)
           if (sourceAgent && canContextLink(sourceAgent) && canContextLink(agentId as AgentId)) {
             addEdge(bridges, source.node.id, id, 'link')
           }
           for (const depId of after) {
             const dep = target.nodes.find((candidate) => candidate.id === depId)
-            const depAgent = dep ? effectiveAgentId(dep, this.deps.agentIdOf) : undefined
+            const depAgent = dep ? effectiveAgentId(dep, this.runtimeAgentId) : undefined
             if (depAgent && canContextLink(depAgent) && canContextLink(agentId as AgentId))
               addEdge(bridges, id, depId, 'link')
           }
@@ -1563,9 +1727,9 @@ export class HeadlessNodeFactory {
       const parsed = parseStickyArgs(args)
       if ('error' in parsed) return { ok: false, error: `sticky: ${parsed.error}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
-      const source = sourceProject(workspace, sourceNodeId)
-      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      const source = await this.resolveSource(workspace, sourceNodeId)
+      if ('ok' in source) return source
+      if (!sourceCanControl(source.node, this.runtimeAgentId)) {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
 
@@ -1732,5 +1896,9 @@ export class HeadlessNodeFactory {
     this.retryTimers.clear()
     this.ownership.clear()
     this.projectGrants.clear()
+    this.runtimeAgents.clear()
+    this.handLaunchedNodes.clear()
+    this.runtimeNodes.clear()
+    this.warnedRecoveredSources.clear()
   }
 }

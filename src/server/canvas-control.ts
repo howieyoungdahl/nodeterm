@@ -63,6 +63,7 @@ export interface ServerCanvasControlDeps {
 
 export interface ServerCanvasControl {
   handler: ReturnType<typeof createServerEditionControlHandler>
+  onHookRegistration(agentId: string, nodeId: string, verified: boolean): void
   onAgentEvent(event: NormalizedAgentEvent): void
   deliveryQueueDepths(): Record<string, number>
   forgetNodes(nodeIds: readonly string[]): void
@@ -163,6 +164,7 @@ export async function initServerCanvasControl(
       deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
+    paneProjectOf: paneOwnerProject,
     ownership: deps.ownership,
     spawnHandlerState: deps.spawnHandlerState,
     mutationQueue: deps.mutationQueue,
@@ -214,6 +216,9 @@ export async function initServerCanvasControl(
 
   return {
     handler: createServerEditionControlHandler(actions),
+    onHookRegistration: (agentId, nodeId, verified) => {
+      void factory.onHookRegistration(agentId, nodeId, verified)
+    },
     onAgentEvent: (event) => {
       onMessagingAgentEvent(event, queue)
       factory.onAgentEvent(event)

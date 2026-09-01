@@ -446,6 +446,17 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts explain verified hand-relaunch semantics', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      const prose = body.replace(/\s+/g, ' ')
+      expect(prose).toContain('relaunched by hand')
+      expect(prose).toContain('verified hook')
+      expect(prose).toContain('current-run pane provenance')
+      expect(prose).toContain('keeps the same owner')
+      expect(prose).toContain('open the terminal from the canvas inside the target project')
+    }
+  })
+
   it('renders the RETRYABLE table — the table is the source, not a re-typed copy', () => {
     const body = buildCanvasSkillBody('/x/shim.sh')
     const yesAt = body.indexOf('Worth retrying')
