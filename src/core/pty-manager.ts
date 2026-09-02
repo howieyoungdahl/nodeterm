@@ -1880,6 +1880,17 @@ export class PtyManager {
   }
 
   /**
+   * Was this node DELETED through this process (the × / `endSession('delete')`)? The public read of
+   * the same ledger `create()` consults, for the workspace store's local save rescue: a node the
+   * user closed must never be handed back by a rescue, however alive its backend still looks in the
+   * window between the kill and the probe. Answers false once the entry expires — degrading to the
+   * pre-tombstone behaviour, exactly like the respawn guard does.
+   */
+  wasDeleted(persistKey: string): boolean {
+    return !!this.liveTombstone(persistKey)
+  }
+
+  /**
    * Create or attach a node session without a renderer initiating the request.
    *
    * Client id 0 is reserved by both shells (ServerPlatform starts real websocket clients at 1;
@@ -4388,6 +4399,45 @@ export class PtyManager {
         : Promise.resolve([] as string[])
     const [tmux, host] = await Promise.all([tmuxSessions, hostSessions])
     return [...new Set([...tmux, ...host])]
+  }
+
+  /**
+   * Session name → that session's working directory, for every live pane on our socket.
+   *
+   * The one caller is boot/operator orphan ADOPTION (`src/core/orphan-adoption.ts`), which has a
+   * live `nt-<id>` session and no card and needs to know which project folder the pane is actually
+   * sitting in. Same socket, same `runAsync`, same "`[]`/empty on any error" contract as
+   * `listNodetermSessions` right above — one tmux dialect, in the manager that owns it.
+   *
+   * TAB-separated, not space-separated: `sessionName()` sanitises the name to `[A-Za-z0-9_-]` so
+   * the left field can never contain either, but a working directory legally contains spaces, and
+   * splitting a path on the first space would silently truncate it. The FIRST pane of a session
+   * wins — tmux emits panes in window/pane order, and a session's lead pane is the node's shell.
+   * A session-host backend has no equivalent listing, so a Windows-hosted session simply never
+   * appears here and is left alone (the safe degrade: no cwd, no adoption).
+   */
+  async listNodetermPaneCwds(): Promise<Map<string, string>> {
+    const out = new Map<string, string>()
+    if (!this.tmuxPath) return out
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'list-panes', '-a', '-F', '#{session_name}\t#{pane_current_path}'],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      for (const line of stdout.split('\n')) {
+        const tab = line.indexOf('\t')
+        if (tab <= 0) continue
+        const name = line.slice(0, tab)
+        const cwd = line.slice(tab + 1).replace(/\r$/, '')
+        if (!cwd || out.has(name)) continue
+        out.set(name, cwd)
+      }
+    } catch {
+      // No tmux server / no sessions / a wedged probe. A failed read is not evidence of absence:
+      // an empty map adopts nothing, which is the degrade that cannot invent a card.
+    }
+    return out
   }
 
   /**

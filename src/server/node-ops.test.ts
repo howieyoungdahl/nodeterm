@@ -1,3 +1,5 @@
+import path from 'path'
+
 import { describe, expect, it } from 'vitest'
 
 import type { AgentState } from '../shared/agents/normalize'
@@ -226,5 +228,136 @@ describe('ServerNodeOps', () => {
       expect.objectContaining({ id: 'child', position: { x: 112, y: 218 } })
     ])
     expect(h.workspace().projects[0].nodes[0].parentId).toBeUndefined()
+  })
+})
+
+/**
+ * Orphan adoption — the sweep's mirror image, on the same workspace FIFO. The plan itself is pinned
+ * in `src/core/orphan-adoption.test.ts`; what matters here is the WRITE: one save, the card in the
+ * right project, the live insertion, and the boot classification that keeps the adopted id
+ * attach-only.
+ */
+function adoptHarness(opts: {
+  nodes?: CanvasNodeState[]
+  sessions?: string[]
+  paneCwds?: Record<string, string>
+  wireListings?: boolean
+  publish?: boolean
+} = {}) {
+  const cwd = path.resolve(path.sep, 'srv', 'repo')
+  let workspace: Workspace = {
+    version: 2,
+    activeProjectId: 'p1',
+    projects: [
+      {
+        id: 'p1',
+        name: 'One',
+        color: '#0a84ff',
+        cwd,
+        viewport: { x: 0, y: 0, zoom: 1 },
+        nodes: opts.nodes ?? []
+      }
+    ]
+  }
+  const order: string[] = []
+  const upserts: Array<{ projectId: string; nodeId: string }> = []
+  const protectedIds: string[] = []
+  const listings = opts.wireListings === false
+    ? {}
+    : {
+        listSessions: async () => opts.sessions ?? [],
+        listPaneCwds: async () =>
+          new Map(Object.entries(opts.paneCwds ?? { 'nt-term-a': path.join(cwd, 'src') }))
+      }
+  const service = new ServerNodeOps({
+    workspaceStore: {
+      load: async () => structuredClone(workspace),
+      save: async (next) => {
+        order.push('save')
+        workspace = structuredClone(next)
+      }
+    },
+    sessionPresence: async () => 'dead',
+    destroySession: async () => undefined,
+    statusOf: () => undefined,
+    ownerOf: () => undefined,
+    ...listings,
+    mirrorOf: (id) => (id === 'term-a' ? { name: 'live agent', agentId: 'claude' } : undefined),
+    protectAdopted: async (ids) => {
+      order.push('protect')
+      protectedIds.push(...ids)
+    },
+    ...(opts.publish === false
+      ? {}
+      : {
+          publishNode: (projectId, adopted) => {
+            order.push('publish')
+            upserts.push({ projectId, nodeId: adopted.id })
+          }
+        })
+  })
+  return { service, cwd, order, upserts, protectedIds, workspace: () => workspace }
+}
+
+describe('ServerNodeOps.adoptOrphans', () => {
+  it('cards a live session with no node, publishes it live, and keeps it attach-only', async () => {
+    const h = adoptHarness({ sessions: ['nt-term-a'] })
+    const result = await h.service.adoptOrphans()
+
+    expect(result.adopted).toEqual([
+      {
+        id: 'term-a',
+        projectId: 'p1',
+        projectName: 'One',
+        title: 'live agent',
+        sessionName: 'nt-term-a'
+      }
+    ])
+    expect(result.skipped).toEqual([])
+    expect(result.live).toBe(true)
+    expect(h.workspace().projects[0].nodes.map((n) => n.id)).toEqual(['term-a'])
+    expect(h.upserts).toEqual([{ projectId: 'p1', nodeId: 'term-a' }])
+    // The id was not created during this Server run, so it takes the persisted-card classification.
+    expect(h.protectedIds).toEqual(['term-a'])
+    // …and only after the card is durable: classifying an id we then failed to persist would mark
+    // a node attach-only that no project has.
+    expect(h.order).toEqual(['save', 'protect', 'publish'])
+  })
+
+  it('writes nothing when every live session already has a card', async () => {
+    const h = adoptHarness({ nodes: [node('term-a')], sessions: ['nt-term-a'] })
+    await expect(h.service.adoptOrphans()).resolves.toEqual({ adopted: [], skipped: [], live: true })
+    expect(h.order).toEqual([])
+  })
+
+  it('reports a pane it could not place instead of guessing a project', async () => {
+    const h = adoptHarness({
+      sessions: ['nt-term-a'],
+      paneCwds: { 'nt-term-a': path.resolve(path.sep, 'elsewhere') }
+    })
+    const result = await h.service.adoptOrphans()
+    expect(result.adopted).toEqual([])
+    expect(result.skipped).toEqual([
+      {
+        id: 'term-a',
+        sessionName: 'nt-term-a',
+        cwd: path.resolve(path.sep, 'elsewhere'),
+        reason: 'unmatched-cwd'
+      }
+    ])
+    expect(h.order).toEqual([])
+  })
+
+  it('adopts nothing at all on a shell that wired no session listing', async () => {
+    const h = adoptHarness({ sessions: ['nt-term-a'], wireListings: false })
+    await expect(h.service.adoptOrphans()).resolves.toEqual({ adopted: [], skipped: [], live: true })
+    expect(h.order).toEqual([])
+  })
+
+  it('says the cards are not live when there is no insertion channel', async () => {
+    const h = adoptHarness({ sessions: ['nt-term-a'], publish: false })
+    const result = await h.service.adoptOrphans()
+    expect(result.adopted).toHaveLength(1)
+    expect(result.live).toBe(false)
   })
 })

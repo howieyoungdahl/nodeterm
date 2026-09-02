@@ -1,3 +1,8 @@
+import {
+  planOrphanAdoption,
+  type OrphanMirrorEntry,
+  type OrphanSkipReason
+} from '../core/orphan-adoption'
 import type { AgentState } from '../shared/agents/normalize'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
 import { WorkspaceMutationQueue } from './workspace-mutation-queue'
@@ -34,6 +39,24 @@ export interface ServerNodeOpsDeps {
   onRemoved?(nodeIds: readonly string[]): void
   publishProject?(project: Project): void
   publishRemoval?(projectId: string, nodeId: string): void
+  /** Live insertion of one adopted card into every attached browser (canvas-sync upsert). Absent
+   *  = no live channel, and `adoptOrphans` says so in its reply instead of implying one. */
+  publishNode?(projectId: string, node: CanvasNodeState): void
+  /** Live `nt-<id>` session names on this host (`PtyManager.listNodetermSessions`). Absent = the
+   *  shell wired no adoption; `adoptOrphans` then adopts nothing. */
+  listSessions?(): Promise<string[]>
+  /** Session name → pane cwd (`PtyManager.listNodetermPaneCwds`). */
+  listPaneCwds?(): Promise<Map<string, string>>
+  /** The agent-status mirror entry for a node id, for the recovered card's title/agent. */
+  mirrorOf?(nodeId: string): OrphanMirrorEntry | undefined
+  /**
+   * Put the just-adopted ids through the SAME boot classification a persisted card gets
+   * (`PtyManager.protectPersistedSessionsAtBoot`). An adopted id was not created during this Server
+   * run, so it must be attach-only: without this it has no `bootPersisted` entry and a browser that
+   * mounts after the session dies would fall through to attach-or-CREATE and hand the operator a
+   * fresh shell wearing a recovered card's name.
+   */
+  protectAdopted?(nodeIds: readonly string[]): Promise<unknown>
   now?: () => number
   mutationQueue?: WorkspaceMutationQueue
 }
@@ -42,6 +65,28 @@ export interface OpsSweepResult {
   dryRun: boolean
   affectedIds: string[]
   scanned: number
+}
+
+export interface OpsAdoptedNode {
+  id: string
+  projectId: string
+  projectName: string
+  title: string
+  sessionName: string
+}
+
+export interface OpsSkippedOrphan {
+  id: string
+  sessionName: string
+  cwd: string | null
+  reason: OrphanSkipReason
+}
+
+export interface OpsAdoptResult {
+  adopted: OpsAdoptedNode[]
+  skipped: OpsSkippedOrphan[]
+  /** Were the new cards pushed into attached browsers? False = the caller must reload to see them. */
+  live: boolean
 }
 
 export type OpsRemoveResult =
@@ -223,6 +268,77 @@ export class ServerNodeOps {
       }
       this.deps.onRemoved?.(affectedIds)
       return { dryRun, affectedIds, scanned }
+    })
+  }
+
+  /**
+   * The other half of dead-card hygiene: give a live `nt-<id>` session with no card a card again.
+   *
+   * Same engine for boot and for `POST /opsapi/adopt-orphans`, on the SAME workspace FIFO as the
+   * sweep — an adoption that raced a sweep's load/save pair could otherwise write back cards the
+   * sweep had just removed. The evidence rule is the sweep's, inverted: the sweep removes on two
+   * definite absences, this adds on one definite presence (a live session AND a pane cwd inside a
+   * project). It creates nothing, attaches to nothing, and types nothing — the browser reaches the
+   * pane through the ordinary attach-only path when the card mounts (see `protectAdopted`).
+   *
+   * A shell that wires no session listing adopts nothing, which is what makes this inert on the
+   * desktop and in every test that does not ask for it.
+   */
+  adoptOrphans(): Promise<OpsAdoptResult> {
+    return this.runExclusive(async () => {
+      const live = !!this.deps.publishNode
+      if (!this.deps.listSessions || !this.deps.listPaneCwds) {
+        return { adopted: [], skipped: [], live }
+      }
+      const [sessionNames, paneCwdBySession] = await Promise.all([
+        this.deps.listSessions(),
+        this.deps.listPaneCwds()
+      ])
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const plan = planOrphanAdoption({
+        projects: workspace.projects,
+        sessionNames,
+        paneCwdBySession,
+        mirror: this.deps.mirrorOf
+      })
+      const skipped = plan.skipped.map((entry) => ({
+        id: entry.nodeId,
+        sessionName: entry.sessionName,
+        cwd: entry.cwd,
+        reason: entry.reason
+      }))
+      if (!plan.adopt.length) return { adopted: [], skipped, live }
+
+      const touched = new Map<string, Project>()
+      for (const adoption of plan.adopt) {
+        const project = workspace.projects.find((candidate) => candidate.id === adoption.projectId)
+        // The plan was built from this very workspace object, so this cannot miss — but a plan is
+        // data and the write must not trust it blindly.
+        if (!project) continue
+        project.nodes.push(adoption.node)
+        touched.set(project.id, project)
+      }
+      const adopted = plan.adopt
+        .filter((adoption) => touched.has(adoption.projectId))
+        .map((adoption) => ({
+          id: adoption.node.id,
+          projectId: adoption.projectId,
+          projectName: adoption.projectName,
+          title: adoption.node.title,
+          sessionName: adoption.sessionName
+        }))
+      if (!adopted.length) return { adopted: [], skipped, live }
+
+      await this.deps.workspaceStore.save(workspace)
+      // Only AFTER the card is durable: classifying an id we then failed to persist would mark a
+      // node attach-only that no project has.
+      await this.deps.protectAdopted?.(adopted.map((entry) => entry.id)).catch(() => undefined)
+      for (const project of touched.values()) this.deps.publishProject?.(project)
+      for (const adoption of plan.adopt) {
+        if (!touched.has(adoption.projectId)) continue
+        this.deps.publishNode?.(adoption.projectId, adoption.node)
+      }
+      return { adopted, skipped, live }
     })
   }
 

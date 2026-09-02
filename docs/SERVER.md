@@ -276,6 +276,7 @@ ops_curl -X POST -H 'Content-Type: application/json' \
   --data '{"dryRun":true}' http://127.0.0.1:8443/opsapi/sweep
 ops_curl -X DELETE http://127.0.0.1:8443/opsapi/nodes/term-example
 ops_curl -X DELETE 'http://127.0.0.1:8443/opsapi/nodes/term-example?force=1'
+ops_curl -X POST http://127.0.0.1:8443/opsapi/adopt-orphans
 ops_curl http://127.0.0.1:8443/opsapi/health
 ```
 
@@ -295,6 +296,16 @@ The v1 contract is deliberately narrow:
   unreadable pane returns `503 pane_state_unknown`; `?force=1` is the explicit operator gate. A
   forced local terminal deletion confirms backend teardown before saving the card removal. Agents
   using this operator API by convention must never force a live or unknown target.
+- `POST /opsapi/adopt-orphans` takes no body and returns `{adopted, skipped, live}`. It is the
+  sweep's mirror image: it gives a card back to every live local `nt-<id>` tmux session that no
+  project still lists, placing each into the project whose folder is that pane's nearest ancestor.
+  `adopted` rows carry `id`, `projectId`, `projectName`, `title` and `sessionName`; `skipped` rows
+  carry `id`, `sessionName`, `cwd` and a `reason` (`unmatched-cwd`, `no-pane-cwd`, `unsafe-node-id`).
+  `live:false` adds a `note` telling the caller to reload, because no attached browser received the
+  insertion. It creates, attaches, kills and types nothing, never touches SSH projects, and runs on
+  the same workspace transaction queue as the sweep. Where the sweep needs two definitive absent
+  probes to REMOVE a card, this needs one definite presence — a live session and a pane cwd inside a
+  project — to ADD one; anything it cannot place is reported, never guessed at.
 - `GET /opsapi/health` returns boot time/uptime, attached WS client count, whether canvas control
   initialized, the non-blocking spawn handler snapshot (`idle`/`running`/`wedged`, oldest
   operation, age, active count, queue), per-target delivery queue depths, and the loaded project
@@ -635,6 +646,21 @@ session-host attach-existing), so even a backend that disappears between the boo
 mount cannot fall through to attach-or-create. Only node ids created during the current Server run
 may take the normal fresh-spawn path. Plain terminals carry no agent identity or canvas-control
 grant; missing `agentId` never means Claude.
+
+Immediately after that classification, boot runs the same orphan adoption the operator endpoint
+exposes. It lists live local `nt-<id>` sessions whose id no project still carries, resolves each
+pane's working directory, and appends a terminal card to the project whose folder is the pane's
+nearest ancestor — titled from the agent-status mirror when that knows the session, otherwise
+`Terminal (recovered)`. This is consistent with the inert-boot rule rather than an exception to it:
+adoption adds a CARD for a backend it has just proved exists and creates, attaches, kills and types
+nothing, and each adopted id then goes through the same boot classification, so the browser reaches
+the pane on mount through the attach-only path and a session that dies in between yields a dead card
+rather than a fresh shell. A pane whose directory matches no project is logged once and left alone.
+The repair exists because the card can be lost while the pane is fine: `workspace:save` is a
+whole-workspace, last-writer-wins write with no conflict machinery for local projects, so a client
+holding a stale node list silently deletes every card created since its snapshot. The store now
+refuses that — a node an incoming local save omits is kept when its backend is still live and it was
+not deleted here — and logs one line per save naming the ids and the browser that dropped them.
 
 Dead-card cleanup is not an agent creator-ownership exception. The separately authenticated
 operator endpoint `POST /opsapi/sweep` and the 30-minute periodic pass call the same

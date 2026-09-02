@@ -1,6 +1,11 @@
 import http from 'node:http'
 
-import type { OpsNodeInventoryItem, OpsRemoveResult, OpsSweepResult } from './node-ops'
+import type {
+  OpsAdoptResult,
+  OpsNodeInventoryItem,
+  OpsRemoveResult,
+  OpsSweepResult
+} from './node-ops'
 import { opsBearerMatches } from './ops-token'
 import type { SpawnHandlerSnapshot } from './spawn-handler-state'
 
@@ -21,6 +26,8 @@ export interface OpsApiDeps {
   nodes(): Promise<OpsNodeInventoryItem[]>
   sweep(dryRun: boolean): Promise<OpsSweepResult>
   remove(nodeId: string, force: boolean): Promise<OpsRemoveResult>
+  /** The sweep's mirror image: card a live `nt-<id>` session that no project still lists. */
+  adoptOrphans(): Promise<OpsAdoptResult>
   health(): OpsHealth | Promise<OpsHealth>
 }
 
@@ -155,6 +162,25 @@ export function createOpsApiHandler(
           return
         }
         sendJson(res, 200, await deps.sweep((body as { dryRun: boolean }).dryRun))
+        return
+      }
+
+      if (pathname === '/opsapi/adopt-orphans') {
+        if (method !== 'POST') {
+          res.setHeader('Allow', 'POST')
+          sendJson(res, 405, { error: 'method_not_allowed' })
+          return
+        }
+        // No body at all, and none accepted. There is nothing to parameterise: the routine adopts
+        // exactly the sessions it can prove live and place, and a dry-run flag would be a second
+        // code path over the same evidence for an operation that only ever ADDS a card.
+        const result = await deps.adoptOrphans()
+        sendJson(res, 200, {
+          ...result,
+          ...(result.live
+            ? {}
+            : { note: 'no attached browser received these live — reload to see them' })
+        })
         return
       }
 

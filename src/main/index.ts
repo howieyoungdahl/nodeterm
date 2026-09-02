@@ -470,7 +470,18 @@ const remoteWorkspaceIO = makeRemoteWorkspaceIO(
   // next save retries instead of believing the server file landed.
   (projectId) => workspaceStore.markUnmirrored(projectId)
 )
-const workspaceStore = new WorkspaceStore(remoteWorkspaceIO)
+// Both shells, same rescue. `workspace:save` is a whole-workspace last-writer-wins write and local
+// projects have no conflict machinery, so a stale saver silently deletes every card created since
+// its snapshot (2026-09-01: eight cards lost over four hours with every tmux session still alive).
+// The desktop is single-window today, so the stale-tab shape is rarer here — but the same store,
+// the same save, and the same tmux-backed notion of "live" (this IS the process that owns those
+// sessions), and a hydrate race or a crashed renderer's replay is the same loss. `sessionExists`
+// answers live-session-first and falls back to `tmux has-session`, answering TRUE on an unreadable
+// probe: a card kept by mistake is one click away, a card lost takes its session's address with it.
+const workspaceStore = new WorkspaceStore(remoteWorkspaceIO, {
+  hasLiveBackend: (nodeId) => ptyManager.sessionExists(nodeId),
+  wasDeleted: (nodeId) => ptyManager.wasDeleted(nodeId)
+})
 // Watch each local ref's project.json for outside edits (git pull, a teammate's commit).
 // Self-writes match the store's last-written cache and are ignored. Re-synced after every
 // store load/save via onPersist; disposed on quit next to ptyManager.killAll().

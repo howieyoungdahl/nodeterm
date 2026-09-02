@@ -50,7 +50,7 @@ import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
 import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
 import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
-import { ServerNodeOps } from './node-ops'
+import { ServerNodeOps, type OpsAdoptedNode } from './node-ops'
 import { ServerDeadCardReaper } from './dead-card-reaper'
 import { createOpsApiHandler } from './ops-api'
 import { loadOrCreateOpsToken, OPS_TOKEN_FILE } from './ops-token'
@@ -153,6 +153,17 @@ function readInstallMeta(dataDir: string): MirrorServer | undefined {
   }
 }
 
+/** One adoption log line per PROJECT, so an operator reads "which canvas got its cards back". */
+function groupByProject(adopted: readonly OpsAdoptedNode[]): Map<string, OpsAdoptedNode[]> {
+  const byProject = new Map<string, OpsAdoptedNode[]>()
+  for (const entry of adopted) {
+    const list = byProject.get(entry.projectName) ?? []
+    list.push(entry)
+    byProject.set(entry.projectName, list)
+  }
+  return byProject
+}
+
 /**
  * Boot the headless server: wires the CorePlatform (ServerPlatform) to auth + HTTP +
  * WebSocket, then constructs and registers the same core services the desktop main
@@ -200,7 +211,21 @@ export async function startServer(
   // Core services — same construction + registration order as src/main/index.ts.
   const settingsStore = new SettingsStore()
   const ptyManager = new PtyManager()
-  const workspaceStore = new WorkspaceStore()
+  // The local save rescue (WorkspaceStore.rescueOmittedLocalNodes). `workspace:save` is a whole-
+  // workspace last-writer-wins write and local projects have no conflict machinery, so one browser
+  // tab holding a stale node list can delete every card created since its snapshot — silently, and
+  // for every other tab. On 2026-09-01 that cost eight cards over four hours while all eleven tmux
+  // sessions kept running. These two predicates are what makes the store able to refuse: keep a
+  // node the save dropped when its backend is still there and nobody deleted it here.
+  const workspaceStore = new WorkspaceStore(undefined, {
+    // `sessionExists` is the warm-attach probe: it answers this process's own live sessions first
+    // and falls back to `tmux has-session nt-<id>` / the session host, and it deliberately answers
+    // TRUE on an unreadable probe. That fail-safe direction is the one we want here too — a card
+    // kept by mistake is one click to close, a card lost is gone with its session's address.
+    hasLiveBackend: (nodeId) => ptyManager.sessionExists(nodeId),
+    // The × / node deletion. A deletion must always travel: never rescue back what its owner closed.
+    wasDeleted: (nodeId) => ptyManager.wasDeleted(nodeId)
+  })
   // Creator ownership for canvas control, DURABLE across a restart (node-ownership-store.ts).
   // A server-authored 0600 file in our own dataDir is the same trust class as `node-tokens/` next
   // to it, so it may reassert who created a node where canvas state never could — the difference
@@ -469,6 +494,16 @@ export async function startServer(
     publishProject: (project) => platform.broadcast(IPC.workspaceExternalChange, project),
     publishRemoval: (projectId, nodeId) =>
       publishCanvasMutation(projectId, { op: 'remove', id: nodeId }),
+    // Orphan adoption's live insertion — the same upsert the headless factory publishes for a node
+    // it just created, so an adopted card appears in every open tab without a reload.
+    publishNode: (projectId, node) => publishCanvasMutation(projectId, { op: 'upsert', node }),
+    listSessions: () => ptyManager.listNodetermSessions(),
+    listPaneCwds: () => ptyManager.listNodetermPaneCwds(),
+    mirrorOf: (nodeId) => mirrorEntry(nodeId),
+    // The adopted id was NOT created during this Server run, so it takes the persisted-card
+    // classification, not the fresh-spawn path: `attach-session` only, dead card if the session
+    // vanishes. Same production function Server boot runs over the saved cards.
+    protectAdopted: (nodeIds) => ptyManager.protectPersistedSessionsAtBoot(nodeIds),
     mutationQueue: workspaceMutationQueue
   })
   const deadCardReaper = new ServerDeadCardReaper({
@@ -679,6 +714,34 @@ export async function startServer(
         `[nodeterm-server] marked ${protectedSessions.dead.length} persisted terminal card(s) dead; no backend was respawned`
       )
     }
+    // …and the mirror image of that classification: a live `nt-<id>` session that NO project has a
+    // card for gets one back. This is the repair for cards already lost to a stale client's save
+    // (the rescue above only stops new losses), and it is consistent with the inert-boot rule
+    // rather than an exception to it: adoption adds a CARD for a backend it just proved exists, and
+    // creates/attaches/sends nothing — the browser attaches on mount through the attach-only path,
+    // because `protectAdopted` puts every adopted id through the same boot classification.
+    try {
+      const adoption = await nodeOps.adoptOrphans()
+      for (const [projectName, entries] of groupByProject(adoption.adopted)) {
+        console.info(
+          `[nodeterm-server] adopted ${entries.length} orphaned live terminal(s) into ` +
+            `${projectName}: ${entries.map((entry) => entry.id).join(', ')}`
+        )
+      }
+      // Once, and named: an operator who sees a pane running and no card must be able to tell
+      // "we could not place it" from "we did not look".
+      if (adoption.skipped.length) {
+        console.info(
+          `[nodeterm-server] left ${adoption.skipped.length} orphaned live terminal(s) alone: ` +
+            adoption.skipped
+              .map((entry) => `${entry.sessionName} (${entry.reason}${entry.cwd ? ` ${entry.cwd}` : ''})`)
+              .join(', ')
+        )
+      }
+    } catch (error) {
+      // Never fatal: a boot that cannot adopt is the state every previous release shipped in.
+      console.warn('[nodeterm-server] orphan adoption failed', error)
+    }
   }
   deadCardReaper.start()
 
@@ -830,6 +893,7 @@ export async function startServer(
     nodes: () => nodeOps.list(),
     sweep: (dryRun) => nodeOps.sweep(dryRun),
     remove: (nodeId, force) => nodeOps.remove(nodeId, force),
+    adoptOrphans: () => nodeOps.adoptOrphans(),
     health: () => ({
       startedAt,
       uptimeMs: Math.max(0, Date.now() - startedAt),

@@ -41,6 +41,31 @@ export interface RemoteWorkspaceIO {
   writeSettings?(projectId: string, ssh: NonNullable<Project['ssh']>, content: string): Promise<boolean>
 }
 
+/**
+ * The two backend questions the LOCAL save rescue asks before it keeps a node an incoming save
+ * omitted. Injected (like `remoteIO`) so `src/core`'s store never reaches for a PtyManager, and
+ * defaulted to "no rescue" so every existing caller and test is unchanged.
+ *
+ * Both may answer asynchronously: `hasLiveBackend` is a `tmux has-session` probe on the shells
+ * that wire it. The store asks each omitted id AT MOST ONCE per save (see `probedBackends`), so
+ * the caller does not need a cache of its own.
+ */
+export interface WorkspaceBackendGuards {
+  /**
+   * Does a real backend still exist for this node id — a live session this process holds, or a
+   * surviving `nt-<id>` tmux session? Fail-safe direction, same as every other probe here: an
+   * UNREADABLE answer must say true, because a failed read is never evidence of absence and the
+   * cost of being wrong is a card the user can close versus a card they cannot get back.
+   */
+  hasLiveBackend(nodeId: string): boolean | Promise<boolean>
+  /**
+   * Was this node DELETED through this process (`PtyManager.endSession('delete')`'s tombstone)?
+   * The deletion must travel: the rescue may never hand back a terminal its owner closed, which
+   * is the same discriminator `clearedNodes` provides on the ssh side.
+   */
+  wasDeleted(nodeId: string): boolean | Promise<boolean>
+}
+
 const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PROJECT_FILE)
 
 /** Alias of the shared `ProjectSettingsSnapshot` (moved to `shared/project-settings.ts` so the
@@ -161,7 +186,12 @@ export class WorkspaceStore {
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
   onPersist?: () => void
 
-  constructor(private remoteIO?: RemoteWorkspaceIO) {}
+  constructor(
+    private remoteIO?: RemoteWorkspaceIO,
+    /** Defaults to "nothing is live, nothing was deleted", i.e. NO rescue: an existing caller or
+     *  test that wires neither predicate keeps the exact pre-rescue save behaviour. */
+    private backends: WorkspaceBackendGuards = { hasLiveBackend: () => false, wasDeleted: () => false }
+  ) {}
 
   private get indexPath(): string {
     return path.join(platform().userDataDir, 'workspace.json')
@@ -169,7 +199,11 @@ export class WorkspaceStore {
 
   registerIpc(): void {
     platform().handle(IPC.workspaceLoad, () => this.load())
-    platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
+    // handleWithSender, not handle: the save rescue's log line has to name WHICH client published
+    // the truncated node list. With N browser tabs on one Server there is otherwise no way to tell
+    // a stale tab from the one the user is looking at, and that was the whole diagnosis problem.
+    platform().handleWithSender(IPC.workspaceSave, (senderId: number, workspace: Workspace) =>
+      this.save(workspace, { client: `ui:${senderId}` }))
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
     platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
       typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
@@ -773,18 +807,76 @@ export class WorkspaceStore {
     }
   }
 
+  /**
+   * Keep the nodes a LOCAL save silently dropped while their backend is still running.
+   *
+   * `workspace:save` is a WHOLE-workspace, last-writer-wins write, and local projects have none of
+   * the conflict machinery the ssh path grew (`rescuableNodes` / `clearedNodes`). A client holding
+   * a stale node list therefore republishes it verbatim and every card created since its snapshot
+   * leaves the file, with no error anywhere. That is the 2026-09-01 loss: over four hours eight
+   * panes (four Claude sessions, four shells) disappeared from `project.json` while all eleven tmux
+   * sessions stayed alive, and the next Server restart reloaded the truncated file and rendered two
+   * terminals. The PANES were never at risk — only the cards that address them, which is what makes
+   * this recoverable at all (re-adding a node under its original id reattaches `nt-<id>`).
+   *
+   * The discriminator is the ssh rescue's, asked of the BACKEND instead of the server: a node the
+   * incoming save omits is kept only when it still has a live backend AND was not deleted through
+   * this process. A deletion must always travel, and a node whose session is definitively gone is
+   * an ordinary close. Both predicates default to "no rescue", so a shell that wires neither (the
+   * desktop today, every unit test) writes exactly what it was handed.
+   *
+   * Returns `candidate` itself when nothing is rescued, so the unchanged path allocates nothing.
+   */
+  private async rescueOmittedLocalNodes(
+    prev: ProjectFileV1,
+    candidate: ProjectFileV1,
+    client: string,
+    probed: Map<string, boolean>
+  ): Promise<ProjectFileV1> {
+    const incoming = new Set(candidate.nodes.map((n) => n.id))
+    const omitted = prev.nodes.filter((n) => !incoming.has(n.id))
+    if (!omitted.length) return candidate
+    const rescued: CanvasNodeState[] = []
+    for (const node of omitted) {
+      if (await this.backends.wasDeleted(node.id)) continue
+      let live = probed.get(node.id)
+      if (live === undefined) {
+        live = !!(await this.backends.hasLiveBackend(node.id))
+        probed.set(node.id, live)
+      }
+      if (live) rescued.push(node)
+    }
+    if (!rescued.length) return candidate
+    const nodes = [...candidate.nodes, ...rescued]
+    const present = new Set(nodes.map((n) => n.id))
+    // A rescued node whose frame the same save removed would carry a parentId nothing resolves —
+    // React Flow renders that as a lost child. Promote it to the canvas root instead: its position
+    // is then frame-relative and lands near the origin, which is visibly wrong but recoverable,
+    // and the alternative is the node being invisible again.
+    const reparented = nodes.map((n) => {
+      if (!n.parentId || present.has(n.parentId)) return n
+      const { parentId: _gone, ...root } = n
+      return root as CanvasNodeState
+    })
+    console.warn(
+      `[workspace] rescued ${rescued.length} node(s) with live backends that a save omitted: ` +
+        `${rescued.map((n) => n.id).join(', ')} (client ${client})`
+    )
+    return { ...candidate, nodes: reparented }
+  }
+
   /** In-flight save chain: saves run FIFO (same idiom as SpeechService.queue). Overlapping saves
    *  used to interleave their file writes and land their indexes out of call order — the "both
    *  projects went blank after tab switching" wipe. */
   private saveChain: Promise<unknown> = Promise.resolve()
 
-  save(workspace: Workspace): Promise<void> {
-    const run = this.saveChain.then(() => this.saveNow(workspace))
+  save(workspace: Workspace, opts?: { client?: string }): Promise<void> {
+    const run = this.saveChain.then(() => this.saveNow(workspace, opts?.client ?? 'internal'))
     this.saveChain = run.catch(() => {})
     return run
   }
 
-  private async saveNow(workspace: Workspace): Promise<void> {
+  private async saveNow(workspace: Workspace, client = 'internal'): Promise<void> {
     if (!workspace.projects.length && !this.index) {
       // A store that never read the index may not replace a populated one with "no projects":
       // that is the boot-save wipe — load() failed transiently, the renderer hydrated zero
@@ -849,20 +941,30 @@ export class WorkspaceStore {
     const projectIdForCwd = new Map(
       index.entries.filter((e) => e.cwd).map((e) => [e.cwd!, e.id] as const)
     )
+    // One probe per node id per save (the rescue's "cache the probe per save" — a node id can only
+    // reach the rescue once anyway, but two tabs on one folder can put the same id in two files).
+    const probedBackends = new Map<string, boolean>()
     for (const [cwd, candidate] of files) {
       const projectId = projectIdForCwd.get(cwd) ?? cwd
       const file = projectFilePath(cwd)
       const prev = this.lastWritten.get(file)
       const prevParsed = prev ? (JSON.parse(prev) as ProjectFileV1) : null
       if (prevParsed && sameProjectContent(prevParsed, candidate)) continue
-      if (!prevParsed && candidate.nodes.length === 0 && !(await this.emptyOrAbsentOnDisk(file))) {
+      // LOCAL projects only (`files` never holds an ssh project — splitWorkspace puts those in
+      // `cache`, which has its own rescue below).
+      const kept = prevParsed
+        ? await this.rescueOmittedLocalNodes(prevParsed, candidate, client, probedBackends)
+        : candidate
+      // The omission was the ONLY difference: nothing to write, and no rev to bump.
+      if (prevParsed && sameProjectContent(prevParsed, kept)) continue
+      if (!prevParsed && kept.nodes.length === 0 && !(await this.emptyOrAbsentOnDisk(file))) {
         // The local twin of the SSH "never blind-write a file we have not read" rule: an empty
         // canvas from a store that never read this file (setProjectFolder, migration, a hydrate
         // race) must not overwrite the populated — or corrupt-but-recoverable — only copy. The
         // disk stays authoritative; the next load returns its truth.
         continue
       }
-      const next: ProjectFileV1 = { ...candidate, rev: (this.revs.get(projectId) ?? 0) + 1 }
+      const next: ProjectFileV1 = { ...kept, rev: (this.revs.get(projectId) ?? 0) + 1 }
       const content = serializeProjectFile(next)
       try {
         await fs.mkdir(path.dirname(file), { recursive: true })

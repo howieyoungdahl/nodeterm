@@ -35,6 +35,7 @@ beforeEach(async () => {
       nodes: async () => [],
       sweep: async (dryRun) => ({ dryRun, affectedIds: [], scanned: 0 }),
       remove: async (id, force) => ({ ok: true, removedIds: [id], forced: force }),
+      adoptOrphans: async () => ({ adopted: [], skipped: [], live: false }),
       health: () => ({
         startedAt: 1,
         uptimeMs: 2,

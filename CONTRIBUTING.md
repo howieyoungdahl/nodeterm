@@ -142,7 +142,15 @@ mutations and message delivery validate every target before writing anything; mi
  named refusal. There is no agent ownership exception for global dead-card cleanup. The separately
 authenticated operator API and its periodic reaper share one engine; it skips SSH projects and
 removes a local terminal card only after two definitive absent-session probes. Failed or unreadable
-probes preserve it. Validate Server upgrades against a disposable data directory and port.
+probes preserve it. The same engine runs that rule BACKWARDS at boot and on `POST
+/opsapi/adopt-orphans`: a live `nt-<id>` session no project still lists gets a card again, in the
+project whose folder is its pane's nearest ancestor. That is not an inert-boot exception — it adds a
+card for a backend it just proved exists, creates and attaches and types nothing, and puts the
+adopted id through the very same boot classification, so it stays attach-only. It exists because
+`workspace:save` is a whole-workspace last-writer-wins write with NO conflict machinery for local
+projects: a client holding a stale node list deletes every card created since its snapshot, for
+everyone, with all the panes still running. `WorkspaceStore` now keeps an omitted node whose backend
+is live and that was not deleted here, and names the client that dropped it. Validate Server upgrades against a disposable data directory and port.
 Restarting a shared live service is an explicit operator action, never a test or an automatic
 repair step.
 

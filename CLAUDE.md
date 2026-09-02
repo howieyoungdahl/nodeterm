@@ -1342,6 +1342,34 @@ else, and its context links must keep classifying across restarts).
   `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
   node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
   identity never defaults to Claude.
+  **Orphan adoption is the mirror image of that classification, not an exception to it (2026-09):**
+  right after `protectPersistedSessionsAtBoot`, and on demand via `POST /opsapi/adopt-orphans`,
+  `ServerNodeOps.adoptOrphans` lists live `nt-<id>` tmux sessions whose id NO local project still
+  carries, resolves each pane's cwd (`list-panes -a`, through `PtyManager.listNodetermPaneCwds` —
+  one tmux dialect, in the manager that owns it) and appends a terminal card to the project whose
+  `cwd` is that pane's NEAREST ancestor. The planning is pure (`src/core/orphan-adoption.ts`): the
+  session list, pane cwds, workspace and agent-status mirror all arrive as data. It creates,
+  attaches, kills and types NOTHING — it adds a CARD for a backend it just proved exists, and every
+  adopted id is then run through `protectPersistedSessionsAtBoot` itself, so it is attach-only for
+  the rest of the run exactly like a persisted card. The evidence bar is the reaper's, inverted: the
+  reaper removes on two DEFINITE absences, adoption adds on one definite PRESENCE (a live session
+  AND a pane cwd inside a project); a pane whose cwd matches no project is logged once and left
+  alone, and an SSH project is never a target (local tmux says nothing about another host). This
+  exists because the card can be lost while the pane is fine — see the local save rescue below.
+  **Local save rescue (2026-09-01 incident):** `workspace:save` is a WHOLE-workspace,
+  last-writer-wins write and local projects have NO conflict machinery (the ssh path's
+  `rescuableNodes`/`clearedNodes` pair is the only one that exists). One client republishing a stale
+  node list therefore deletes every card created since its snapshot, silently, for every other
+  client — measured: eight cards (four Claude sessions, four shells) fell out of `project.json` over
+  four hours while all eleven tmux sessions kept running, and the next restart rendered two
+  terminals. `WorkspaceStore` now keeps a node an incoming LOCAL save omitted when
+  `hasLiveBackend(id)` is true AND `wasDeleted(id)` is false, logging one line per save with the ids
+  and the calling UI (`workspace:save` moved to `handleWithSender` for exactly that attribution).
+  Both predicates are injected (`WorkspaceBackendGuards`) and DEFAULT TO NO RESCUE, so core keeps no
+  PtyManager dependency; both shells wire `PtyManager.sessionExists` (true on an unreadable probe —
+  a card kept by mistake is one click, a card lost takes its session's address with it) and
+  `PtyManager.wasDeleted` (the × tombstone: a deletion must always travel). ssh projects never enter
+  this path — `splitWorkspace` puts them in `cache`, not `files`.
   **Creation liveness (2026-08 incident hardening):** the serialized section of
   `HeadlessNodeFactory.open` ends after the card is saved/published. PTY creation and initial-command
   delivery run outside it behind one 15s deadline, so an unresponsive tmux/session-host operation
