@@ -3842,6 +3842,21 @@ body,
   background: rgba(255, 159, 10, 0.18);
 }
 
+/* The whole-workspace save did not land. Red, not amber: the conflict bar asks a question, this
+   one reports that the canvas on screen is not the canvas on disk. */
+.save-failure-bar {
+  background: rgba(255, 69, 58, 0.15);
+  border-color: rgba(255, 69, 58, 0.45);
+}
+
+.save-failure-bar button {
+  border-color: rgba(255, 69, 58, 0.6);
+}
+
+.save-failure-bar button:hover {
+  background: rgba(255, 69, 58, 0.18);
+}
+
 /* Direct children only — the presence facepile's face buttons are nested inside .presence-facepile
    and must keep their own round, peer-colored styling, not the toolbar button chrome. */
 .controls-cluster > button {

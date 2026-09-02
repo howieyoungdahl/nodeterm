@@ -142,6 +142,12 @@ import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
 import {
+  autosaveDelay,
+  nextSaveDelivery,
+  type SaveDelivery
+} from '../lib/savePersistence'
+import { SaveFailureBar } from '../components/SaveFailureBar'
+import {
   adoptedNodesNotice,
   decideExternalChange,
   mergeIncomingNodes
@@ -875,6 +881,11 @@ export function Canvas() {
   // give the debounced-autosave effect a dependency that CHANGES in that case — `dirty` stays true
   // throughout, so without it the effect would never re-arm. Rare, so a re-render costs nothing.
   const [resaveTick, setResaveTick] = useState(0)
+  // What the last whole-workspace save did, when it did not land. `undefined` is the ordinary
+  // state. It is a dep of the autosave effect BECAUSE a refusal must re-arm the debounce: `dirty`
+  // never goes false on a failed save, so nothing else in that dep list can change and the timer
+  // would never be scheduled again (the 2026-09-02 silent freeze).
+  const [saveDelivery, setSaveDelivery] = useState<SaveDelivery | undefined>(undefined)
   // The active project's .nodeterm file changed on disk while we have unsaved local edits AND it
   // changed something we also hold (the user must pick a side for that half). `added` counts the
   // nodes that arrived with it and were already adopted onto the canvas — they are never part of
@@ -2068,8 +2079,13 @@ export function Canvas() {
       // persists the conversion, so the next load is a no-op.
       const projects = ws.projects.map(migrateProjectTags)
       useProjects.getState().hydrate({ ...ws, projects })
-      // Upgrade the on-disk format (e.g. v1 -> v2 migration) right away.
-      void api.workspace.save(useProjects.getState().toWorkspace())
+      // Upgrade the on-disk format (e.g. v1 -> v2 migration) right away. Reported like every
+      // other save: a `void` here used to make the very first write of the session the one write
+      // that could fail with no signal at all — including the format migration.
+      api.workspace.save(useProjects.getState().toWorkspace()).catch((err: unknown) => {
+        console.warn('[canvas] initial workspace save failed', err)
+        setSaveDelivery((prev) => nextSaveDelivery(prev, Date.now()))
+      })
     })
     return () => {
       cancelled = true
@@ -2383,7 +2399,20 @@ export function Canvas() {
     // takes seconds — and clearing `dirty` unconditionally afterwards marked edits made DURING the
     // await as saved, which let the watcher's not-dirty branch clobber them (field bug 2026-08-10).
     const gen = dirtyGenRef.current
-    await api.workspace.save(useProjects.getState().toWorkspace())
+    try {
+      await api.workspace.save(useProjects.getState().toWorkspace())
+    } catch (err) {
+      // The save was refused, or the socket carrying it closed (the ws bridge synthesises
+      // E_DISCONNECTED so an await fails rather than hanging). Both used to be thrown away by the
+      // `void persist()` that called us, and BOTH ended persistence for the life of the tab: with
+      // `dirty` still true, no dep of the autosave effect changes, so its 800 ms timer is never
+      // scheduled again. Record the refusal (it is a dep, so this re-arms the effect at the
+      // backoff delay) and let the strip say so. Never clear `dirty` — nothing reached disk.
+      console.warn('[canvas] workspace save failed', err)
+      setSaveDelivery((prev) => nextSaveDelivery(prev, Date.now()))
+      return
+    }
+    setSaveDelivery(undefined)
     if (canClearDirty(gen, dirtyGenRef.current)) {
       setDirty(false)
       return
@@ -2640,11 +2669,16 @@ export function Canvas() {
   // (overwrite the external disk version) before the user can choose. `conflict` is a dep so
   // resolving it (either button clears it) re-arms the save.
   useEffect(() => {
-    if (!dirty || conflict) return
-    const t = setTimeout(() => void persist(), 800)
+    // One rule, in `autosaveDelay`: null = do not arm (nothing to save, or the user owes a
+    // conflict decision), a number = wait that long. After a refused save it returns the BACKOFF
+    // delay rather than null, which is what turns a dead timer into a bounded retry.
+    const delay = autosaveDelay(dirty, !!conflict, saveDelivery)
+    if (delay === null) return
+    const t = setTimeout(() => void persist(), delay)
     return () => clearTimeout(t)
-    // `resaveTick` re-arms the timer after a save that could NOT clear dirty (an edit raced it).
-  }, [dirty, conflict, persist, resaveTick])
+    // `resaveTick` re-arms the timer after a save that could NOT clear dirty (an edit raced it);
+    // `saveDelivery` re-arms it after one that could not be written at all.
+  }, [dirty, conflict, persist, resaveTick, saveDelivery])
 
   // ---- remote canvas mirror (phone host side) ----
   // While phone access is on, push the serialized active-project canvas to main (debounced ~120ms)
@@ -12014,6 +12048,16 @@ export function Canvas() {
               ✕
             </button>
           </div>
+        )}
+        {saveDelivery && (
+          <SaveFailureBar
+            delivery={saveDelivery}
+            onRetry={() => {
+              // Clearing the delivery is the re-arm: it is a dep of the autosave effect, and with
+              // `dirty` still true the timer comes back at the ordinary debounce.
+              setSaveDelivery(undefined)
+            }}
+          />
         )}
         {conflict && (
           <ConflictBar

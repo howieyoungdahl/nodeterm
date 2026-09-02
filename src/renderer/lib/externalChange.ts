@@ -106,13 +106,21 @@ export function mergeIncomingNodes<T extends { id: string }>(current: T[], incom
 /** The conflict strip's sentence. Derived from what actually arrived so the bar cannot claim
  *  something vague while a real session sits on the canvas behind it. */
 export function conflictBarMessage(addedCount: number): string {
-  if (addedCount <= 0) return 'Project file changed on disk (git pull or another machine).'
+  // Every wording ends on the same clause, because the bar's most important fact is not what
+  // changed on disk — it is that the autosave is SUSPENDED until one of the two buttons is
+  // pressed, and stays suspended for as long as the bar is ignored. A user who read this strip as
+  // an FYI about someone else's git pull had no way to know their own canvas had stopped being
+  // written (the 2026-09-02 silent freeze: two and a half hours, eight unsaved cards).
+  const paused = ' Your canvas is not being saved until you choose.'
+  if (addedCount <= 0)
+    return 'Project file changed on disk (git pull or another machine).' + paused
   const s = addedCount === 1 ? '' : 's'
   const verb = addedCount === 1 ? 'was' : 'were'
   return (
     `${addedCount} new session${s} registered from another device (your phone, or another machine) ` +
     `${verb} added to this canvas. Other parts of the project file also changed on disk — ` +
-    `choose which version of those to keep.`
+    `choose which version of those to keep.` +
+    paused
   )
 }
 
