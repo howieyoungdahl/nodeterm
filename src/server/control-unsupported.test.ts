@@ -173,6 +173,8 @@ describe('the Server Edition wires it at boot', () => {
 
 describe('the enabled Server Edition handler parses and dispatches the v1 surface', () => {
   const actions = () => ({
+    list: vi.fn(async () => ({ ok: true as const, result: { nodes: [] } })),
+    board: vi.fn(async () => ({ ok: true as const, result: { columns: [], ungrouped: [] } })),
     openProject: vi.fn(async () => ({ ok: true as const, result: { projectId: 'project-loop' } })),
     openTerminal: vi.fn(async () => ({ ok: true as const, result: { id: 'term-new' } })),
     openAgent: vi.fn(async () => ({ ok: true as const, result: { id: 'agent-new' } })),
@@ -359,9 +361,47 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     })
   })
 
+  it('dispatches the two READ-ONLY verbs, which take no `verified` argument', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({ verb: 'list', nodeId: 'term-source', args: {}, verified: true })
+    ).resolves.toMatchObject({ ok: true })
+    await expect(
+      handler({ verb: 'board', nodeId: 'term-source', args: {}, verified: true })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.list).toHaveBeenCalledWith('term-source', {})
+    expect(a.board).toHaveBeenCalledWith('term-source', {})
+  })
+
+  it('still refuses the read-only verbs when creator identity is unverified', async () => {
+    // Server Edition's whole-edition rule is "every enabled request requires verified node
+    // identity", and the read verbs are not an exception to it — desktop's TOLERANT_CONTROL_VERBS
+    // tolerance for `list` exists for a legacy population this edition does not have.
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({ verb: 'list', nodeId: 'term-source', args: {}, verified: false })
+    ).resolves.toEqual({
+      ok: false,
+      error: 'list-identity-refused: Server Edition canvas control requires verified node identity'
+    })
+    await expect(
+      handler({ verb: 'board', nodeId: 'term-source', args: {}, verified: false })
+    ).resolves.toEqual({
+      ok: false,
+      error: 'board-identity-refused: Server Edition canvas control requires verified node identity'
+    })
+    expect(a.list).not.toHaveBeenCalled()
+    expect(a.board).not.toHaveBeenCalled()
+  })
+
   it('keeps every deferred or unknown verb a clean permanent edition refusal', async () => {
     const handler = createServerEditionControlHandler(actions())
-    for (const verb of ['list', 'browser', 'write', 'not-a-verb']) {
+    // `assign` is the deliberate near-miss: `board` reads the same model and is now supported,
+    // while writing a card into a column stays deferred. `list`/`board` are no longer in here —
+    // that removal is the whole point of the change and would be invisible without this note.
+    for (const verb of ['assign', 'browser', 'write', 'move', 'arrange', 'not-a-verb']) {
       const reply = await handler({ verb, nodeId: 'term-source', args: {}, verified: true })
       expect(reply, verb).toMatchObject({ ok: false, error: CONTROL_UNSUPPORTED_ERROR })
       expect(reply.message, verb).toContain('do not retry')

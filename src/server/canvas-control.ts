@@ -191,6 +191,10 @@ export async function initServerCanvasControl(
   messaging.queue = queue
 
   const actions: ServerEditionControlActions = {
+    // Read-only pair: no `verified` argument because they write nothing — the handler's shared
+    // identity gate still runs ahead of them, so an unverified caller never reaches here.
+    list: (sourceNodeId, args) => factory.list(sourceNodeId, args),
+    board: (sourceNodeId, args) => factory.board(sourceNodeId, args),
     openProject: (sourceNodeId, args, verified) =>
       factory.openProject(sourceNodeId, args, verified),
     openTerminal: (sourceNodeId, args, verified) =>

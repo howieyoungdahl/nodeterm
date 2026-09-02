@@ -64,6 +64,10 @@ export async function serverEditionControlHandler({ verb }: { verb: string }): P
 }
 
 export interface ServerEditionControlActions {
+  /** Read-only: every node of the caller's project. Takes no `verified` — see the handler note. */
+  list(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  /** Read-only: the caller's project as a kanban board. */
+  board(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
   openProject(
     sourceNodeId: string,
     args: Record<string, string>,
@@ -107,6 +111,10 @@ export interface ServerEditionControlActions {
 }
 
 const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
+  // The two READ-ONLY verbs. They act on nothing, so they are the only members of this set whose
+  // action takes no `verified` argument — the shared gate below still refuses them unverified.
+  'list',
+  'board',
   'open-project',
   'open-terminal',
   'open-agent',
@@ -156,6 +164,15 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
     // Creator ownership is meaningful only for an authenticated node identity. Keep this at the
     // Server boundary so every mutating/executing verb — including ones whose factory method has no
     // `verified` parameter — fails before it can inspect or change shared state.
+    //
+    // The two READ-ONLY verbs (`list`, `board`) deliberately take the same gate, even though the
+    // desktop's identity policy lists `list` as tolerant (TOLERANT_CONTROL_VERBS). Desktop's
+    // tolerance exists to keep a legacy client able to ORIENT itself; Server Edition has no legacy
+    // population to strand — canvas control here is opt-in, brand new, and documented as
+    // "every enabled request requires verified node identity" (docs/SERVER.md). Making the read
+    // verbs the first exception to a whole-edition rule would be a security-shaped change; the
+    // cost of not making it is that an unverified caller on this edition is told which verb it was
+    // (`list-identity-refused`) instead of getting a node dump.
     if (!verified) {
       return {
         ok: false,
@@ -164,6 +181,10 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
     }
 
     switch (command.verb) {
+      case 'list':
+        return actions.list(nodeId, command.args)
+      case 'board':
+        return actions.board(nodeId, command.args)
       case 'open-project':
         return actions.openProject(nodeId, command.args, verified)
       case 'open-terminal':

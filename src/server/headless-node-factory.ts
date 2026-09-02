@@ -41,6 +41,12 @@ import type {
   Settings,
   Workspace
 } from '../shared/types'
+import {
+  buildBoardView,
+  formatBoardMessage,
+  formatListMessage,
+  inventoryEntries
+} from './canvas-inventory'
 import { SpawnHandlerState, type SpawnHandlerSnapshot } from './spawn-handler-state'
 import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
@@ -737,6 +743,80 @@ export class HeadlessNodeFactory {
       }
     }
     return ids
+  }
+
+  /**
+   * Resolve the read-only verbs' one subject: the project that owns the CALLING node.
+   *
+   * Deliberately NOT inside `runExclusive`. Every other verb takes the workspace mutation lock
+   * because it writes; a read that queued behind a 15-second agent launch would make the cheapest
+   * verb in the surface the slowest one, and `list` is what an agent runs to orient itself when it
+   * suspects something is stuck. `WorkspaceStore.load` returns a fresh snapshot, so a read
+   * concurrent with a write sees either the before or the after state — never a torn one.
+   */
+  private async readOnlySource(
+    verb: string,
+    sourceNodeId: string,
+    args: Record<string, string>
+  ): Promise<{ project: Project; node: CanvasNodeState } | ServerControlReply> {
+    const flagError = unsupportedFlags(args, new Set())
+    if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
+    const workspace = await this.deps.workspaceStore.load({ sideline: false })
+    const source = sourceProject(workspace, sourceNodeId)
+    if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
+    if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      return { ok: false, error: 'source node is not a control-capable agent' }
+    }
+    return source
+  }
+
+  /**
+   * Every node of the caller's project. READ-ONLY, so the creator ledger is REPORTED
+   * (`opened-by-you`) rather than enforced: refusing to show a caller the nodes it did not open
+   * would leave an orchestrator that restarted unable to see the canvas it is standing on, for a
+   * disclosure the same caller could already get from `--after` refusals and its own project file.
+   * Verified node identity is still required — that gate is at the control-handler boundary and
+   * this verb takes it like every other one.
+   */
+  async list(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
+    const source = await this.readOnlySource('list', sourceNodeId, args)
+    if ('ok' in source) return source
+    const entries = inventoryEntries(source.project, {
+      stateOf: (nodeId) => this.deps.stateOf(nodeId),
+      agentIdOf: this.deps.agentIdOf,
+      openedByCaller: (nodeId) => this.ownsSpawn(sourceNodeId, nodeId)
+    })
+    return {
+      ok: true,
+      message: formatListMessage(source.project, sourceNodeId, entries),
+      result: {
+        project: { id: source.project.id, name: source.project.name },
+        caller: sourceNodeId,
+        nodes: entries
+      }
+    }
+  }
+
+  /**
+   * The caller's project as a kanban board. The board file stores only column ASSIGNMENTS — the
+   * cards are the canvas session nodes, derived live — so this reads `project.kanban` (which the
+   * Server's own workspace files already round-trip) and never writes it. `assign` is not
+   * implemented on this edition, so a project with no board on disk gets the virtual Ungrouped
+   * column and a line saying so, rather than the renderer's lazy default columns.
+   */
+  async board(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
+    const source = await this.readOnlySource('board', sourceNodeId, args)
+    if ('ok' in source) return source
+    const view = buildBoardView(source.project)
+    return {
+      ok: true,
+      message: formatBoardMessage(source.project, sourceNodeId, view),
+      result: {
+        project: { id: source.project.id, name: source.project.name },
+        columns: view.columns,
+        ungrouped: view.ungrouped
+      }
+    }
   }
 
   async openTerminal(

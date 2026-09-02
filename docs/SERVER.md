@@ -606,6 +606,35 @@ Server canvas control is disabled by default. Set `NODETERM_SERVER_CANVAS_CONTRO
 `--canvas-control`) to install the Server-local shim and enable its `/control/*` implementation.
 Every enabled request requires verified node identity.
 
+#### The read-only pair: `list` and `board`
+
+`list` and `board` are the only v1 verbs that write nothing, and the only ones whose subject has to
+be *defined* rather than observed: the desktop answers both against the canvas the user is looking
+at, and this edition has no current view. Both therefore act on **the project that owns the calling
+node**, and both say so in a header line — an unqualified node list would be a claim with no
+subject.
+
+- `list` prints desktop's `<id> [<kind>] <title>` line plus a `|`-separated tail carrying
+  `group=` (the parent group frame id), `agent=`, `status=` and `opened-by-you=`. `status` is the
+  agent-status mirror's own vocabulary (`working` / `waiting` / `blocked` / `done`), `unknown` for
+  an agent node the mirror has never seen, and `-` for a node that runs no agent — "could not
+  measure" and "does not apply" must not render the same way. `opened-by-you` is the creator
+  ledger, **reported, not enforced**: a read that hid the nodes a caller did not open would leave a
+  restarted orchestrator unable to see the canvas it is standing on.
+- `board` reads the project's persisted `kanban` assignments and derives its cards from the canvas
+  live, exactly as the desktop board does (terminal / sticky / browser nodes are cards; frames and
+  editors are not). A project whose file carries no board gets one virtual `Ungrouped` column and a
+  line saying Server Edition v1 has no columns yet — the renderer's lazy default three columns are
+  deliberately *not* invented here, because their ids would exist nowhere and `assign` is not
+  implemented on this edition.
+
+Both take the same verified-node-identity gate as every other enabled verb. Desktop's identity
+policy lists `list` as tolerant (`TOLERANT_CONTROL_VERBS`) so a legacy client can still orient
+itself; this edition has no legacy population to strand, and "every enabled request requires
+verified node identity" stays a whole-edition rule with no exceptions. Neither read takes the
+workspace mutation lock: `list` is what an agent runs when it suspects a spawn is stuck, and
+queueing it behind that spawn would make the diagnosis wait on the thing being diagnosed.
+
 Ownership is intentionally narrower than the desktop confirmation UI: an agent may mutate, message,
 or close only a node it opened through this Server. Link, group, rename, resize, color,
 sticky updates, dependency targets, message delivery, and close validate their complete target set
