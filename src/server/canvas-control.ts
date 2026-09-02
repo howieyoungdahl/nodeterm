@@ -212,8 +212,9 @@ export async function initServerCanvasControl(
     deliver: async (input) => (await deliverFromControl(input, messaging)).reply
   }
 
-  // Boot deliberately performs no canvas/session adoption. Creator proof is process-local and a
-  // restart clears it, so an owner request or browser view is the only cold-spawn authority.
+  // Boot deliberately performs no canvas/session adoption, and durable creator proof does not
+  // change that: the ledger says who may act on a node, never that something should run unasked.
+  // An owner request or a browser view is still the only cold-spawn authority.
   await factory.start()
 
   return {

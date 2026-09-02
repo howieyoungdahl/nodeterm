@@ -132,3 +132,102 @@ describe('creator ownership survives a Server restart', () => {
     }
   })
 })
+
+/**
+ * The FIELD configuration, which the suite above does not cover: canvas control ON.
+ *
+ * `config.canvasControl === true` is the only thing that gives `startServer` a `canvasControl` to
+ * stop, and the live Server Edition unit sets `NODETERM_SERVER_CANVAS_CONTROL=1`. Without it the
+ * shutdown path above never reaches `HeadlessNodeFactory.stop()`, which is exactly why a green
+ * restart suite coexisted with a live restart that came back with `{"v":1,"owners":{}}` and every
+ * `list` row reading `opened-by-you=no` (2026-09-02).
+ */
+describe('creator ownership survives a canvas-control shutdown', () => {
+  let dataDir = ''
+  let close: (() => Promise<void>) | undefined
+
+  const ledgerFile = (): string => path.join(dataDir, 'node-ownership.json')
+
+  beforeAll(async () => {
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-ownership-shutdown-'))
+    const workspace: Workspace = {
+      version: 2,
+      activeProjectId: 'ownership-project',
+      projects: [
+        {
+          id: 'ownership-project',
+          name: 'Ownership shutdown',
+          color: '#0a84ff',
+          cwd: dataDir,
+          viewport: { x: 0, y: 0, zoom: 1 },
+          nodes: [
+            {
+              id: 'source',
+              kind: 'terminal',
+              position: { x: 0, y: 0 },
+              size: { width: 640, height: 440 },
+              title: 'Director',
+              color: '#d97757',
+              group: null,
+              agentId: 'claude'
+            },
+            {
+              id: 'n-child',
+              kind: 'terminal',
+              position: { x: 700, y: 0 },
+              size: { width: 640, height: 440 },
+              title: 'Child it spawned',
+              color: '#d97757',
+              group: null,
+              agentId: 'claude'
+            }
+          ],
+          bridges: [],
+          ropes: []
+        }
+      ]
+    }
+    fs.writeFileSync(path.join(dataDir, 'workspace.json'), JSON.stringify(workspace), 'utf8')
+    fs.writeFileSync(
+      ledgerFile(),
+      JSON.stringify({
+        v: 1,
+        owners: {
+          'n-child': { sourceNodeId: 'source', projectId: 'ownership-project', recordedAt: 1 }
+        }
+      }),
+      { encoding: 'utf8', mode: 0o600 }
+    )
+
+    const server = await startServer({
+      port: 0,
+      host: '127.0.0.1',
+      dataDir,
+      rendererDir: path.join(dataDir, 'no-renderer'),
+      insecureHttp: false,
+      passwordSeed: 'ownership-shutdown-e2e-password',
+      installHooks: false,
+      headless: false,
+      canvasControl: true
+    })
+    close = server.close
+  }, 30_000)
+
+  afterAll(async () => {
+    await close?.()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  it('keeps the grant across a shutdown that stops canvas control and then flushes', async () => {
+    await close?.()
+    close = undefined
+    const doc = JSON.parse(fs.readFileSync(ledgerFile(), 'utf8')) as {
+      v: number
+      owners: Record<string, unknown>
+    }
+    // Before the fix this read `{}`: `canvasControl.stop()` cleared the ledger and the flush that
+    // follows it — the one meant to land the last grant — published the emptied map.
+    expect(Object.keys(doc.owners)).toEqual(['n-child'])
+    expect(doc.v).toBe(1)
+  })
+})

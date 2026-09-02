@@ -24,6 +24,7 @@ import {
   type HeadlessNodeOwnership,
   type HeadlessPty
 } from './headless-node-factory'
+import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
 import { SpawnHandlerState } from './spawn-handler-state'
 
 class FakePty implements HeadlessPty {
@@ -1457,4 +1458,35 @@ describe('HeadlessNodeFactory', () => {
     expect(reply).toMatchObject({ ok: false, error: expect.stringContaining('claude|codex|gemini') })
     expect(pty.creates).toEqual([])
   })
+
+  /**
+   * Regression, from the field (2026-09-02): a `systemctl restart` of Server Edition came back with
+   * `node-ownership.json` holding `{"v":1,"owners":{}}` and every `list` row reading
+   * `opened-by-you=no`, even though the nodes and their tmux backends were all still there.
+   *
+   * The shutdown, not the boot, is what emptied it. `server/index.ts` close() runs
+   * `canvasControl?.stop()` — which lands here — and only THEN `nodeOwnership.flush()`, the call
+   * whose comment says it exists to "land the last grant". With a durable ledger wired in, a
+   * `clear()` in `stop()` turns that flush into the write that revokes everything.
+   *
+   * `clear()` itself is fine and stays: it is the explicit "revoke every grant" primitive, proved
+   * in node-ownership-store.test.ts. Shutdown is simply not a revocation.
+   */
+  it('stop() leaves a durable ledger intact, so the shutdown flush lands grants instead of erasing them', async () => {
+    const ledgerFile = path.join(dataDir, 'node-ownership.json')
+    const durable = createPersistentHeadlessNodeOwnership(ledgerFile)
+    durable.record('term-owned', { sourceNodeId: 'term-source', projectId: 'project-1' })
+    const shuttingDown = new HeadlessNodeFactory({ ...factoryDeps, ownership: durable })
+
+    // The Server shell's exact shutdown order.
+    shuttingDown.stop()
+    await durable.flush()
+
+    // A fresh store over the same bytes IS the next boot.
+    expect(createPersistentHeadlessNodeOwnership(ledgerFile).ownerOf('term-owned')).toMatchObject({
+      sourceNodeId: 'term-source',
+      projectId: 'project-1'
+    })
+  })
+
 })

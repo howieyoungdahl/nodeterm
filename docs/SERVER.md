@@ -665,6 +665,15 @@ not evidence of absence. A missing, unreadable, or wrong-shaped file yields an E
 unknown ownership still fails closed — and each id is re-validated against the same `isSafeNodeId`
 predicate the node-token derivation uses. Delete the file to revoke every grant.
 
+**Shutting the Server down is not a revocation.** Its stop path stops canvas control and then
+flushes the ledger, precisely so a grant recorded inside the 300 ms debounce still lands, which
+means nothing on that path may empty the map first. A `clear()` in `HeadlessNodeFactory.stop()`
+did, and turned that flush into the write that published `{"v":1,"owners":{}}`: after the
+2026-09-02 service restart every `list` row read `opened-by-you=no` while the nodes and their
+tmux backends were all still alive, and the ledger's mtime sat in the SIGTERM second rather than
+the boot second. `HeadlessNodeOwnership.clear()` remains the explicit revoke-everything
+primitive; only an operator action or a node's removal may reach it.
+
 Durable ownership grants no additional spawn authority, and the headless factory still performs no
 session adoption or persisted queued-command delivery (the delivery queue is in memory only).
 Before the HTTP listener opens, Server

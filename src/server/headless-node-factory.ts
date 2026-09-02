@@ -1719,9 +1719,11 @@ export class HeadlessNodeFactory {
   }
 
   /**
-   * Boot is intentionally inert. Creator proof is process-local and empty after restart, so even
-   * sending a persisted command would control a session this process cannot attribute. Owner opens
-   * and browser views are the only cold-spawn authority; current-run agent events drive arms below.
+   * Boot is intentionally inert, and stays inert now that creator proof SURVIVES a restart
+   * (node-ownership-store.ts). The ledger answers "who may act on this node", never "what should
+   * run without anyone asking": a persisted `pendingLaunch` is canvas data, so replaying one at
+   * boot would let a hand-edited project file drive a shell. Owner opens and browser views remain
+   * the only cold-spawn authority; current-run agent events drive arms below.
    */
   start(): Promise<void> {
     return Promise.resolve()
@@ -1818,12 +1820,28 @@ export class HeadlessNodeFactory {
     this.retryTimers.set(nodeId, timer)
   }
 
+  /**
+   * Shutdown, NOT revocation.
+   *
+   * Everything dropped here is process-local scratch — in-flight launch bookkeeping, retry timers,
+   * and the per-run project grant cache. The creator ledger is deliberately NOT among them, and
+   * `this.ownership.clear()` used to be: harmless while ownership lived only in a Map that died
+   * with the process, and destructive the moment the Server shell started injecting the DURABLE
+   * store (`createPersistentHeadlessNodeOwnership`). `server/index.ts` close() runs
+   * `canvasControl?.stop()` — i.e. this method — and only then `nodeOwnership.flush()`, the call
+   * that exists to "land the last grant"; a clear in between turned that flush into the write that
+   * published `{"v":1,"owners":{}}`. Field symptom (2026-09-02): a service restart came back with
+   * every `list` row reading `opened-by-you=no` while the nodes and their tmux backends were all
+   * still alive, and the ledger's own mtime sat in the SIGTERM second, not the boot second.
+   *
+   * `HeadlessNodeOwnership.clear()` stays on the interface as the explicit "revoke every grant"
+   * primitive (and stays covered in node-ownership-store.test.ts). Stopping is simply not one.
+   */
   stop(): void {
     this.stopped = true
     for (const id of this.launchesInFlight) this.cancelledLaunches.add(id)
     for (const timer of this.retryTimers.values()) (this.deps.clearSchedule ?? clearTimeout)(timer)
     this.retryTimers.clear()
-    this.ownership.clear()
     this.projectGrants.clear()
   }
 }
