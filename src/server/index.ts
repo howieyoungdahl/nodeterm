@@ -491,7 +491,11 @@ export async function startServer(
       for (const nodeId of nodeIds) clearNode(nodeId)
       canvasControl?.forgetNodes(nodeIds)
     },
-    publishProject: (project) => platform.broadcast(IPC.workspaceExternalChange, project),
+    // Same reasoning as the headless factory's publishProject (see server/canvas-control.ts): a
+    // dead-card sweep, an operator removal and boot orphan adoption are all writes THIS core made
+    // and already persisted, so they must not travel the outside-edit channel and end up behind
+    // the Reload/Keep-mine bar. The renderer three-way merges `workspace:server-change` instead.
+    publishProject: (project) => platform.broadcast(IPC.workspaceServerChange, project),
     publishRemoval: (projectId, nodeId) =>
       publishCanvasMutation(projectId, { op: 'remove', id: nodeId }),
     // Orphan adoption's live insertion — the same upsert the headless factory publishes for a node
