@@ -121,6 +121,11 @@ bug.
 different facts and must stay distinguishable at every layer. Collapsing them is how a panel ends up
 reporting "no sessions" on a host running thirty.
 
+Browser-server updates must build in isolated release worktrees and preserve tmux. The optional
+updater waits for all browser clients to disconnect, verifies exact pane ids/PIDs and saved cards,
+and rolls back failed activation. Never replace those checks with an HTTP-only health check.
+See `docs/server-auto-updates.md` for the deployment contract and its remaining connection race.
+
 **Degrade to nothing, never to something wrong.** A probe that fails means the bare, safe command —
 never a substituted nearest match. A hand-editable value that is unrecognised must yield the safe
 default, never something more destructive than the default.
