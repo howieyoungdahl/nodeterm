@@ -41,9 +41,20 @@ export type ProjectLayoutRulesBlock = ProjectLayoutRules & CanvasLayoutRules
  * appearance keys are excluded exactly as the appearance sanitizer excludes them — a window edge or
  * a reduced-motion choice must never travel in the shared file, however it got into the block.
  */
-function sanitizeLayoutRulesBlock(value: unknown): ProjectLayoutRulesBlock | undefined {
-  const layout = sanitizeCanvasLayoutRules(value)
-  const appearance = sanitizeProjectLayoutRules(value)
+export function sanitizeLayoutRulesBlock(value: unknown): ProjectLayoutRulesBlock | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  // A build that had ONLY the layout half nested every foreign key under `unknown`. Lift that bag
+  // back to the top level before either half reads, or `appearance` stays somewhere the appearance
+  // reader does not look and the border rules read as absent. A real top-level key outranks the bag.
+  const bag =
+    raw.unknown && typeof raw.unknown === 'object' && !Array.isArray(raw.unknown)
+      ? (raw.unknown as Record<string, unknown>)
+      : {}
+  const flat: Record<string, unknown> = { ...bag, ...raw }
+  delete flat.unknown
+  const layout = sanitizeCanvasLayoutRules(flat)
+  const appearance = sanitizeProjectLayoutRules(flat)
   if (!layout && !appearance) return undefined
   const out: Record<string, unknown> = {}
   for (const [key, v] of Object.entries(layout?.unknown ?? {})) {
