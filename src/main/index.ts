@@ -171,6 +171,7 @@ import { createSessionReaper } from '../core/session-budget'
 import { initKeepAwake } from './keep-awake'
 import type { KeepAwakeTracker } from '../core/keep-awake'
 import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
+import { registerNodeStatusIpc } from '../core/node-status-service'
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { registerPtmxLimitHandler } from './ptmx-limit'
@@ -2427,6 +2428,10 @@ app.whenReady().then(async () => {
   // boot but only ever pushes on a live event, so without this the canvas showed every pane idle
   // after a restart. Registered in both shells (see src/server/index.ts) from one core body.
   registerAgentStatusSnapshotIpc()
+  // The one input that may produce a `failed` badge: prove whether a node's tmux/session-host
+  // backend is still there. Same primitive the operator API's dead-card sweep uses, double-checked
+  // in core before it answers `dead`. Registered in both shells (see src/server/index.ts).
+  registerNodeStatusIpc({ panePresence: (nodeId) => ptyManager.sessionPresence(nodeId) })
   // Phone→host read-acks (this feature, the other direction): the phone drops
   // `~/.nodeterm/acks/<nodeId>.seen` on the SESSION host when it READS a finished session. For each
   // ack: `ackDone` (mirror resolves the done event → phone Inbox archives it + the paired phone's

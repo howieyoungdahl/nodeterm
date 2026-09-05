@@ -339,3 +339,56 @@ describe('observed Claude account persistence (a plain terminal knows it nowhere
     expect(useAgentStatus.getState().byId).toBe(before)
   })
 })
+
+describe('the status surface never reaches disk (plan decision D4)', () => {
+  // The whole point of deriving status at render time is that a fact changing every few seconds
+  // has no write path to project.json OR to localStorage — that is what keeps status churn from
+  // re-raising the Reload/Keep-mine conflict bar, and what stops a relaunch from restoring an
+  // accusation (`failed`) about a pane that has since been re-adopted.
+  it('persists neither the reason, the ask kind, the pane evidence nor a latched failure', async () => {
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    const s = useAgentStatus.getState()
+    // `unread` forces the entry into the saved map, so the absence below is about the fields.
+    s.setState('n1', 'working', 'claude', true, undefined, true, {
+      reason: 'Allow Bash(rm -rf /)?',
+      askKind: 'approval'
+    })
+    s.setPaneEvidence({ n1: 'dead' })
+    s.markFailed('n1', 111, 'session gone')
+    s.markUnread('n1')
+
+    const saved = JSON.parse(store.getItem('nodeterm.agentStatus')!)
+    expect(saved.n1).toBeDefined()
+    expect(saved.n1.reason).toBeUndefined()
+    expect(saved.n1.askKind).toBeUndefined()
+    expect(saved.n1.pane).toBeUndefined()
+    expect(saved.n1.failure).toBeUndefined()
+    // And nothing restores them either.
+    expect(JSON.stringify(saved)).not.toContain('rm -rf')
+  })
+
+  it('a relaunch comes back with no failure and no reason, whatever is on disk', async () => {
+    const seeded = memStorage({
+      'nodeterm.agentStatus': JSON.stringify({
+        n1: {
+          unread: true,
+          agentId: 'claude',
+          reason: 'forged',
+          askKind: 'approval',
+          pane: 'dead',
+          failure: { at: 1, from: 'working' }
+        }
+      })
+    })
+    vi.stubGlobal('localStorage', seeded)
+    const { useAgentStatus } = await import('./agentStatus')
+    const entry = useAgentStatus.getState().byId.n1
+    expect(entry).toMatchObject({ unread: true, agentId: 'claude' })
+    expect(entry.reason).toBeUndefined()
+    expect(entry.askKind).toBeUndefined()
+    expect(entry.pane).toBeUndefined()
+    expect(entry.failure).toBeUndefined()
+  })
+})

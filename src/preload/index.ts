@@ -753,6 +753,7 @@ const api: NodeTerminalApi = {
     return () => ipcRenderer.removeListener(IPC.agentUnreadClear, handler)
   },
   agentStatusSnapshot: () => ipcRenderer.invoke(IPC.agentStatusSnapshot),
+  nodePaneEvidence: (nodeIds: string[]) => ipcRenderer.invoke(IPC.nodeStatusPanes, nodeIds),
   onAgentStatus: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentStatus, handler)

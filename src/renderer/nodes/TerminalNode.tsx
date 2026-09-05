@@ -138,6 +138,8 @@ import { renameCommand } from '../lib/sessionRename'
 import { useSettings } from '../state/settings'
 import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
+import { NodeStatusBadge } from './NodeStatusBadge'
+import { statusViewFor } from '../lib/nodeStatusView'
 import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
@@ -185,7 +187,6 @@ import { matchesShortcut } from '@shared/shortcut'
 import { hintLabel, isWindowsPlatform, isMacPlatform } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
-import { AgentMascot } from './AgentMascot'
 import { MaximizeButton } from './MaximizeButton'
 import { CompactButton } from './CompactButton'
 import { connectHostAttachment } from '../lib/sshAttachments'
@@ -1443,6 +1444,12 @@ export function TerminalNode({
     !remoteSession &&
     (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
+  // The node's own glow (`working` / `attention`), off the same derivation the badge shows. No
+  // clock subscription here on purpose: the class is a coarse cue and this component already
+  // re-renders on every status change, so the one transition a clock would add — a stale
+  // `working` we could not verify becoming `unknown` — simply lands on the next render. The BADGE
+  // owns the ticker (NodeStatusBadge), and only for the nodes that show one.
+  const statusView = statusViewFor(status, Date.now())
   /**
    * Which Claude account this node is ACTUALLY on (D5). `data.accountId` is what nodeterm launched
    * it as and is immutable; `status.account` is what the session's hooks reported — the only
@@ -4454,8 +4461,12 @@ export function TerminalNode({
     <div
       className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}${
         isUnread ? ' unread' : ''
-      }${status?.state === 'working' ? ' working' : ''}${
-        status?.state === 'waiting' || status?.state === 'blocked' ? ' attention' : ''
+      }${statusView.kind === 'working' ? ' working' : ''}${
+        statusView.kind === 'waiting' ||
+        statusView.kind === 'blocked' ||
+        statusView.kind === 'failed'
+          ? ' attention'
+          : ''
       }${glyphMounted ? ' term-node--glyphgrid' : ''}${focused ? ' term-node--focused' : ''}`}
       ref={rootRef}
       style={{ borderTopColor: data.color }}
@@ -4610,11 +4621,15 @@ export function TerminalNode({
         {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
         {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
         <PresenceChips nodeId={id} />
-        {status?.state === 'working' && (
-          <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
-            <AgentMascot agentId={agentId} />
-            RUNNING
-          </span>
+        {/* ONE badge for the whole state model — working / waiting / blocked / failed / completed
+            / unknown, with the freshness of the fact beside it and a stale mark past the window.
+            It replaces the old RUNNING and NEEDS YOU chips rather than sitting next to them: one
+            session must not describe itself in two voices, and NEEDS YOU could not tell an
+            approval from a question. `unknown` is rendered as a word, so a hook-capable node this
+            surface has heard nothing about says so instead of looking idle. See
+            shared/node-status.ts; nothing here is written to disk (plan decision D4). */}
+        {showStatus && (
+          <NodeStatusBadge nodeId={id} agentId={agentId} agentLabel={agentLabel} />
         )}
         {/* Eco: this node's CLI was exited to reclaim its RAM while nobody was looking. The tmux
             session, the pane and the scrollback are untouched — only the process is gone — and
@@ -4670,15 +4685,6 @@ export function TerminalNode({
             >
               ▶
             </button>
-          </span>
-        )}
-        {(status?.state === 'waiting' || status?.state === 'blocked') && (
-          <span
-            className="term-node__status term-node__status--attention"
-            title={`${agentLabel} needs your input`}
-          >
-            <span className="term-node__status-dot" />
-            NEEDS YOU
           </span>
         )}
         {/* Deterministic hook-reply approvals (docs/hook-reply-approvals.md): when the node is

@@ -1,10 +1,21 @@
-import { useEffect, useRef, useState } from 'react'
-import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { NodeResizer, useReactFlow, useStore, type NodeProps } from '@xyflow/react'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import { NODE_COLORS, ungroupNodes, type CanvasNode } from '../state/workspace'
 import { useProjects } from '../state/projects'
 import { useWorktrees, WORKTREE_STATUS_POLL_MS } from '../state/worktrees'
 import { useProjectSetup } from '../state/projectSetup'
+import { useAgentStatus } from '../state/agentStatus'
+import { GroupStatusBadge } from '../components/StatusBadge'
+import {
+  rollUpFromSignature,
+  rollUpSignature,
+  statusMembersOf,
+  statusViewFor,
+  type RollUpNodeInput
+} from '../lib/nodeStatusView'
+import { useStatusNow } from '../lib/statusClock'
+import { rollUpNodeStatus } from '@shared/node-status'
 
 export type WorktreeAction = 'merge' | 'remove' | 'unbind' | 'rerun-setup'
 
@@ -52,6 +63,47 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // mistaken for "nothing is happening".
   const setupPending = useProjectSetup((s) => (s.pendingByGroup[id] ?? 0) > 0)
   const setupBusy = setupPending || setupRun?.state === 'running'
+
+  // ── The frame's rolled-up status ────────────────────────────────────────────────────────────
+  // The requirement this exists for: approvals and failures stay discoverable when the sessions
+  // holding them are put away. A worker frame ships collapsed and its members are compact, so the
+  // label pill is often the only thing on screen that can say "two of these are blocked".
+  //
+  // Two selectors, both returning primitives, because both stores churn: React Flow's on every
+  // drag frame and the status table's on every hook event anywhere on the canvas. The first
+  // answers WHICH nodes are in this frame, the second WHAT they add up to.
+  const memberKey = useStore((st) => {
+    const nodes: RollUpNodeInput[] = []
+    for (const n of st.nodeLookup.values()) {
+      // Only parented nodes can be members, and this selector re-runs on every React Flow store
+      // change (once per drag frame), so the root-level majority is skipped before it allocates.
+      if (!n.parentId) continue
+      nodes.push({
+        id: n.id,
+        type: n.type,
+        parentId: n.parentId,
+        agentId: (n.data as { agentId?: RollUpNodeInput['agentId'] } | undefined)?.agentId
+      })
+    }
+    return statusMembersOf(id, nodes)
+      .map((m) => m.id)
+      .sort()
+      .join('|')
+  })
+  const memberIds = useMemo(() => (memberKey ? memberKey.split('|') : []), [memberKey])
+  const statusNow = useStatusNow()
+  const rollUp = rollUpFromSignature(
+    useAgentStatus((st) =>
+      rollUpSignature(
+        rollUpNodeStatus(
+          memberIds.map((mid) => ({
+            id: mid,
+            kind: statusViewFor(st.byId[mid], statusNow).kind
+          }))
+        )
+      )
+    )
+  )
 
   // On an SSH project the poll is OFF, not merely useless: `git status <path>` would be answered by
   // the LOCAL filesystem for a project whose checkout lives on the host (remote git routing is
@@ -190,6 +242,7 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
           spellCheck={false}
           onChange={(e) => updateNodeData(id, { title: e.target.value })}
         />
+        {rollUp && <GroupStatusBadge rollUp={rollUp} />}
         {wt && (
           <div className="group-node__wt nodrag">
             {stale ? (

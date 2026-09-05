@@ -51,7 +51,8 @@ import {
   type TranscriptLine,
   type Workspace,
   type WorkspaceApi,
-  AgentStatusSnapshot
+  AgentStatusSnapshot,
+  type PaneEvidence
 } from '../../shared/types'
 import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
@@ -634,6 +635,7 @@ export function buildAgentApi(
   NodeTerminalApi,
   | 'onAgentStatus'
   | 'agentStatusSnapshot'
+  | 'nodePaneEvidence'
   | 'onSubagentActivity'
   | 'onUnreadClear'
   | 'answerPermission'
@@ -643,6 +645,13 @@ export function buildAgentApi(
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
     agentStatusSnapshot: () =>
       client.request(IPC.agentStatusSnapshot) as Promise<AgentStatusSnapshot>,
+    // REAL over the bridge, not a stub: this is the only input to the `failed` badge, and a stub
+    // would answer nothing forever — leaving every browser-side status stuck on a stale `working`
+    // that reads as healthy. The Server Edition runs ON the host whose panes these are, and a
+    // relay tab's nodes live on the remote core it is talking to, so in both cases the core that
+    // owns the sessions is the one being asked. See shared/node-status.ts.
+    nodePaneEvidence: (nodeIds) =>
+      client.request(IPC.nodeStatusPanes, nodeIds) as Promise<Record<string, PaneEvidence>>,
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>

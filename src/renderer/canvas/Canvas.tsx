@@ -314,6 +314,7 @@ import {
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { seedAgentStatusFromHost } from '../lib/seedAgentStatus'
+import { runFailureProbe } from '../lib/failureProbe'
 import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useCodexIdentity, codexFallbackText } from '../state/codexIdentity'
@@ -10465,7 +10466,14 @@ export function Canvas() {
           // `e.verified` is the identity evidence for this very transition (hook-server labels it);
           // it was in scope here and dropped on the floor before the store had a field for it.
           if (e.state && !stuckRescueSkip)
-            cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId, e.verified)
+            // `lastMessage` / `askKind` are the reason the badge shows for "why does this need
+            // me?" — both already ride every broadcast event (the mirror enriches askKind in
+            // `recordAgentEvent`), and both were dropped on the floor here before the store had
+            // fields for them. Transient: they describe this edge, nothing else.
+            cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId, e.verified, {
+              reason: e.lastMessage,
+              askKind: e.askKind
+            })
           if (e.newTurn) an.clearForParent(e.nodeId) // genuine new turn → drop the previous fan-out
           if (e.newTurn && e.task) {
             // Prompt-prefix fallback for /loop|/schedule|/cron when the natural-language
@@ -10570,6 +10578,56 @@ export function Canvas() {
     const t = setInterval(() => useAgentStatus.getState().sweepStaleWorking(), 60_000)
     return () => clearInterval(t)
   }, [])
+
+  /**
+   * The one input that can turn a badge into `failed`: ask the core that owns these sessions
+   * whether the pane behind a node that has gone quiet is actually still there.
+   *
+   * It is not a poll of the canvas. `paneProbeCandidates` picks only `working` entries whose
+   * freshness has passed the window, so a canvas of healthy agents makes zero calls, and a node
+   * that is merely mid-Bash is never asked about. The answer is double-checked in core before it
+   * says `dead`, and an inconclusive answer is recorded as inconclusive — which is what makes the
+   * badge say `unknown` instead of a stale `WORKING` that reads as healthy.
+   *
+   * Nothing here is authority (plan D8): it reads, and it writes two transient display fields.
+   */
+  useEffect(() => {
+    let inFlight = false
+    let disposed = false
+    const probe = typeof api.nodePaneEvidence === 'function'
+      ? (ids: string[]) => api.nodePaneEvidence(ids)
+      : undefined
+    const pass = async (): Promise<void> => {
+      if (inFlight || disposed) return
+      inFlight = true
+      try {
+        const cs = useAgentStatus.getState()
+        await runFailureProbe({
+          entries: () =>
+            Object.entries(useAgentStatus.getState().byId).map(([id, v]) => ({
+              id,
+              state: v.state,
+              updatedAt: v.stateAt,
+              failed: !!v.failure
+            })),
+          probe,
+          setPaneEvidence: cs.setPaneEvidence,
+          markFailed: cs.markFailed
+        })
+      } catch {
+        // A probe pass is a display refinement; it never breaks the canvas, and it never leaves an
+        // unhandled rejection behind (it is fired with `void`).
+      } finally {
+        inFlight = false
+      }
+    }
+    void pass()
+    const t = setInterval(() => void pass(), 60_000)
+    return () => {
+      disposed = true
+      clearInterval(t)
+    }
+  }, [api])
 
   /**
    * ECO — hibernate idle, offscreen agent CLIs (`settings.agentHibernationEnabled`, off by

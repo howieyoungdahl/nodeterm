@@ -133,6 +133,12 @@ export const IPC = {
   canvasTrackpadGesture: 'canvas:trackpad-gesture',
   agentStatus: 'agent:status',
   agentStatusSnapshot: 'agent-status:snapshot',
+  /** Renderer → main/server: prove whether the tmux/session-host backend behind each of these node
+   *  ids is still there. Payload: `string[]` of node ids; resolves `Record<string, PaneEvidence>`.
+   *  The ONLY input to the `failed` status (shared/node-status.ts) — a shell with no prober answers
+   *  `unknown` for every id, never `dead`. Registered in both shells from one core body
+   *  (`core/node-status-service.ts`). */
+  nodeStatusPanes: 'node-status:panes',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
    *  docs/hook-reply-approvals.md. */

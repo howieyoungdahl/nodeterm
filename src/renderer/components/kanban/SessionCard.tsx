@@ -5,6 +5,9 @@ import { AccountChip, useAccountChip } from '../AccountChip'
 import { ContextMeter } from '../ContextMeter'
 import { LabelChips } from './LabelChips'
 import type { KanbanSession } from './KanbanView'
+import type { AgentId } from '@shared/agents/config'
+import { NodeStatusBadge } from '../../nodes/NodeStatusBadge'
+import { showsStatus } from '../../lib/nodeStatusView'
 
 const PRIO_COLOR: Record<KanbanPriority, string> = {
   low: '#8e8e93',
@@ -54,16 +57,16 @@ export const SessionCard = memo(function SessionCard({
   }
   // The board is the canvas's other view of the same sessions, and it reads the same store — so
   // SLEEPING (Eco: the agent CLI was exited to reclaim its RAM) is one more branch here, not a
-  // follow-up. Ranked last: a hibernated node is idle by definition, so `working`/`waiting` can
-  // only mean the wake already landed and the hooks are ahead of the flag.
-  const badge =
-    session.kind !== 'sticky' && status?.state === 'working'
-      ? 'running'
-      : session.kind !== 'sticky' && (status?.state === 'waiting' || status?.state === 'blocked')
-        ? 'needs'
-        : session.kind !== 'sticky' && status?.hibernated
-          ? 'sleeping'
-          : null
+  // follow-up. It is no longer ranked against the live state: Eco is a fact about the CLI process,
+  // not a state, and the two now sit side by side exactly as they do on the node header. A live
+  // state still clears the flag in the store, so RUNNING+SLEEPING cannot both stand.
+  const badge = session.kind !== 'sticky' && status?.hibernated ? 'sleeping' : null
+  // The board is the canvas's other view of the same node, so it shows the SAME status badge from
+  // the same model — glyph, word, freshness and the stale mark (CONTRIBUTING: a session seen twice
+  // must not speak in two voices). It replaces the card's own RUNNING / NEEDS YOU pair, which
+  // could not say `failed`, could not say `unknown`, and carried no freshness at all. Compact: the
+  // reason stays in the tooltip, because a card row is not a node header.
+  const showStatus = showsStatus({ type: session.kind, agentId: session.agentId as AgentId })
   const stickyPreview = session.kind === 'sticky' ? (session.text ?? '').trim() : ''
   const assignees = meta?.assignees ?? []
   const due = meta?.dueAt
@@ -114,8 +117,9 @@ export const SessionCard = memo(function SessionCard({
         <span className="kanban-card__title">{session.title}</span>
         {session.kind === 'sticky' && <span className="kanban-card__kind">note</span>}
         {session.kind === 'browser' && <span className="kanban-card__kind">web</span>}
-        {badge === 'running' && <span className="kanban-badge kanban-badge--running">RUNNING</span>}
-        {badge === 'needs' && <span className="kanban-badge kanban-badge--needs">NEEDS YOU</span>}
+        {showStatus && (
+          <NodeStatusBadge nodeId={session.id} agentId={session.agentId as AgentId} compact />
+        )}
         {badge === 'sleeping' && (
           <span
             className="kanban-badge kanban-badge--sleeping"
