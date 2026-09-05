@@ -2,12 +2,16 @@
 // the sessions, and record what came back.
 //
 // It is deliberately small and deliberately lazy. A pane probe is a tmux round trip per node (two
-// for a dead one), so this asks about exactly the nodes where the answer could change the badge —
-// a `working` state whose freshness has passed the window (`paneProbeCandidates`). A canvas of
-// twenty healthy agents produces zero probes.
+// for a dead one), so this asks about exactly the nodes where the answer could change the badge.
+// A canvas of twenty healthy agents produces zero probes.
 //
 // Three rules a refactor must not undo:
 //
+//  0. **Only a state a dead pane could change, and not too often.** `paneProbeCandidates` picks a
+//     `FAILABLE_STATES` entry past the freshness window whose pane has not been asked about within
+//     `PANE_RECHECK_MS`. That bound matters more since `waiting`/`blocked` joined: unlike
+//     `working`, they never decay out of the candidate set on their own, so an overnight parked
+//     approval would otherwise be probed on every pass until it was answered.
 //  1. **`unknown` is recorded, not swallowed.** A shell with no prober, a stub, a rejected call and
 //     an unreadable tmux all answer `'unknown'`, and that answer is written to the store — which is
 //     what turns a stale `working` we cannot verify into the WORD `unknown` instead of a badge that
@@ -26,6 +30,8 @@ export interface FailureProbeEntry {
   state?: AgentState
   /** When the state was last asserted — the store's `stateAt`. */
   updatedAt?: number
+  /** When this node's pane was last probed — the store's `paneAt`; drives the re-check interval. */
+  paneAt?: number
   failed?: boolean
 }
 

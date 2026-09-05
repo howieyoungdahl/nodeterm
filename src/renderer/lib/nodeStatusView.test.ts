@@ -50,6 +50,28 @@ describe('statusViewFor', () => {
     expect(statusViewFor(status, NOW).kind).toBe('failed')
   })
 
+  it('renders a blocked node whose pane is proven dead as failed', () => {
+    const status: AgentNodeStatus = {
+      unread: false,
+      state: 'blocked',
+      stateAt: NOW - 600_000,
+      pane: 'dead'
+    }
+    const v = statusViewFor(status, NOW)
+    expect(v.kind).toBe('failed')
+    expect(v.detail).toContain('can no longer be answered')
+  })
+
+  it('renders a finished node whose pane is proven dead as completed', () => {
+    const status: AgentNodeStatus = {
+      unread: false,
+      state: 'done',
+      stateAt: NOW - 600_000,
+      pane: 'dead'
+    }
+    expect(statusViewFor(status, NOW).kind).toBe('completed')
+  })
+
   it('renders a stale working we could not verify as unknown', () => {
     const status: AgentNodeStatus = {
       unread: false,

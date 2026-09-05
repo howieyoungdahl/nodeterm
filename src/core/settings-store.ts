@@ -9,6 +9,7 @@ import {
   DEFAULT_SETTINGS,
   type Settings,
 } from "../shared/types";
+import { sanitizeAppearanceSettings } from "../shared/appearance";
 
 /**
  * Merge a possibly-partial/legacy `Settings` object over `DEFAULT_SETTINGS`. A plain
@@ -68,6 +69,15 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   // every other value are evidence of a user choice and survive. The marker makes a post-migration
   // choice of 10 permanent too. tmuxScrollback deliberately stays at 50k — tmux owns that history
   // outside the renderer process, while xterm has its own much smaller cap.
+  // Visual preferences are hand-editable and end up in CSS custom properties, so what comes back
+  // out of settings.json is input, not state we wrote (same stance as `sanitizeProjectLayoutRules`
+  // for the shared half). An unusable block becomes ABSENT rather than empty: absent is precisely
+  // "built-in defaults", i.e. the look of the release before the setting existed. Deliberately not
+  // a one-level spread like `speech` above — `appearance` has no entry in DEFAULT_SETTINGS to
+  // merge over, because every one of its fields means "inherit" when it is missing.
+  const appearance = sanitizeAppearanceSettings(saved?.appearance);
+  if (appearance) merged.appearance = appearance;
+  else delete merged.appearance;
   applyRendererMemoryPolicyMigration(saved, merged);
   // Legacy `terminalGpuRendering` was a boolean whose default (true) was merged into every saved
   // file — so a stored `true` is indistinguishable from "never touched" and maps to the new

@@ -2,6 +2,7 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState } from '@shared/agents/normalize'
+import { FAILABLE_STATES } from '@shared/node-status'
 import type { NodeFailureFact, PaneEvidence } from '@shared/node-status'
 import type { AgentStatusSnapshot, NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
 
@@ -148,6 +149,13 @@ export interface AgentNodeStatus {
    */
   pane?: PaneEvidence
   /**
+   * When `pane` was last written. Not rendered — it is what stops a parked approval from being
+   * re-probed on every pass (`paneProbeCandidates` / `PANE_RECHECK_MS`): a `blocked` state never
+   * decays out of the candidate set on its own, unlike `working`. Refreshed in place on a repeat
+   * answer, exactly like `stateAt`, so a re-confirmation costs no re-render.
+   */
+  paneAt?: number
+  /**
    * A PROVEN failure: this node was `working` and its terminal session was then proven gone
    * (`shared/node-status.ts`, decision D3 of the auto-organizer plan). Never a guess — the only
    * writer is `markFailed`, which is only ever called with a double-checked `dead` answer from
@@ -235,10 +243,12 @@ export interface AgentStatusStore {
     evidence?: StateEvidence
   ): void
   /**
-   * Latch a PROVEN failure (see `failure`). Refuses unless the node is `working` right now: the
-   * probe that produced the proof is asynchronous, so eligibility is re-asked at write time rather
-   * than trusted from when the probe was planned — the same fire-time re-ask rule agent
-   * hibernation uses. Writes nothing to localStorage.
+   * Latch a PROVEN failure (see `failure`). Refuses unless the node is in a `FAILABLE_STATES` state
+   * right now: the probe that produced the proof is asynchronous, so eligibility is re-asked at
+   * write time rather than trusted from when the probe was planned — the same fire-time re-ask rule
+   * agent hibernation uses. A node that finished (`done`) in the meantime is never failed. The
+   * state that was standing is recorded on the fact, because it is what the badge's tooltip
+   * explains. Writes nothing to localStorage.
    */
   markFailed(id: string, at: number, reason?: string): void
   /** Record what a pane probe proved, per node id (see `pane`). Writes nothing to localStorage. */
@@ -493,6 +503,7 @@ export function createAgentStatusSession(
             // Same reason as on the transition path: this node just spoke, so whatever an earlier
             // probe concluded about its pane is superseded.
             s.byId[id].pane = undefined
+            s.byId[id].paneAt = undefined
           }
           return s
         }
@@ -553,8 +564,10 @@ export function createAgentStatusSession(
         // the same self-heal `hibernated` gets below, and the only way out of `failed`. `done` is
         // deliberately included: a turn that ENDED is also proof the pane was there to end it.
         if (state && prev.failure) next.failure = undefined
-        // A hook event is fresher than any probe, so the probe's answer is dropped with it.
+        // A hook event is fresher than any probe, so the probe's answer is dropped with it — and
+        // its re-check clock with it, so a node that just spoke is asked again on the next pass.
         next.pane = undefined
+        next.paneAt = undefined
         if (alive && prev.hibernated) {
           next.hibernated = undefined
           next.hibernatedPane = undefined // goes with the flag, always
@@ -569,6 +582,7 @@ export function createAgentStatusSession(
 
     setPaneEvidence: (evidence) =>
       set((s) => {
+        const now = Date.now()
         let changed = false
         const byId = { ...s.byId }
         for (const [id, pane] of Object.entries(evidence)) {
@@ -576,8 +590,15 @@ export function createAgentStatusSession(
           // Only for nodes the table already knows: a probe answer for a node with no status entry
           // has nothing to qualify, and inventing an entry would put an UNKNOWN badge on a node
           // this store has never heard of.
-          if (!prev || prev.pane === pane) continue
-          byId[id] = { ...prev, pane }
+          if (!prev) continue
+          if (prev.pane === pane) {
+            // Same answer as last time: stamp the re-check clock in place. It is never rendered,
+            // and allocating here would re-render the badge on every confirmation that nothing
+            // changed — the same reasoning as `stateAt` on the same-state fast path.
+            prev.paneAt = now
+            continue
+          }
+          byId[id] = { ...prev, pane, paneAt: now }
           changed = true
         }
         return changed ? { byId } : s
@@ -589,10 +610,15 @@ export function createAgentStatusSession(
         // FIRE-TIME RE-ASK, not a plan-time verdict. Between planning the probe and its answer the
         // node may have posted a new turn, been answered, or finished — and a `failed` badge on a
         // node that is demonstrably running is the expensive error this whole derivation is
-        // careful about (plan §8). `working` is the only state a failure may be derived from.
-        if (prev?.state !== 'working') return s
+        // careful about (plan §8). `done` is refused here for the same reason it is refused in
+        // `resolveKind`: a session that finished and then had its terminal closed is a tidied-up
+        // success, and re-asking at write time is what catches the one that finished DURING the
+        // probe.
+        if (!prev?.state || !FAILABLE_STATES.has(prev.state)) return s
         if (prev.failure) return s
-        return { byId: { ...s.byId, [id]: { ...prev, failure: { at, from: 'working', reason } } } }
+        return {
+          byId: { ...s.byId, [id]: { ...prev, failure: { at, from: prev.state, reason } } }
+        }
       }),
 
     sweepStaleWorking: (staleMs = STALE_WORKING_MS) =>

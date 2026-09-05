@@ -281,8 +281,10 @@ assembly without starting an externally visible provider session.
 
 **A node's status is read, never inferred from what its terminal looks like.** The six states
 (`shared/node-status.ts`) have exactly two sources: the hook-fed agent-status mirror for
-`working / waiting / blocked / completed`, and a PROVEN session fact — the last hook state was
-`working` and `PtyManager.sessionPresence` says the pane is gone, double-checked — for `failed`.
+`working / waiting / blocked / completed`, and a PROVEN session fact — the last hook state was one
+of those three live ones and `PtyManager.sessionPresence` says the pane is gone, double-checked —
+for `failed`. A finished (`done`) session whose terminal was then closed stays `completed`; that is
+the only state a dead pane does not change.
 Everything else is `unknown`, and `unknown` is a word on the badge, never an empty header: a state
 you cannot establish must say so rather than read as idle. Three consequences worth knowing before
 you touch it: nothing status-derived is written to disk (that is what keeps status churn from

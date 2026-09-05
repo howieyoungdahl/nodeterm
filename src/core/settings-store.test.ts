@@ -396,3 +396,98 @@ describe('settings:save atomic write', () => {
     expect(mode).toBe(0o600)
   })
 })
+
+/**
+ * Persistent visual preferences, machine-local half (@shared/appearance).
+ *
+ * This is the D5 persistence claim at its own boundary: what the Settings UI hands `settings.save`
+ * has to be exactly what a NEW store (a restarted app) reads back. A second `SettingsStore` over
+ * the same directory is that restart — the cache is not shared, so the assertions below are really
+ * about the bytes on disk.
+ */
+describe('SettingsStore appearance persistence', () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'nodeterm-settings-appearance-'))
+    initPlatform(fakePlatform({ userDataDir: dir }))
+  })
+
+  afterEach(() => {
+    resetPlatformForTests()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const appearance = {
+    windowEdge: { color: '#7aa2f7', thickness: 3, glow: true },
+    node: { color: '#bb9af7' },
+    group: { thickness: 2 },
+    reducedMotion: true,
+    effectsOff: true
+  }
+
+  it('survives a save and a restart unchanged', async () => {
+    const first = new SettingsStore()
+    first.init()
+    await first.save({ ...DEFAULT_SETTINGS, appearance } as Settings)
+
+    const restarted = new SettingsStore()
+    restarted.init()
+    expect(restarted.get().appearance).toEqual(appearance)
+  })
+
+  // Absent is not the same as empty: it means "built-in defaults", i.e. the exact look of the
+  // release before this setting existed. An install that never opens the section must keep writing
+  // a settings.json with no appearance key at all.
+  it('stays absent for an install that never configured it', async () => {
+    const store = new SettingsStore()
+    store.init()
+    await store.save({ ...DEFAULT_SETTINGS } as Settings)
+    expect(store.get().appearance).toBeUndefined()
+    const onDisk = JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf-8'))
+    expect('appearance' in onDisk).toBe(false)
+  })
+
+  // Clearing the section (SectionReset writes the key as undefined) must REMOVE it, not persist an
+  // empty object that later reads as "configured".
+  it('clearing the section removes the key rather than storing an empty block', async () => {
+    const store = new SettingsStore()
+    store.init()
+    await store.save({ ...DEFAULT_SETTINGS, appearance } as Settings)
+    await store.save({ ...DEFAULT_SETTINGS, appearance: undefined } as Settings)
+    expect(store.get().appearance).toBeUndefined()
+
+    const restarted = new SettingsStore()
+    restarted.init()
+    expect(restarted.get().appearance).toBeUndefined()
+  })
+
+  // settings.json is hand-editable and these values reach CSS custom properties, so what comes
+  // back out of it is input. A bad field degrades to the built-in default; its valid siblings live.
+  it('degrades a hand-edited hostile value without losing the valid fields beside it', () => {
+    writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({
+        appearance: {
+          windowEdge: { color: 'red;background:url(//x)', thickness: 999 },
+          reducedMotion: 'yes',
+          effectsOff: true,
+          someFutureKey: { color: '#000000' }
+        }
+      }),
+      'utf-8'
+    )
+    const store = new SettingsStore()
+    store.init()
+    // Colour refused (not a hex literal); thickness clamped to the cap rather than dropped — a
+    // mis-typed 999 is an intent to have a thick border; `'yes'` is not `true`; unknown key gone.
+    expect(store.get().appearance).toEqual({ windowEdge: { thickness: 8 }, effectsOff: true })
+  })
+
+  it('a settings.json whose whole appearance block is unusable reads as absent, not empty', () => {
+    writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ appearance: [1, 2, 3] }), 'utf-8')
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().appearance).toBeUndefined()
+  })
+})

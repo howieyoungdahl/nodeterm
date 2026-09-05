@@ -63,6 +63,18 @@ describe('pane evidence', () => {
     expect(useAgentStatus.getState().byId['never-seen']).toBeUndefined()
   })
 
+  it('stamps the re-check clock, and refreshes it on a repeat answer', () => {
+    const id = nid()
+    const s = useAgentStatus.getState()
+    s.setState(id, 'blocked', 'claude', false)
+    s.setPaneEvidence({ [id]: 'alive' })
+    const first = useAgentStatus.getState().byId[id].paneAt
+    expect(first).toBeGreaterThan(0)
+    vi.advanceTimersByTime(1000)
+    s.setPaneEvidence({ [id]: 'alive' })
+    expect(useAgentStatus.getState().byId[id].paneAt).toBeGreaterThan(first as number)
+  })
+
   it('is superseded by any hook event — the node just spoke', () => {
     const id = nid()
     const s = useAgentStatus.getState()
@@ -70,6 +82,7 @@ describe('pane evidence', () => {
     s.setPaneEvidence({ [id]: 'unknown' })
     s.setState(id, 'done', 'claude')
     expect(useAgentStatus.getState().byId[id].pane).toBeUndefined()
+    expect(useAgentStatus.getState().byId[id].paneAt).toBeUndefined()
   })
 
   it('is superseded by a same-state re-assert too', () => {
@@ -83,33 +96,51 @@ describe('pane evidence', () => {
 })
 
 describe('the failure latch', () => {
-  it('latches a proven failure on a working node', () => {
-    const id = nid()
-    const s = useAgentStatus.getState()
-    s.setState(id, 'working', 'claude', true)
-    s.markFailed(id, 1234, 'session gone')
-    expect(useAgentStatus.getState().byId[id].failure).toEqual({
-      at: 1234,
-      from: 'working',
-      reason: 'session gone'
-    })
+  it('latches a proven failure and records the state that was standing', () => {
+    for (const state of ['working', 'waiting', 'blocked'] as const) {
+      const id = nid()
+      const s = useAgentStatus.getState()
+      s.setState(id, state, 'claude', true)
+      s.markFailed(id, 1234, 'session gone')
+      expect(useAgentStatus.getState().byId[id].failure).toEqual({
+        at: 1234,
+        from: state,
+        reason: 'session gone'
+      })
+    }
   })
 
-  it('REFUSES a node that is no longer working — eligibility is re-asked at write time', () => {
-    // The probe is asynchronous: between planning it and its answer the node may have posted a
-    // new turn or finished. A `failed` badge on a demonstrably running node is the expensive
-    // error this whole derivation is careful about.
+  it('REFUSES a node that has FINISHED — eligibility is re-asked at write time', () => {
+    // The probe is asynchronous: between planning it and its answer the node may have finished,
+    // and a session that ended and then had its terminal closed is a tidied-up success, not a
+    // failure. This is the write-time half of the same rule `resolveKind` applies.
     const id = nid()
     const s = useAgentStatus.getState()
     s.setState(id, 'working', 'claude', true)
-    s.setState(id, 'waiting', 'claude')
+    s.setState(id, 'done', 'claude')
     s.markFailed(id, 1234)
     expect(useAgentStatus.getState().byId[id].failure).toBeUndefined()
+  })
+
+  it('still latches a node that moved between failable states while the probe was in flight', () => {
+    const id = nid()
+    const s = useAgentStatus.getState()
+    s.setState(id, 'working', 'claude', true)
+    s.setState(id, 'blocked', 'claude')
+    s.markFailed(id, 1234)
+    expect(useAgentStatus.getState().byId[id].failure).toMatchObject({ from: 'blocked' })
   })
 
   it('refuses a node the table has never heard of', () => {
     useAgentStatus.getState().markFailed('never-seen', 1234)
     expect(useAgentStatus.getState().byId['never-seen']).toBeUndefined()
+  })
+
+  it('refuses a node with no state at all', () => {
+    const id = nid()
+    useAgentStatus.getState().setState(id, undefined, 'claude')
+    useAgentStatus.getState().markFailed(id, 1234)
+    expect(useAgentStatus.getState().byId[id].failure).toBeUndefined()
   })
 
   it('survives the stale-working sweep, so a proven failure does not decay back to unknown', () => {

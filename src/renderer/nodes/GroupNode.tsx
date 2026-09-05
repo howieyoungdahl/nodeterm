@@ -16,6 +16,9 @@ import {
 } from '../lib/nodeStatusView'
 import { useStatusNow } from '../lib/statusClock'
 import { rollUpNodeStatus } from '@shared/node-status'
+import { appearanceAttrs, useNodeAppearance } from '../state/appearance'
+import { AppearanceGlow } from '../components/AppearanceGlow'
+import { NodeBorderPicker } from '../components/NodeBorderPicker'
 
 export type WorktreeAction = 'merge' | 'remove' | 'unbind' | 'rerun-setup'
 
@@ -38,7 +41,7 @@ export function setWorktreeActionHandler(
  * Children are real React Flow nodes parented to this one, so dragging the frame moves them
  * together. The frame renders behind its children (it appears first in the array).
  */
-export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
+export function GroupNode({ id, data, selected, parentId }: NodeProps<CanvasNode>) {
   const { updateNodeData, setNodes } = useReactFlow()
   const [showColors, setShowColors] = useState(false)
   // The frame element, observed for viewport visibility by the worktree-status tick below.
@@ -187,11 +190,23 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // A bound frame must read as a checkout at a glance: solid border + a stronger tint of the
   // group's OWN color (no new palette). Stale drops the hue entirely and goes muted/warning.
   const bound = !!wt
+  // Persistent visual preference for this frame — the same resolver the terminal nodes use, so a
+  // rule that names a frame and a rule that names its members cannot be read two different ways.
+  // The frame matches `byTaskGroup` on ITSELF (its own id/label) as well as on its parent's, which
+  // is what makes "the reviewer frame is red" one rule rather than one per member.
+  const resolvedAppearance = useNodeAppearance({
+    nodeId: id,
+    kind: 'group',
+    override: data.appearance,
+    parentId
+  })
+  const appearance = appearanceAttrs(resolvedAppearance, 'group-node')
   const frameClass = [
     'group-node',
     selected ? 'selected' : '',
     bound ? 'group-node--worktree' : '',
-    bound && stale ? 'group-node--worktree-stale' : ''
+    bound && stale ? 'group-node--worktree-stale' : '',
+    appearance.className
   ]
     .filter(Boolean)
     .join(' ')
@@ -203,10 +218,15 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
       style={{
         borderColor: bound && stale ? undefined : data.color,
         background: bound && stale ? undefined : `${data.color}${bound ? '1c' : '0f'}`,
-        // Rounded selection ring (box-shadow follows border-radius, unlike the resizer line).
-        boxShadow: selected ? `0 0 0 1.5px ${data.color}` : undefined
+        // Rounded selection ring (box-shadow follows border-radius, unlike the resizer line). Kept
+        // a box-shadow when an appearance is in play too — a border would square the corners off.
+        boxShadow: selected ? `0 0 0 1.5px ${data.color}` : undefined,
+        // Custom properties only; the stylesheet decides what they mean, so nothing here can
+        // overwrite the two keys above.
+        ...appearance.style
       }}
     >
+      {resolvedAppearance.glow && <AppearanceGlow style={appearance.style} variant="group" />}
       <NodeResizer
         minWidth={NODE_MIN_SIZES.group.width}
         minHeight={NODE_MIN_SIZES.group.height}
@@ -234,6 +254,13 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
                 }}
               />
             ))}
+            {/* The frame's explicit border override — the same control the terminal nodes carry,
+                so "make this red" means one thing wherever it is asked for. */}
+            <NodeBorderPicker
+              override={data.appearance}
+              resolved={resolvedAppearance}
+              onChange={(next) => updateNodeData(id, { appearance: next })}
+            />
           </div>
         )}
         <input

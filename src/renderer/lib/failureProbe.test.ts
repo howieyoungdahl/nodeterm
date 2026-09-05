@@ -90,6 +90,23 @@ describe('runFailureProbe', () => {
     expect(setPaneEvidence).toHaveBeenCalledWith({ a: 'alive' })
   })
 
+  it('probes a parked approval whose session may have died under it', async () => {
+    const { d, markFailed } = deps([{ id: 'a', state: 'blocked', updatedAt: stale }], {
+      probe: async () => ({ a: 'dead' as const })
+    })
+    expect((await runFailureProbe(d)).failed).toEqual(['a'])
+    expect(markFailed).toHaveBeenCalledWith('a', NOW)
+  })
+
+  it('skips a node whose pane was asked about within the re-check window', async () => {
+    const probe = vi.fn(async () => ({}))
+    const { d } = deps([{ id: 'a', state: 'blocked', updatedAt: stale, paneAt: NOW - 1000 }], {
+      probe
+    })
+    await runFailureProbe(d)
+    expect(probe).not.toHaveBeenCalled()
+  })
+
   it('does not re-probe a node whose failure is already latched', async () => {
     const probe = vi.fn(async () => ({}))
     const { d } = deps([{ id: 'a', state: 'working', updatedAt: stale, failed: true }], { probe })

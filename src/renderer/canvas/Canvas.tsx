@@ -10865,11 +10865,13 @@ export function Canvas() {
    * The one input that can turn a badge into `failed`: ask the core that owns these sessions
    * whether the pane behind a node that has gone quiet is actually still there.
    *
-   * It is not a poll of the canvas. `paneProbeCandidates` picks only `working` entries whose
-   * freshness has passed the window, so a canvas of healthy agents makes zero calls, and a node
-   * that is merely mid-Bash is never asked about. The answer is double-checked in core before it
-   * says `dead`, and an inconclusive answer is recorded as inconclusive — which is what makes the
-   * badge say `unknown` instead of a stale `WORKING` that reads as healthy.
+   * It is not a poll of the canvas. `paneProbeCandidates` picks only entries a dead pane could
+   * change (`working`, `waiting`, `blocked`) that are past the freshness window and have not been
+   * asked about within the re-check interval — so a canvas of healthy agents makes zero calls, a
+   * node that is merely mid-Bash is never asked about, and a parked approval is asked once per
+   * window rather than once per pass. The answer is double-checked in core before it says `dead`,
+   * and an inconclusive answer is recorded as inconclusive — which is what makes the badge say
+   * `unknown` instead of a stale `WORKING` that reads as healthy.
    *
    * Nothing here is authority (plan D8): it reads, and it writes two transient display fields.
    */
@@ -10890,6 +10892,7 @@ export function Canvas() {
               id,
               state: v.state,
               updatedAt: v.stateAt,
+              paneAt: v.paneAt,
               failed: !!v.failure
             })),
           probe,

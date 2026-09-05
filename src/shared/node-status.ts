@@ -55,6 +55,36 @@ export type PaneEvidence = 'alive' | 'dead' | 'unknown'
  */
 export const NODE_STATUS_STALE_MS = 10 * 60_000
 
+/**
+ * How long a proven-alive pane answer stands before the node is asked about again.
+ *
+ * Only `working` decays on its own (the mirror sweeps it at 20 minutes). `waiting` and `blocked`
+ * do not: a session parked on an approval overnight is stale by this window and stays that way, so
+ * without a re-check interval every parked ask would be probed on every pass, forever. One probe
+ * per node per window bounds that, and it costs at most one window of detection latency on a state
+ * that has already been sitting still for one.
+ */
+export const PANE_RECHECK_MS = NODE_STATUS_STALE_MS
+
+/**
+ * The states a proven-dead pane turns into `failed`.
+ *
+ * This EXTENDS plan decision D3, which named `working` alone. A dead pane is a fact about the
+ * SESSION, not about the turn, so what it means does not depend on which hook state preceded it —
+ * except in the one case D3 was written to exclude. `done` plus a dead pane is a session that
+ * finished and then had its terminal closed, and calling that a failure would put a red badge on
+ * every tidied-up success. So `done` stays `completed`, and the other three fail.
+ *
+ * Concretely, this is what makes an approval survivable as information: a node that was `blocked`
+ * on a permission request when its session died used to read `BLOCKED`, stale, indefinitely — an
+ * invitation to go and answer a prompt that no longer exists.
+ */
+export const FAILABLE_STATES: ReadonlySet<AgentState> = new Set<AgentState>([
+  'working',
+  'waiting',
+  'blocked'
+])
+
 /** How much of the hook event's own reason string the badge carries (B3). */
 export const STATUS_REASON_MAX = 90
 
@@ -164,27 +194,33 @@ export function truncateReason(text: string | undefined, max = STATUS_REASON_MAX
  * The whole derivation table. Pure; `now` is injected.
  *
  * ```
- * failure latched                              → failed      (proven, and it stays proven)
- * state undefined                              → unknown     (no event has ever reported)
- * state working + pane 'dead'                  → failed      (the ONLY way to reach failed)
- * state working + pane 'unknown' + stale       → unknown     (we asked, we could not tell)
- * state working + pane 'unknown' + fresh       → working     (a 3-second-old hook event is a fact)
- * state working + pane 'alive' | absent        → working
- * state waiting                                → waiting
- * state blocked                                → blocked
- * state done                                   → completed
+ * failure latched                                    → failed     (proven, and it stays proven)
+ * state undefined                                    → unknown    (no event has ever reported)
+ * state done                                         → completed  (even with a dead pane)
+ * state working|waiting|blocked + pane 'dead'        → failed     (the ONLY way to reach failed)
+ * state working + pane 'unknown' + stale             → unknown    (we asked, we could not tell)
+ * state working + pane 'unknown' + fresh             → working    (a 3-second-old event is a fact)
+ * state working + pane 'alive' | absent              → working
+ * state waiting                                      → waiting
+ * state blocked                                      → blocked
  * ```
  *
- * Two consequences worth stating out loud, because both were choices:
+ * Three consequences worth stating out loud, because all three were choices:
  *
  *  - **A missing prober can never manufacture `failed`.** `pane` absent (nobody asked) and `pane`
  *    `'unknown'` (asked, inconclusive) both refuse it. The detector that drives this hands back
  *    `'unknown'` for every candidate on a surface with no prober, which is why "no pane prober
  *    available" surfaces as the word `unknown` rather than as a stale `working` that quietly reads
  *    as healthy.
- *  - **Only `working` consults the pane.** A dead pane under `blocked`/`waiting`/`done` leaves the
- *    state alone, because the plan derives `failed` from "the last hook state was `working` AND the
- *    pane is proven dead" and nothing else. Those states are marked stale instead.
+ *  - **`done` is the one state a dead pane does not change** (`FAILABLE_STATES`). A finished
+ *    session whose terminal was then closed is a tidied-up success, not a failure.
+ *  - **Only `working` is downgraded to `unknown` by an INCONCLUSIVE probe.** `working` is a claim
+ *    that something is happening right now, and an unverifiable claim of activity should not read
+ *    as healthy. `waiting` and `blocked` are claims about a standing request, which do not become
+ *    less true by sitting still — and they are precisely the states an operator parks overnight, so
+ *    downgrading them on an unverifiable probe would erase the most actionable thing on the canvas
+ *    on any surface without a prober. They are marked stale instead, and a PROVEN dead pane still
+ *    fails them.
  */
 /** The states whose reason belongs on the badge itself rather than only in its tooltip. */
 const ATTENTION_KINDS = new Set<NodeStatusKind>(['blocked', 'waiting', 'failed'])
@@ -224,12 +260,12 @@ export function deriveNodeStatus(input: NodeStatusInput): NodeStatusView {
 function resolveKind(input: NodeStatusInput, stale: boolean): NodeStatusKind {
   if (input.failure) return 'failed'
   if (!input.state) return 'unknown'
+  if (input.state === 'done') return 'completed'
+  if (input.pane === 'dead' && FAILABLE_STATES.has(input.state)) return 'failed'
   if (input.state === 'working') {
-    if (input.pane === 'dead') return 'failed'
     if (input.pane === 'unknown' && stale) return 'unknown'
     return 'working'
   }
-  if (input.state === 'done') return 'completed'
   return input.state
 }
 
@@ -238,6 +274,19 @@ function resolveKind(input: NodeStatusInput, stale: boolean): NodeStatusKind {
 function ago(ms: number): string {
   const age = formatStatusAge(Math.max(0, ms))
   return age === 'now' ? 'just now' : `${age} ago`
+}
+
+function failedSentence(from: AgentState | undefined): string {
+  if (from === 'blocked') {
+    return 'Failed: it was waiting on your approval and its terminal session is gone, so the request can no longer be answered.'
+  }
+  if (from === 'waiting') {
+    return 'Failed: it was waiting for your response and its terminal session is gone.'
+  }
+  if (from === 'working') {
+    return 'Failed: it was working and its terminal session is gone.'
+  }
+  return 'Failed: its terminal session is gone.'
 }
 
 function buildDetail(
@@ -249,7 +298,10 @@ function buildDetail(
   const parts: string[] = []
   switch (kind) {
     case 'failed':
-      parts.push('Failed: the session was working and its terminal session is gone.')
+      // Name the state that was standing when the pane died. `blocked` is the one worth spelling
+      // out: the operator's next move on a blocked node is to go and answer it, and the point of
+      // this badge is that there is no longer anything there to answer.
+      parts.push(failedSentence(input.failure?.from ?? input.state))
       break
     case 'unknown':
       if (input.state === 'working') {
@@ -330,25 +382,39 @@ export function rollUpNodeStatus(members: readonly RollUpMember[]): NodeStatusRo
 /**
  * Which nodes are worth a pane probe right now.
  *
- * Only a `working` state whose freshness has passed the window: that is the one combination where
- * the session fact can change the badge (`working` → `failed`, or → `unknown`). A fresh `working`
- * is never probed — a hook event from ten seconds ago already answers the question, and probing
- * every node on every tick would be a tmux round trip per pane per tick for no pixels.
+ * A `FAILABLE_STATES` state whose freshness has passed the window: those are the combinations
+ * where the session fact can change the badge (→ `failed`, or `working` → `unknown`). A fresh
+ * state is never probed — a hook event from ten seconds ago already answers the question, and
+ * probing every node on every tick would be a tmux round trip per pane per tick for no pixels.
+ * Neither is a node whose pane was proven anything within `PANE_RECHECK_MS`.
  *
  * A node that already carries a latched failure is not re-probed either: the latch is cleared by a
  * live hook event (the store's self-heal), not by us asking again.
  */
 export function paneProbeCandidates(
-  entries: ReadonlyArray<{ id: string; state?: AgentState; updatedAt?: number; failed?: boolean }>,
+  entries: ReadonlyArray<{
+    id: string
+    state?: AgentState
+    updatedAt?: number
+    /** When this node's pane was last probed (the store's `paneAt`). */
+    paneAt?: number
+    failed?: boolean
+  }>,
   now: number,
-  staleMs: number = NODE_STATUS_STALE_MS
+  staleMs: number = NODE_STATUS_STALE_MS,
+  recheckMs: number = PANE_RECHECK_MS
 ): string[] {
   const out: string[] = []
   for (const e of entries) {
     if (e.failed) continue
-    if (e.state !== 'working') continue
+    if (!e.state || !FAILABLE_STATES.has(e.state)) continue
     if (typeof e.updatedAt !== 'number') continue
     if (now - e.updatedAt <= staleMs) continue
+    // Already asked recently. Without this a canvas of parked approvals would be re-probed on
+    // every pass forever: unlike `working`, a `blocked` state never decays out of the candidate
+    // set on its own. A hook event clears `paneAt` with `pane`, so a node that speaks is asked
+    // again on the next pass regardless.
+    if (typeof e.paneAt === 'number' && now - e.paneAt <= recheckMs) continue
     out.push(e.id)
   }
   return out
