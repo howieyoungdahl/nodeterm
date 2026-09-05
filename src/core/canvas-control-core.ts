@@ -323,7 +323,14 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--remote-control[=NAME]] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
     '  any agent CLI. Canvas-control agent nodes default to `compact` (440×320, half the stock',
     '  640×440 footprint); pass `--size normal` to use the configured manual-open size instead.',
-    '  Manual UI opens remain normal-sized. `--group` parents the node(s) into a group frame; a worktree-bound group also',
+    '  Manual UI opens remain normal-sized. Every node you open is marked a WORKER and is titled',
+    '  after you (`<your name> · <agent>`) with a one-line owner+task summary, so a canvas full of',
+    '  sessions still says who asked for what; once the session names itself that name wins. From',
+    '  your SECOND worker on they are collected into a frame named after you — your own frame if',
+    '  you are already in one — so you do not have to group them yourself. The operator can put any',
+    '  card away (back to compact) or expand it from its header, and can pin one; a pinned or',
+    '  hand-placed card is never moved into a frame. Putting a card away keeps its session running',
+    '  — it is filing, not closing. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
     '  their work when it wakes — use it for "B needs what A produced" instead of polling. Only',
@@ -732,8 +739,22 @@ Verbs:
   Canvas-control agent nodes default to \`compact\` (440×320, exactly half the stock 640×440
   footprint). Pass \`--size normal\` to use the configured manual-open dimensions instead. Nodes
   opened manually in the UI remain normal-sized.
+  Every node you open is marked a WORKER — the only kind of node the app will ever place for you.
+  It is titled after you (\`<your name> · <agent>\`, numbered across your whole fan-out) and carries
+  a one-line owner+task summary, so a canvas full of sessions still says who asked for what. The
+  title is an OPENING name: once the session names itself, that name replaces it, and the summary
+  stays.
+  From your SECOND worker on, your workers are collected into a frame named after you — or into
+  your OWN frame, immediately, if you are already inside one. You do not need to \`group\` them
+  yourself. A single worker is left loose on purpose: a frame around one card is noise.
+  The operator can put any card away (back to the compact footprint, restoring the exact size and
+  position it had) or expand it, from the card header or its right-click menu; neither touches the
+  session. They can also pin a card. A pinned card, and a card they have dragged or resized
+  themselves, is never moved into a frame — so if a worker of yours is not in the frame with the
+  others, that is the operator's placement and not a failure.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
-  hands its worktree path down as the cwd.
+  hands its worktree path down as the cwd. Naming a frame yourself turns the automatic collection
+  off for that open — your placement wins.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
   every listed station has gone idle — that is how you express "B needs what A produces" without
   sitting in a poll loop. The armed node is also context-linked to each station it waits on, so

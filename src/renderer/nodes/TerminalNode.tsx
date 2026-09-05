@@ -190,6 +190,7 @@ import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
 import { MaximizeButton } from './MaximizeButton'
+import { CompactButton } from './CompactButton'
 import { connectHostAttachment } from '../lib/sshAttachments'
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
@@ -4861,6 +4862,7 @@ export function TerminalNode({
               </button>
             </Tooltip>
           )}
+        {!collapsed && !isHidden('compact', hiddenHeaderButtons) && <CompactButton id={id} />}
         {!collapsed && !isHidden('maximize', hiddenHeaderButtons) && (
           <MaximizeButton id={id} maximized={!!data.premaxRect} />
         )}

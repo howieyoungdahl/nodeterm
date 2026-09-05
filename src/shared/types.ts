@@ -337,6 +337,44 @@ export interface CanvasNodeState {
   size: { width: number; height: number }
   /** Agent nodes opened through canvas-control: the named geometry choice persisted at spawn. */
   controlSize?: 'compact' | 'normal'
+  /**
+   * Who this node belongs to. `worker` = opened by a control-capable agent on the operator's
+   * behalf and therefore the only kind of node automatic placement may arrange; `primary` = the
+   * operator's own workspace, never moved, resized or re-parented by anything automatic.
+   * ABSENT MEANS `primary` — every canvas saved before this field, and every manual UI open.
+   * See @shared/node-role.
+   */
+  role?: 'primary' | 'worker'
+  /**
+   * Generated nodes: one line naming who opened this node and the task it carried. Separate from
+   * `title` on purpose — the title is claimed by the agent's own session name as soon as there is
+   * one, and this is the fact that has to survive that retitle.
+   */
+  taskSummary?: string
+  /**
+   * group-only: this frame is a spawn tray — the control plane created it to collect the workers
+   * one agent node opened. A statement about the canvas, so it is shared; whether the tray is
+   * shown open or closed on a given screen stays machine-local.
+   */
+  taskFrame?: boolean
+  /**
+   * The rect (ROOT-space position + size) to give back when a node expanded out of its compact
+   * footprint is put away again. Absent = the node is at its own size. Same root-space rule, and
+   * the same reason, as `premaxRect`.
+   */
+  compactRect?: { x: number; y: number; width: number; height: number }
+  /**
+   * Operator intent: never move or resize this node automatically. Persisted in the shared file
+   * because it is a statement about this canvas, not about one screen.
+   */
+  pinned?: boolean
+  /**
+   * Set the first time the operator drags or resizes this node BY HAND. It is the durable memory
+   * of "I put it there", which automatic placement reads as a refusal. Programmatic placement
+   * (arrange, tidy, maximize, zone snap, the spawn-time tray) never sets it — those go through
+   * `setNodes` directly and never reach the change handler that writes it.
+   */
+  manualPlacement?: boolean
   title: string
   /**
    * Agent nodes only: while true (the default), the node title auto-tracks the agent's own
