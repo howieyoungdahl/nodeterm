@@ -978,10 +978,12 @@ export function buildAttentionRows(
   return [...byKey.values()]
 }
 
-/** ` ` separator: it cannot occur in any of the three parts, so no two distinct triples
- *  can collide by concatenation. */
+/** NUL separator, written as the escape `\x00`: it cannot occur in any of the three parts, so
+ *  no two distinct triples can collide by concatenation. Written as an escape rather than as the
+ *  raw byte because git classifies a file holding one as BINARY, and the whole file then renders
+ *  as "Binary files differ" in every review surface (`src/shared/source-hygiene.test.ts`). */
 export function attentionKey(kind: string, text: string, owner: string): string {
-  return `${kind} ${text} ${owner}`
+  return `${kind}\x00${text}\x00${owner}`
 }
 
 // ---------------------------------------------------------------------------
