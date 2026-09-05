@@ -3,7 +3,11 @@ import path from "path";
 import { writeFileAtomic } from "./fs-atomic";
 import { IPC } from "../shared/ipc";
 import { platform } from "./platform";
-import { DEFAULT_SETTINGS, type Settings } from "../shared/types";
+import {
+  applyRendererMemoryPolicyMigration,
+  DEFAULT_SETTINGS,
+  type Settings,
+} from "../shared/types";
 
 /**
  * Merge a possibly-partial/legacy `Settings` object over `DEFAULT_SETTINGS`. A plain
@@ -57,6 +61,13 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
     merged.openMarkdownPreview = true;
     merged.openMarkdownPreviewMigrated = true;
   }
+  // One-shot renderer-memory policy migration. Full-snapshot settings writes materialized the old
+  // 10-minute offscreen default into every existing file, so changing DEFAULT_SETTINGS alone would
+  // miss the exact population with dozens of live xterms. Only the old default is moved: 0 and
+  // every other value are evidence of a user choice and survive. The marker makes a post-migration
+  // choice of 10 permanent too. tmuxScrollback deliberately stays at 50k — tmux owns that history
+  // outside the renderer process, while xterm has its own much smaller cap.
+  applyRendererMemoryPolicyMigration(saved, merged);
   // Legacy `terminalGpuRendering` was a boolean whose default (true) was merged into every saved
   // file — so a stored `true` is indistinguishable from "never touched" and maps to the new
   // 'auto' (platform-aware) default, while a stored `false` was always an explicit escape-hatch

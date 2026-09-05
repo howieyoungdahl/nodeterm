@@ -201,6 +201,11 @@ condition per caller.
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.
 
+**Keep renderer terminal memory separate from tmux history.** tmux may retain 50,000 operator-
+scrollable lines outside the browser process; each mounted xterm is capped at 2,000 lines and an
+offscreen xterm is released after one minute by default. Raising the renderer cap multiplies across
+every terminal card on the active canvas; do not couple it back to tmux's retention setting.
+
 **A spawn-env write does not reach a tmux session on its own.** The shared tmux server takes each
 new session's env from its own GLOBAL env (inherited from whichever client *started* the server) —
 the creating client's process env only matters for names listed in `update-environment` (or passed
