@@ -14,7 +14,15 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'fs'
 import path from 'path'
-import { linesFromGrok, renderTranscriptLines } from './context-link-render'
+import {
+  TRANSCRIPT_DEFAULT_LINES,
+  linesFromGrok,
+  parseTranscriptCount,
+  renderContextLink,
+  renderFullTranscript,
+  renderTranscriptLines
+} from './context-link-render'
+import type { LinkDoc, LinkDocEntry } from './context-link-core'
 
 const buf = readFileSync(path.join(__dirname, '__fixtures__/grok/chat_history.jsonl'), 'utf8')
 
@@ -104,5 +112,92 @@ describe('linesFromGrok over a real chat_history.jsonl', () => {
 
   it('is routed by agent id, with no call-site comparison', () => {
     expect(renderTranscriptLines('grok', buf)).toEqual(linesFromGrok(buf))
+  })
+})
+
+// ── The `transcript` cap ─────────────────────────────────────────────────────────────────────────
+// `transcript` used to return the WHOLE conversation. Nothing was leaking — it is a pull, and the
+// document is chosen by the requester's own node id — but an unbounded on-demand read is the exact
+// opposite of "start with compact metadata and retrieve evidence on demand"
+// (docs/remote-session-scoping.md). These pin the three things that make a cap safe: the bound, the
+// override, and that the notice fires ONLY when something was really dropped.
+const NODE: LinkDocEntry = { id: 'n1', title: 'Worker', agent: 'claude' } as LinkDocEntry
+const many = (n: number): string[] => Array.from({ length: n }, (_, i) => `line ${i + 1}`)
+
+describe('renderFullTranscript cap', () => {
+  it('renders a short transcript unchanged — header, every line, and NO notice', () => {
+    const out = renderFullTranscript(NODE, many(3))
+    expect(out).toBe('=== Worker — full transcript (3 lines) ===\nline 1\nline 2\nline 3')
+    expect(out).not.toContain('omitted')
+  })
+
+  it('emits nothing extra at exactly the cap (the boundary is not off by one)', () => {
+    const out = renderFullTranscript(NODE, many(TRANSCRIPT_DEFAULT_LINES))
+    expect(out).not.toContain('omitted')
+    expect(out.split('\n')).toHaveLength(TRANSCRIPT_DEFAULT_LINES + 1) // + the header
+  })
+
+  it('keeps the LAST lines and says how many it dropped and how to get them', () => {
+    const out = renderFullTranscript(NODE, many(TRANSCRIPT_DEFAULT_LINES + 25))
+    // The tail is what a linked reader needs: what the node has been doing lately.
+    expect(out).toContain(`line ${TRANSCRIPT_DEFAULT_LINES + 25}`)
+    expect(out).not.toContain('\nline 1\n')
+    // The truncation is VISIBLE, counts what it dropped, and names the exact flag to undo itself.
+    expect(out).toContain(`… 25 earlier lines omitted (showing the last ${TRANSCRIPT_DEFAULT_LINES})`)
+    expect(out).toContain(`re-run with -n ${TRANSCRIPT_DEFAULT_LINES + 25}`)
+    // The full length is still stated in the header, so the reader can see what it is inside.
+    expect(out).toContain(`(${TRANSCRIPT_DEFAULT_LINES + 25} lines)`)
+  })
+
+  it('says "line", not "lines", when exactly one was dropped', () => {
+    expect(renderFullTranscript(NODE, many(TRANSCRIPT_DEFAULT_LINES + 1))).toContain(
+      '… 1 earlier line omitted'
+    )
+  })
+
+  it('an explicit limit overrides the default in both directions', () => {
+    expect(renderFullTranscript(NODE, many(10), 3)).toContain('… 7 earlier lines omitted')
+    // Raised above the line count: everything comes back and the notice disappears.
+    const all = renderFullTranscript(NODE, many(TRANSCRIPT_DEFAULT_LINES + 5), TRANSCRIPT_DEFAULT_LINES + 5)
+    expect(all).not.toContain('omitted')
+    expect(all).toContain('line 1')
+  })
+})
+
+describe('parseTranscriptCount', () => {
+  it('defaults to the cap, and refuses junk or non-positive values rather than going unlimited', () => {
+    expect(parseTranscriptCount(undefined)).toBe(TRANSCRIPT_DEFAULT_LINES)
+    expect(parseTranscriptCount('')).toBe(TRANSCRIPT_DEFAULT_LINES)
+    expect(parseTranscriptCount('all')).toBe(TRANSCRIPT_DEFAULT_LINES)
+    expect(parseTranscriptCount('0')).toBe(TRANSCRIPT_DEFAULT_LINES)
+    expect(parseTranscriptCount('-5')).toBe(TRANSCRIPT_DEFAULT_LINES)
+  })
+  it('takes a positive integer as-is', () => {
+    expect(parseTranscriptCount('12')).toBe(12)
+    expect(parseTranscriptCount('99999')).toBe(99999)
+  })
+})
+
+describe('renderContextLink transcript verb', () => {
+  // `-n` was already plumbed end to end for `summary` (the shim's arg loop is verb-agnostic), so
+  // the override reaches `transcript` with no change on the wire. This pins that it is actually
+  // read there — a cap with an override nothing forwards is a cap with no override.
+  const doc = { nodeId: 'me', links: [NODE] } as unknown as LinkDoc
+  const fetch = {
+    transcript: async () =>
+      many(TRANSCRIPT_DEFAULT_LINES + 3)
+        .map((l) => JSON.stringify({ type: 'user', message: { role: 'user', content: l } }))
+        .join('\n'),
+    terminal: async () => '',
+    opencodeExport: async () => null
+  }
+
+  it('caps by default', async () => {
+    expect(await renderContextLink(doc, 'transcript', {}, fetch)).toContain('3 earlier lines omitted')
+  })
+
+  it('honours -n from the caller', async () => {
+    const out = await renderContextLink(doc, 'transcript', { n: String(TRANSCRIPT_DEFAULT_LINES + 3) }, fetch)
+    expect(out).not.toContain('omitted')
   })
 })

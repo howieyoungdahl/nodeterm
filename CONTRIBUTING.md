@@ -363,6 +363,19 @@ yourself and apply it with `setViewport` (`renderer/lib/nodeFocus.ts`, `canvas/f
 lands now and against the canvas you meant. `fitAll` is the one deliberate exception: an explicit
 user gesture on a settled canvas.
 
+**Filtering is not an access-control boundary — and only one of the four is.** What a remote client
+*displays*, what an agent can *discover*, what it *loads into context*, and what it is *authorized
+to control* are four different mechanisms in this repo, and only the last is security. The scoped
+broadcast (`src/server/platform-server.ts`) narrows what the server volunteers to a browser tab; it
+grants and withholds nothing, because that connection can still `workspace.load()` the whole index
+and `pty:subscribe` to any session. Control is gated by **creator ownership**, fail-closed
+(`src/core/agents/pane-ownership.ts`), and the transport by the single-user auth. Two consequences
+for your PR: a display filter must be **default-open** — an undeclared client keeps receiving
+everything, because a client silently starved of `agent:status` shows dead badges with no error
+anywhere — and if you tighten a filter, do not describe the result as a permission. A reviewer who
+believes a filter is the boundary stops looking for the real one. `docs/remote-session-scoping.md`
+has the four-way table and the measurements.
+
 ## Testing
 
 `npm test` must pass, and `npm run typecheck` is the fastest gate.

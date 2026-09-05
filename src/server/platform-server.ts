@@ -29,6 +29,10 @@ export class ServerPlatform implements CorePlatform {
   private registry = new UiSinkRegistry()
   private nextUiId = 1
 
+  /** uiId → the project that connection last said it was viewing. ABSENT means "undeclared", which
+   *  is the default-open case — see `setClientScope`. Never holds an entry for a detached id. */
+  private scopes = new Map<number, string>()
+
   constructor(opts: { userDataDir: string; appVersion: string }) {
     this.userDataDir = opts.userDataDir
     this.appVersion = opts.appVersion
@@ -87,6 +91,60 @@ export class ServerPlatform implements CorePlatform {
     for (const uiId of this.registry.ids()) this.registry.sendTo(uiId, channel, ...args)
   }
 
+  /**
+   * Declare which project a connection is LOOKING AT, so per-node pushes can skip the clients that
+   * have no canvas to draw them on. `null` (or an empty id) clears the declaration.
+   *
+   * ────────────────────────────────────────────────────────────────────────────────────────────
+   *  FILTERING IS NOT AN ACCESS-CONTROL BOUNDARY.
+   *
+   *  A scope narrows what this server VOLUNTEERS to a connection. It is a display filter and
+   *  nothing else. Every client here has already passed the single-user auth in `auth.ts`, and a
+   *  client that can connect can still REQUEST any project — `workspace.load()` returns the whole
+   *  index, `pty:subscribe` attaches to any session id, and none of that consults this map. What
+   *  actually gates control is creator ownership (`HeadlessNodeOwnership`), which fails closed;
+   *  what gates the transport is the cookie. Do not add a rule here and describe it as a
+   *  permission — a reviewer who believes this is a boundary will stop looking for the real one.
+   *  See docs/remote-session-scoping.md.
+   * ────────────────────────────────────────────────────────────────────────────────────────────
+   *
+   * DEFAULT-OPEN, deliberately. An undeclared connection is in NO map entry and therefore receives
+   * everything, exactly as it did before scoping existed. This is a live multi-client system: a
+   * client starved of `agent:status` shows dead badges with no error anywhere and nothing to
+   * diagnose, so every failure mode on this path — a client that never declares, a declaration lost
+   * to a rate limiter, a reconnect under a fresh uiId, a scope naming a project that has since gone
+   * — degrades to MORE traffic, never to silence.
+   */
+  setClientScope(uiId: number, projectId: string | null | undefined): void {
+    if (typeof projectId === 'string' && projectId) this.scopes.set(uiId, projectId)
+    else this.scopes.delete(uiId)
+  }
+
+  /** The declared scope of a connection, or undefined when it has not declared one. */
+  clientScope(uiId: number): string | undefined {
+    return this.scopes.get(uiId)
+  }
+
+  /**
+   * Broadcast an event that BELONGS to one project, skipping connections that have declared they
+   * are looking at a different one. See `setClientScope` for why this is presentation, not policy.
+   *
+   * `projectId` is what we KNOW about the event, and unknown means deliver. The resolvers feeding
+   * this (pane ownership; see agent-status.ts) are fail-closed by design — they answer `undefined`
+   * for a pane this run did not freshly spawn — so "I could not attribute this event" must mean
+   * "send it to everyone", or a restart would silently blank every scoped client's badges.
+   */
+  broadcastScoped(channel: string, projectId: string | undefined, ...args: any[]): void {
+    if (this.registry.size === 0) return
+    if (!projectId) return this.broadcast(channel, ...args)
+    for (const uiId of this.registry.ids()) {
+      const scope = this.scopes.get(uiId)
+      // No declaration ⇒ everything. A declaration that matches ⇒ this event. A declaration for
+      // some other project ⇒ skipped, and only here.
+      if (scope === undefined || scope === projectId) this.registry.sendTo(uiId, channel, ...args)
+    }
+  }
+
   /** Every attached connection, in attach order (detach removes). */
   clientIds(): number[] {
     return this.registry.ids()
@@ -104,6 +162,10 @@ export class ServerPlatform implements CorePlatform {
 
   detach(uiId: number): void {
     this.registry.unregister(uiId)
+    // uiIds come from a monotonic counter, so a stale entry could never be re-matched — but a map
+    // that only ever grows is a leak on a long-lived service, and a reconnect must start undeclared
+    // (= everything) rather than inherit whatever the previous connection was looking at.
+    this.scopes.delete(uiId)
   }
 
   async dispatch(uiId: number, req: RpcRequest): Promise<RpcOk | RpcErr> {

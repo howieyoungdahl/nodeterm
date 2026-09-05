@@ -15,6 +15,23 @@ export type ContextLinkVerb = 'list' | 'summary' | 'transcript' | 'terminal'
 export const CONTEXT_LINK_VERBS: ContextLinkVerb[] = ['list', 'summary', 'transcript', 'terminal']
 
 const SUMMARY_DEFAULT_LINES = 15
+/**
+ * The default cap on `transcript`, in rendered display lines.
+ *
+ * `transcript` used to return the WHOLE conversation, however long. Nothing leaks — the verb is a
+ * pull, a linked node's document is chosen by the REQUESTER's id, and no transcript is ever pushed
+ * anywhere (docs/remote-session-scoping.md). But "start with compact metadata and retrieve evidence
+ * on demand" means the on-demand read has to have a bound: a linked reader asking one question paid
+ * for every turn the other node had ever taken, and a long agent session renders tens of thousands
+ * of lines.
+ *
+ * 400 is chosen against the measured shape of the parsers above (grok sessions of 576 and 372
+ * messages render on the order of one to three lines each): enough that an ordinary session comes
+ * back whole and the cap is invisible, small enough that the pathological one cannot silently
+ * dominate a reader's context. It is a DEFAULT, not a ceiling — `-n N` overrides it upward with no
+ * limit, which is what makes the truncation recoverable rather than a wall.
+ */
+export const TRANSCRIPT_DEFAULT_LINES = 400
 const TOOL_ARG_MAX = 200
 const TOOL_RESULT_MAX = 500
 
@@ -367,8 +384,34 @@ export function renderSummary(node: LinkDocEntry, lines: string[], n: number): s
   return [`=== ${node.title} — last ${n} lines ===`, ...lines.slice(-n)].join('\n')
 }
 
-export function renderFullTranscript(node: LinkDocEntry, lines: string[]): string {
-  return [`=== ${node.title} — full transcript (${lines.length} lines) ===`, ...lines].join('\n')
+/**
+ * The `transcript` verb's body, capped at `limit` display lines (the LAST `limit`, because what a
+ * linked reader needs is what the node has been doing lately — the head of a long session is its
+ * oldest context, not its current state).
+ *
+ * The truncation is VISIBLE and says how to undo itself. Silent truncation is worse than none: a
+ * reader handed a transcript that starts mid-conversation, with nothing saying so, draws confident
+ * conclusions from a window it does not know it is inside. The notice is emitted ONLY when
+ * something was actually dropped — a session shorter than the cap renders byte-identically to the
+ * pre-cap output, header included, so nothing about the ordinary case changed.
+ */
+export function renderFullTranscript(
+  node: LinkDocEntry,
+  lines: string[],
+  limit: number = TRANSCRIPT_DEFAULT_LINES
+): string {
+  const omitted = Math.max(0, lines.length - limit)
+  const shown = omitted > 0 ? lines.slice(-limit) : lines
+  const head = `=== ${node.title} — full transcript (${lines.length} lines) ===`
+  if (omitted === 0) return [head, ...shown].join('\n')
+  // Above the body, not below it: a reader that stops early must still learn the window is partial,
+  // and the bound it would have to raise to see the rest is the whole line count.
+  return [
+    head,
+    `… ${omitted} earlier ${omitted === 1 ? 'line' : 'lines'} omitted (showing the last ` +
+      `${shown.length}); re-run with -n ${lines.length} for the whole transcript.`,
+    ...shown
+  ].join('\n')
 }
 
 export function renderTerminal(node: LinkDocEntry, capture: string): string {
@@ -382,6 +425,14 @@ export function renderTerminal(node: LinkDocEntry, capture: string): string {
 export function parseSummaryCount(raw: string | undefined): number {
   const n = parseInt(raw || '', 10)
   return Number.isFinite(n) && n > 0 ? n : SUMMARY_DEFAULT_LINES
+}
+
+/** `transcript`'s `-n`: the same already-plumbed flag `summary` uses (the shim's arg loop is
+ *  verb-agnostic, so no new flag had to reach the wire), defaulting to the cap rather than to a
+ *  window size. A junk or non-positive value falls back to the default, never to "unlimited". */
+export function parseTranscriptCount(raw: string | undefined): number {
+  const n = parseInt(raw || '', 10)
+  return Number.isFinite(n) && n > 0 ? n : TRANSCRIPT_DEFAULT_LINES
 }
 
 /** Everything the renderer needs fetched from the outside (local fs or over ssh). */
@@ -418,7 +469,7 @@ export async function renderContextLink(
   if (typeof lines === 'string') return lines // an explanatory message, not content
   return verb === 'summary'
     ? renderSummary(node, lines, parseSummaryCount(args.n))
-    : renderFullTranscript(node, lines)
+    : renderFullTranscript(node, lines, parseTranscriptCount(args.n))
 }
 
 /** Transcript lines for a node, or a human-readable reason there are none. */

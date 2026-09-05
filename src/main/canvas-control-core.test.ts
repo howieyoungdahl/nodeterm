@@ -13,6 +13,7 @@ import {
   CODEX_SANDBOX_RETRY_LINE
 } from '../core/agents/hook-sandbox-hint-sh'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
+import { LIST_FIELD_OPENED_BY, LIST_FIELD_TASK } from '../shared/canvas-list-row'
 import { PROJECT_TARGETABLE_VERBS } from '../core/project-grants'
 import { DRY_RUN_VERBS } from '../shared/control-verbs'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
@@ -414,6 +415,22 @@ describe('parseControlRequest', () => {
       expect(body).toContain('LAST TURN ERRORED')
       // And a way out, or the orchestrator is told it is stuck without being told what to do.
       expect(body.toLowerCase()).toMatch(/nudge|retry/)
+    }
+  })
+
+  it('both agent-facing texts describe the OPTIONAL list fields, derived from the row builder', () => {
+    // The `list` row gained `opened-by=` (and `task=` where a task registry names the node), so the
+    // texts that told an agent the row is "(id, kind, title)" are now describing a row that no
+    // longer exists — and an orchestrator reading that stale sentence spends a second call
+    // reconstructing a parent→child tree the first call already handed it. Derived from
+    // LIST_FIELD_OPENED_BY / LIST_FIELD_TASK rather than re-typed, so the text cannot drift from
+    // what the builder emits.
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain(`${LIST_FIELD_OPENED_BY}=`)
+      expect(body).toContain(`${LIST_FIELD_TASK}=`)
+      // Both are OPTIONAL and absent when unknown — the reader must not treat a missing field as
+      // "this node has no parent", and must never expect a fabricated one.
+      expect(body.toLowerCase()).toMatch(/only when|absent|omitted/)
     }
   })
 

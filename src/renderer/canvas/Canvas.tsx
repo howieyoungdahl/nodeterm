@@ -349,6 +349,7 @@ import {
 } from '../lib/explorerPinHint'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { controlOpenerOf, forgetControlOpener, recordControlOpener } from '../state/controlOwnership'
 import { useLaunchDelivery } from '../state/launchDelivery'
 import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
 import { useTerminalFocus } from '../state/terminalFocus'
@@ -357,6 +358,7 @@ import { useTeamAccessEvents } from '../state/teamAccess'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
+import { renderCanvasList, type CanvasListRow } from '@shared/canvas-list-row'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
@@ -5095,6 +5097,8 @@ export function Canvas() {
         useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearForParent(n.id)
         useAgentNodes.getState().clearLoop(n.id)
+        // …and its creator hop, or `list` would keep naming a deleted node as somebody's opener.
+        forgetControlOpener(n.id)
         // Permanent deletion ends the node's keep-alive entry too — this funnel removes nodes by
         // setNodes, so handleNodesChange's remove branch never sees them.
         useWebviewKeepAlive.getState().drop(n.id)
@@ -9680,6 +9684,10 @@ export function Canvas() {
         const placed = node.parentId ? node : src.parentId ? parentInto(node, src.parentId) : node
         setNodes((ns) => [...ns, placed])
         connect(placed.id)
+        // One hop of hierarchy, recorded at the only place that knows it first-hand, so `list` can
+        // hand a reader the fan-out tree. Display only, transient, never inferred — see
+        // state/controlOwnership.ts.
+        recordControlOpener(placed.id, sourceNodeId)
         markDirty()
         return placed.id
       }
@@ -9821,23 +9829,20 @@ export function Canvas() {
             // separately would be seven round trips to learn the one thing that changes what it
             // does next.
             const st = useAgentStatus.getState().byId
-            const list = nodesRef.current.map((n) => ({
-              id: n.id,
-              kind: n.type,
-              title: n.data.title as string,
-              ...(st[n.id]?.lastTurnError ? { lastTurnErrored: true } : {})
-            }))
-            reply({
-              ok: true,
-              result: list,
-              message: list
-                .map(
-                  (n) =>
-                    `${n.id} [${n.kind}] ${n.title}` +
-                    (n.lastTurnErrored ? ' — LAST TURN ERRORED' : '')
-                )
-                .join('\n')
+            const list: CanvasListRow[] = nodesRef.current.map((n) => {
+              // Both extras are OMITTED when unknown, never placeholdered: the row then costs
+              // exactly what it did before this field existed, and a reader can never mistake
+              // "we cannot prove it" for "this node has no parent". See @shared/canvas-list-row.
+              const openedBy = controlOpenerOf(n.id)
+              return {
+                id: n.id,
+                kind: n.type,
+                title: n.data.title as string,
+                ...(openedBy ? { openedBy } : {}),
+                ...(st[n.id]?.lastTurnError ? { lastTurnErrored: true } : {})
+              }
             })
+            reply({ ok: true, result: list, message: renderCanvasList(list) })
             return
           }
           case 'open-terminal': {
