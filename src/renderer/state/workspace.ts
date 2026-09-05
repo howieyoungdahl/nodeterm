@@ -1563,8 +1563,11 @@ export function applyWorkerFramePlan(
   // `groupSelectedNodes` refuses a set that does not share one container; a refusal returns the
   // canvas untouched rather than half-forming a tray.
   if (!frame) return nodes
+  // Collapsed on creation, like the Server path: a tray that opens expanded has put nothing away.
   return next.map((n) =>
-    n.id === frame.id ? { ...n, data: { ...n.data, title: label, taskFrame: true } } : n
+    n.id === frame.id
+      ? { ...n, data: { ...n.data, title: label, taskFrame: true, collapsed: true } }
+      : n
   )
 }
 
