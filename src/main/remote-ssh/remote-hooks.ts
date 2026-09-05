@@ -47,6 +47,7 @@ import {
   CONTEXT_SHIM_SCRIPT,
   buildContextLinkSkillBody,
   buildLinkedContextInstructions,
+  shimPathForAgentDocs,
   mergeInstructionsBlock
 } from '../../core/context-link-core'
 import { posixQuote, type SshConnection } from '../../shared/ssh'
@@ -690,14 +691,18 @@ export class RemoteHooks {
     try {
       const shim = `${remoteHome}/.nodeterm/context.sh`
       await this.writeRemoteShim(conn, controlPath, shim, CONTEXT_SHIM_SCRIPT)
+      // The documented command is home-relative against the REMOTE home — the host's own
+      // `~/.claude` / `~/.codex` may be dotfile-managed exactly like ours. The shim is still
+      // written and read at the absolute `shim` path; only the text an agent copies changes.
+      const shimForDocs = shimPathForAgentDocs(shim, remoteHome)
       await this.writeRemoteSkill(
         conn,
         controlPath,
         `${remoteHome}/.claude`,
         'get-linked-context',
-        buildContextLinkSkillBody(shim)
+        buildContextLinkSkillBody(shimForDocs)
       )
-      const block = buildLinkedContextInstructions(shim)
+      const block = buildLinkedContextInstructions(shimForDocs)
       // codex/gemini are plain quoted literals; opencode must stay shell-expandable and so
       // carries a prelude that binds the untrusted $HOME to a variable (see the helper).
       const targets: { pathExpr: string; prelude?: string }[] = [
@@ -728,7 +733,7 @@ export class RemoteHooks {
         controlPath,
         `${remoteHome}/.nodeterm/claude-accounts/${accountId}`,
         'get-linked-context',
-        buildContextLinkSkillBody(shim)
+        buildContextLinkSkillBody(shimPathForAgentDocs(shim, remoteHome))
       )
     } catch {
       /* fail-open */

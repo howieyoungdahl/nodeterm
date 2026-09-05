@@ -13,6 +13,38 @@ import { codexThreadIdentityResolverSh } from './codex-thread-identity-sh'
  *  quote it verbatim and the parity test holds the two ends together. */
 export const CONTEXT_UNREACHABLE_MSG = 'Could not read linked context (nodeterm unreachable).'
 
+/**
+ * Render the shim path for a file we write into the user's own agent-config directories
+ * (`~/.claude/skills/…/SKILL.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, opencode's
+ * `AGENTS.md`). A path under the user's home is emitted as `$HOME/…`; anything else keeps its
+ * absolute form.
+ *
+ * Why not just interpolate the absolute path everywhere: those directories are routinely under
+ * dotfile management — a chezmoi/yadm checkout, a dotfiles repo, or a plain symlink from a synced
+ * directory. On such a machine an absolute `/home/<user>/…` baked into a generated file means the
+ * file differs on every host, shows as a permanent local modification, and — if it is ever
+ * committed — points a second machine at a home directory that does not exist there. `$HOME` is
+ * expanded by the same `sh` that runs the shim, so the command the agent runs is unchanged.
+ *
+ * Outside the home directory we keep the absolute path: `$HOME` buys nothing there, and a data
+ * dir on another volume must still resolve.
+ *
+ * Pure and home-injected so the test does not depend on the developer's own `HOME` — the same
+ * discipline `initContextLink`'s doc comment records after a test rewrote a real `~/.codex/AGENTS.md`.
+ */
+export function shimPathForAgentDocs(shimPath: string, homeDir: string): string {
+  // Windows paths are left alone: `$HOME` is a POSIX-shell variable, and these lines are quoted
+  // into `sh`. A path with backslashes and no forward slash is the one case we can identify
+  // without asking the platform, and getting it wrong would emit a command that cannot run.
+  if (shimPath.includes('\\') && !shimPath.includes('/')) return shimPath
+  // A trailing separator on homeDir would make the prefix test pass for `/home/userX` against
+  // `/home/user`, so strip it and require the separator to be present in the comparison.
+  const home = homeDir.replace(/\/+$/, '')
+  if (!home || !home.startsWith('/')) return shimPath
+  if (!shimPath.startsWith(home + '/')) return shimPath
+  return '$HOME' + shimPath.slice(home.length)
+}
+
 // nodeId -> latest known transcript path, fed from the raw hook listener (see index.ts).
 const nodeTranscript = new Map<string, string>()
 export function setNodeTranscript(nodeId: string, _sessionId: string, transcriptPath: string): void {
@@ -334,7 +366,7 @@ On the nodeterm canvas, this Claude session may be connected to other agent node
 context-link edge. When you are linked, you can READ the other node's context on demand by
 running the local CLI shim below. Nothing is pushed to you automatically — pull what you need.
 
-Run the shim (absolute path):
+Run the shim exactly as written below (a leading \`$HOME\` is expanded by your shell):
 
 \`\`\`sh
 sh "${shimPath}" <command> [--node <id|title>] [-n <N>]

@@ -6,6 +6,7 @@ import {
   mergeInstructionsBlock,
   resolveLinkTranscript,
   setNodeTranscript,
+  shimPathForAgentDocs,
   transcriptPathOf,
   CONTEXT_SHIM_SCRIPT,
   CONTEXT_UNREACHABLE_MSG
@@ -255,5 +256,61 @@ describe('the context-link shim', () => {
     // session pinned to a pre-v2 endpoint file presenting nothing for its whole life.
     expect(CONTEXT_SHIM_SCRIPT).toContain('nt_read_node_token')
     expect(CONTEXT_SHIM_SCRIPT).not.toContain('nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR')
+  })
+})
+
+describe('shimPathForAgentDocs', () => {
+  // These strings are written into files the USER owns and that are routinely dotfile-managed or
+  // symlinked out of a synced directory (this repo's own `~/.claude` is one). An absolute home
+  // path baked into them makes the generated file differ on every machine.
+  const HOME = '/home/ada'
+
+  it('emits $HOME for a shim under the home directory', () => {
+    expect(shimPathForAgentDocs('/home/ada/.nodeterm-server/context-links/context.sh', HOME)).toBe(
+      '$HOME/.nodeterm-server/context-links/context.sh'
+    )
+  })
+
+  it('keeps an absolute path that is outside the home directory', () => {
+    // A data dir on another volume must still resolve; `$HOME` buys nothing there.
+    const p = '/mnt/data/nodeterm/context-links/context.sh'
+    expect(shimPathForAgentDocs(p, HOME)).toBe(p)
+  })
+
+  it('does not treat a sibling home as a prefix match', () => {
+    // `/home/adam` starts with `/home/ada` as a string; without requiring the separator this
+    // would emit `$HOMEm/...`, a path that silently does not exist.
+    const p = '/home/adam/.nodeterm-server/context-links/context.sh'
+    expect(shimPathForAgentDocs(p, HOME)).toBe(p)
+  })
+
+  it('tolerates a trailing separator on the home directory', () => {
+    expect(shimPathForAgentDocs('/home/ada/x/context.sh', '/home/ada/')).toBe('$HOME/x/context.sh')
+  })
+
+  it('leaves a Windows path alone', () => {
+    // `$HOME` is a POSIX-shell variable and these lines are quoted into `sh`; rewriting a Windows
+    // path would emit a command that cannot run.
+    const p = 'C:\\Users\\ada\\AppData\\nodeterm\\context-links\\context.sh'
+    expect(shimPathForAgentDocs(p, 'C:\\Users\\ada')).toBe(p)
+  })
+
+  it('returns the path unchanged when the home directory is unknown', () => {
+    // `os.homedir()` can return '' in a stripped environment. Failing open leaves the previous
+    // absolute-path behaviour rather than emitting a bare `$HOME`-rooted guess.
+    const p = '/home/ada/.nodeterm-server/context-links/context.sh'
+    expect(shimPathForAgentDocs(p, '')).toBe(p)
+  })
+
+  it('is what the generated agent-facing docs actually carry', () => {
+    // The unit above can pass while the composed document still interpolates the absolute path,
+    // so assert the rendered bodies too — both files we write into the user's config dirs.
+    const rendered = shimPathForAgentDocs('/home/ada/.nodeterm-server/context-links/context.sh', HOME)
+    const skill = buildContextLinkSkillBody(rendered)
+    const instructions = buildLinkedContextInstructions(rendered)
+    for (const doc of [skill, instructions]) {
+      expect(doc).toContain('$HOME/.nodeterm-server/context-links/context.sh')
+      expect(doc).not.toContain('/home/ada/.nodeterm-server')
+    }
   })
 })

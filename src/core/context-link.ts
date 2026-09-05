@@ -29,6 +29,7 @@ import {
   buildLinkedContextInstructions,
   mergeInstructionsBlock,
   resolveLinkTranscript,
+  shimPathForAgentDocs,
   transcriptPathOf,
   type LinkDoc,
   type LinkDocEntry
@@ -57,6 +58,13 @@ function cliShimPath(): string {
 function skillPath(): string {
   return path.join(os.homedir(), '.claude', 'skills', 'get-linked-context', 'SKILL.md')
 }
+/** The shim path as it appears in the files we write into the user's own agent-config dirs.
+ *  Home-relative so a dotfile-managed (or symlinked) `~/.claude` / `~/.codex` / `~/.gemini` does
+ *  not acquire this machine's absolute home — see `shimPathForAgentDocs`. The shim itself is still
+ *  read and written through the absolute `cliShimPath()`; only the documented command changes. */
+function shimPathForDocs(): string {
+  return shimPathForAgentDocs(cliShimPath(), os.homedir())
+}
 
 function writeCliFiles(): void {
   const d = contextLinkDir()
@@ -79,7 +87,7 @@ function writeCliFiles(): void {
 function installSkill(): void {
   try {
     fs.mkdirSync(path.dirname(skillPath()), { recursive: true })
-    fs.writeFileSync(skillPath(), buildContextLinkSkillBody(cliShimPath()), 'utf8')
+    fs.writeFileSync(skillPath(), buildContextLinkSkillBody(shimPathForDocs()), 'utf8')
   } catch (e) {
     console.warn('[context-link] skill install failed', e)
   }
@@ -88,7 +96,7 @@ function installSkill(): void {
 // Codex/Gemini/opencode have no skill system — merge an instructions block into their global
 // instruction files instead (marker-delimited, idempotent, other content preserved).
 function installAgentInstructions(): void {
-  const block = buildLinkedContextInstructions(cliShimPath())
+  const block = buildLinkedContextInstructions(shimPathForDocs())
   const targets = [
     path.join(os.homedir(), '.codex', 'AGENTS.md'),
     path.join(os.homedir(), '.gemini', 'GEMINI.md'),
