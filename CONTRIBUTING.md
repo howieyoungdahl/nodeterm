@@ -293,6 +293,19 @@ redundant encoding only, and a shell that forgets to register the pane-evidence 
 and simply never reports a failure — which is why `core/node-status-parity.test.ts` greps for both
 registrations.
 
+**Automatic layout only moves what it can prove is safe to move, and it says what it did not
+touch.** The engine (`src/core/canvas-layout/`) is opt-in, default off, and machine-local — the
+shared project file carries WHAT the rules are and never WHETHER they run, so cloning a repo can
+never start rearranging someone's canvas. `plan()` is pure and returns `{ops, skipped}`; a node is
+refused, with a reason, when it is pinned, hand-placed, in use right now, inside a loop-owned
+frame, created by another authority, or simply not a delegated worker (an absent `role` reads as
+`primary`, so every pre-existing canvas is untouchable by construction). **Report every refusal —
+a silent skip and a bug look identical from outside.** Two rules a refactor keeps wanting to undo:
+the "in use" question is re-asked at APPLY time rather than trusted from the plan (a preview sits
+on screen while the operator clicks somewhere), and the engine has no op that creates a frame, so
+it can never become a second frame-creator racing the spawn path. Nothing runs on a timer, and
+nothing on this path may reach a PTY.
+
 ## Testing
 
 `npm test` must pass, and `npm run typecheck` is the fastest gate.

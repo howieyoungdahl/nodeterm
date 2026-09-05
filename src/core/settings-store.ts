@@ -3,6 +3,7 @@ import path from "path";
 import { writeFileAtomic } from "./fs-atomic";
 import { IPC } from "../shared/ipc";
 import { platform } from "./platform";
+import { sanitizeCanvasLayoutSettings } from "../shared/canvas-layout-rules";
 import {
   applyRendererMemoryPolicyMigration,
   DEFAULT_SETTINGS,
@@ -91,6 +92,13 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   if (gpu === false) merged.terminalGpuRendering = "off";
   else if (gpu !== "on" && gpu !== "off" && gpu !== "auto" && gpu !== "shared")
     merged.terminalGpuRendering = "auto";
+  // settings.json is hand-editable, and this block decides whether the app is allowed to move the
+  // operator's canvas — so it is validated at the READ boundary rather than trusted at the point
+  // of use. Every shape this build does not recognise (including the whole key being a string, a
+  // number, or absent) resolves to `undefined`, which `layoutEngineEnabled` reads as OFF.
+  merged.canvasLayout = sanitizeCanvasLayoutSettings(saved?.canvasLayout) ?? {
+    enabled: false,
+  };
   return merged;
 }
 

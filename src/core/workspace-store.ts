@@ -10,7 +10,7 @@ import {
 } from '../shared/types'
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, resolveNodes, sameProjectContent,
-  sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validKanban,
+  sanitizeLayoutRulesBlock, sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
 import { readProjectSettingsFile, writeProjectSettingsFile } from './project-settings-files'
@@ -300,7 +300,18 @@ export class WorkspaceStore {
         // and the same trigger shape rule (workspace.json is hand-editable input too).
         const { kanban, ...rest } = e.project
         const base = validKanban(kanban) ? e.project : rest
-        built.push({ entry: e, project: { ...base, nodes: sanitizeNodeTriggers(base.nodes) } })
+        // …and the same rule for the shared layout-rule block, which reaches the layout engine and
+        // therefore must not arrive unvalidated on the one load path that skips fileToProject.
+        const layoutRules = sanitizeLayoutRulesBlock(base.layoutRules)
+        const { layoutRules: _rawRules, ...withoutRules } = base
+        built.push({
+          entry: e,
+          project: {
+            ...withoutRules,
+            ...(layoutRules ? { layoutRules } : {}),
+            nodes: sanitizeNodeTriggers(base.nodes)
+          }
+        })
       } else if (e.cwd) {
         if (sideline) await sweepStaleTmp(projectFilePath(e.cwd))
         const read = await this.readProjectFile(e.cwd, sideline)
