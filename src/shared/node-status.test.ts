@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  FAILABLE_STATES,
   NODE_STATUS_PRESENTATION,
   NODE_STATUS_SEVERITY,
   NODE_STATUS_STALE_MS,
+  PANE_RECHECK_MS,
   deriveNodeStatus,
   formatStatusAge,
   paneProbeCandidates,
@@ -36,16 +38,29 @@ describe('the derivation table', () => {
     expect(view({ state: 'done' }).kind).toBe('completed')
   })
 
-  it('derives failed ONLY from a proven-dead pane under a working state', () => {
-    expect(view({ state: 'working', pane: 'dead' }).kind).toBe('failed')
+  it('derives failed ONLY from a proven-dead pane', () => {
+    for (const state of ['working', 'waiting', 'blocked'] as const) {
+      expect(view({ state, pane: 'dead' }).kind).toBe('failed')
+    }
   })
 
-  it('refuses failed for every other hook state, even with a proven-dead pane', () => {
-    // The plan derives `failed` from "the last hook state was working AND the pane is proven
-    // dead" and nothing else. A dead pane under waiting/blocked/done leaves the state alone.
-    expect(view({ state: 'waiting', pane: 'dead' }).kind).toBe('waiting')
-    expect(view({ state: 'blocked', pane: 'dead' }).kind).toBe('blocked')
+  it('leaves a finished session completed, however dead its pane is', () => {
+    // The one state a dead pane does not change. A session that finished and then had its terminal
+    // closed is a tidied-up success; failing it would put a red badge on every one of them.
     expect(view({ state: 'done', pane: 'dead' }).kind).toBe('completed')
+  })
+
+  it('names the state that was standing when the pane died', () => {
+    // The operator's next move on a blocked node is to go and answer it. The point of this badge
+    // is that there is nothing left to answer.
+    expect(view({ state: 'blocked', pane: 'dead' }).detail).toContain('can no longer be answered')
+    expect(view({ state: 'waiting', pane: 'dead' }).detail).toContain('waiting for your response')
+    expect(view({ state: 'working', pane: 'dead' }).detail).toContain('it was working')
+  })
+
+  it('FAILABLE_STATES is exactly the three, and never done', () => {
+    expect([...FAILABLE_STATES].sort()).toEqual(['blocked', 'waiting', 'working'])
+    expect(FAILABLE_STATES.has('done' as never)).toBe(false)
   })
 
   it('refuses failed when there is no hook state at all, however dead the pane is', () => {
@@ -75,6 +90,18 @@ describe('every "cannot tell" row', () => {
   it('a FRESH working with an inconclusive probe is still working', () => {
     // A hook event seconds old is reliable session information; nothing needs probing to say so.
     expect(view({ state: 'working', pane: 'unknown' }).kind).toBe('working')
+  })
+
+  it('a stale waiting/blocked with an inconclusive probe keeps its state, marked stale', () => {
+    // Deliberately NOT downgraded to unknown the way `working` is. `working` claims something is
+    // happening now; `waiting`/`blocked` claim a standing request, which does not become less true
+    // by sitting still — and those are the states an operator parks overnight, so downgrading them
+    // on an unverifiable probe would erase the most actionable thing on the canvas.
+    for (const state of ['waiting', 'blocked'] as const) {
+      const v = deriveNodeStatus({ now: NOW, state, updatedAt: old, pane: 'unknown' })
+      expect(v.kind).toBe(state)
+      expect(v.stale).toBe(true)
+    }
   })
 
   it('a stale working nobody probed stays working, marked stale', () => {
@@ -256,19 +283,31 @@ describe('roll-up onto a group frame', () => {
 })
 
 describe('probe candidates', () => {
-  it('picks only stale working nodes', () => {
+  it('picks every stale state a dead pane could change, and nothing else', () => {
     expect(
       paneProbeCandidates(
         [
           { id: 'stale-working', state: 'working', updatedAt: old },
-          { id: 'fresh-working', state: 'working', updatedAt: fresh },
+          { id: 'stale-waiting', state: 'waiting', updatedAt: old },
           { id: 'stale-blocked', state: 'blocked', updatedAt: old },
+          { id: 'fresh-working', state: 'working', updatedAt: fresh },
+          { id: 'stale-done', state: 'done', updatedAt: old },
           { id: 'no-clock', state: 'working' },
           { id: 'no-state' }
         ],
         NOW
       )
-    ).toEqual(['stale-working'])
+    ).toEqual(['stale-working', 'stale-waiting', 'stale-blocked'])
+  })
+
+  it('does not re-probe a node whose pane was asked about within the re-check window', () => {
+    // A `blocked` state never decays out of the candidate set on its own, so without this an
+    // overnight parked approval would be probed on every pass until somebody answered it.
+    const entry = { id: 'n', state: 'blocked' as const, updatedAt: old }
+    expect(paneProbeCandidates([{ ...entry, paneAt: NOW - 1000 }], NOW)).toEqual([])
+    expect(
+      paneProbeCandidates([{ ...entry, paneAt: NOW - (PANE_RECHECK_MS + 1000) }], NOW)
+    ).toEqual(['n'])
   })
 
   it('does not re-probe a node whose failure is already latched', () => {
