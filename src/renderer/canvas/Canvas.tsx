@@ -87,6 +87,9 @@ import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { CommandPalette, type Command } from '../components/CommandPalette'
 import {
   IconCollapse,
+  IconExpandCard,
+  IconPutAwayCard,
+  IconPin,
   IconBranch,
   IconDuplicate,
   IconEditor,
@@ -439,10 +442,22 @@ import { chordHeld, isHoldChord, isModifierEventKey, matchesShortcut } from '@sh
 // write/close as "the confirm-gated pair" from inside `src/main` — which this project cannot see —
 // while the gating lived in two hand-written blocks here, so the set decided nothing.
 import { isDestructiveVerb } from '@shared/control-verbs'
+import {
+  planWorkerFrame,
+  workerFrameLabel,
+  workerNodeTitle,
+  workerTaskSummary
+} from '@shared/worker-frame'
 import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
   applyMutationToFlow,
+  applyWorkerFramePlan,
+  workerFrameNodeOf,
+  markManualPlacement,
+  setNodesPinned,
+  compactToggleState,
+  toggleCompactNode,
   agentLaunchOverride,
   canvasControlNodeGeometry,
   claudeLaunchCommand,
@@ -2968,9 +2983,22 @@ export function Canvas() {
         return true
       })
       onNodesChange(managed)
+      // "I put it there": the durable memory automatic placement reads as a refusal. Only a HAND
+      // gesture reaches here — a drag end (`dragging: false`) or a live resize (`resizing`).
+      // Programmatic placement (arrange, tidy, maximize, zone snap, the spawn-time tray) goes
+      // through `setNodes` directly and emits no change at all, which is exactly the distinction
+      // the flag has to make. A bare `dimensions` change is React Flow MEASURING and is not one.
+      const placed = managed
+        .filter(
+          (c) =>
+            (c.type === 'position' && c.dragging === false) ||
+            (c.type === 'dimensions' && !!c.resizing)
+        )
+        .map((c) => (c as { id: string }).id)
+      if (placed.length) setNodes((ns) => markManualPlacement(ns as CanvasNode[], placed))
       if (managed.some((c) => c.type !== 'select')) markDirty()
     },
-    [onNodesChange, markDirty, ephParentPosition]
+    [onNodesChange, markDirty, ephParentPosition, setNodes]
   )
 
   // Resolve a node's agent id, with a tags fallback for not-yet-migrated legacy nodes and a
@@ -6910,6 +6938,56 @@ export function Canvas() {
               onClick: () => toggleCollapseNodes(ids)
             }
           ] as MenuItem[])),
+      // The same one action as the header's toggle. Single target only, and only when it has
+      // something to do — `compactToggleState` is the one decision both surfaces ask.
+      ...(ids.length === 1 && !isHidden('compact-size', hidden)
+        ? (() => {
+            const state = compactToggleState(
+              nodesRef.current.find((n) => n.id === ids[0]) as CanvasNode | undefined
+            )
+            return state
+              ? ([
+                  {
+                    label: state === 'put-away' ? 'Put away' : 'Expand',
+                    icon: state === 'put-away' ? <IconPutAwayCard /> : <IconExpandCard />,
+                    hint:
+                      state === 'put-away'
+                        ? 'Back to the compact size and position it had. The session keeps running.'
+                        : 'Grow this card to the working size. The session is untouched.',
+                    onClick: () => {
+                      setNodes((ns) => toggleCompactNode(ns as CanvasNode[], ids[0]))
+                      markDirty()
+                    }
+                  }
+                ] as MenuItem[])
+              : []
+          })()
+        : []),
+      // "Keep this where I put it": the durable refusal automatic placement reads. Nothing in
+      // this release moves a pinned node, because nothing yet moves nodes on its own — the flag
+      // exists so that when the layout engine lands, the answer is already recorded.
+      ...(isHidden('pin', hidden)
+        ? []
+        : (() => {
+            const targets = ids
+              .map((nid) => nodesRef.current.find((n) => n.id === nid))
+              .filter((n): n is CanvasNode => !!n)
+            if (!targets.length) return [] as MenuItem[]
+            const pinning = !targets.every((n) => n.data.pinned)
+            return [
+              {
+                label: pinning
+                  ? ids.length > 1 ? 'Pin positions' : 'Pin position'
+                  : ids.length > 1 ? 'Unpin positions' : 'Unpin position',
+                icon: <IconPin />,
+                hint: 'Automatic placement leaves a pinned node exactly where it is.',
+                onClick: () => {
+                  setNodes((ns) => setNodesPinned(ns as CanvasNode[], ids, pinning))
+                  markDirty()
+                }
+              }
+            ] as MenuItem[]
+          })()),
       ...(ids.some((nid) => nodesRef.current.find((n) => n.id === nid)?.type === 'terminal')
         ? ([
             ...(isHidden('markdown-view', hidden)
@@ -8539,11 +8617,63 @@ export function Canvas() {
         // A node that arrives ALREADY parented (open-agent --group placed it into a frame with
         // relative coords) must pass through untouched — re-running parentInto would read its
         // relative position as absolute and land it off-frame.
-        const placed = node.parentId ? node : src.parentId ? parentInto(node, src.parentId) : node
+        const positioned = node.parentId ? node : src.parentId ? parentInto(node, src.parentId) : node
+        // Every node the control plane opens is a delegated WORKER — the only kind automatic
+        // placement may arrange. The operator's own opens carry no role and read as `primary`.
+        const placed: CanvasNode = {
+          ...positioned,
+          data: { ...positioned.data, role: 'worker' as const }
+        }
         setNodes((ns) => [...ns, placed])
         connect(placed.id)
         markDirty()
         return placed.id
+      }
+      // Generated cards say who opened them and what they run: "Terminal 13" and a bare "Claude"
+      // named neither. `titleAuto` is left alone, so the agent's own session name still replaces
+      // this once there is one — the owner+task line lives in `taskSummary`, which survives it.
+      const ownerTitle = (src.data.title as string) || sourceNodeId
+      // Where this fan-out's numbering continues from, read off the lineage ropes already drawn.
+      const priorOpened = controlEdgesRef.current.filter(
+        (e) => e.source === sourceNodeId && nodesRef.current.some((n) => n.id === e.target)
+      ).length
+      const generated = (
+        node: CanvasNode,
+        roleLabel: string,
+        index: number,
+        task?: string
+      ): CanvasNode => ({
+        ...node,
+        data: {
+          ...node.data,
+          title: workerNodeTitle(ownerTitle, roleLabel, priorOpened + index + 1),
+          taskSummary: workerTaskSummary(ownerTitle, task)
+        }
+      })
+      /**
+       * The tray (@shared/worker-frame): collect this spawner's workers under one frame. Runs in
+       * its own `setNodes` because `addAndConnect`'s append is async — the callback sees the
+       * canvas WITH the new nodes on it. Skipped when the caller named a frame itself: an
+       * explicit `--group` is a placement decision the agent already made.
+       */
+      const applyTray = (newIds: string[]): void => {
+        if (!newIds.length) return
+        setNodes((ns) => {
+          const flow = ns as CanvasNode[]
+          const plan = planWorkerFrame({
+            nodes: flow.map(workerFrameNodeOf),
+            spawnerId: sourceNodeId,
+            newWorkerIds: newIds,
+            // The ropes this tick drew are not in the render-time ref yet (the same reason
+            // `bridgeTo` carries its own `drawn` accumulator), so name them directly.
+            ropes: [
+              ...controlEdgesRef.current.map((e) => ({ source: e.source, target: e.target })),
+              ...newIds.map((id) => ({ source: sourceNodeId, target: id }))
+            ]
+          })
+          return applyWorkerFramePlan(flow, plan, workerFrameLabel(ownerTitle))
+        })
+        markDirty()
       }
       // Grid slots INSIDE a group frame (open-agent --group): 2 columns of terminal-sized
       // cells under the header. Pure geometry — the frame is grown to fit before children land.
@@ -8712,12 +8842,17 @@ export function Canvas() {
             const termCwd = args.cwd || groupCwd || srcCwd
             const make = (i: number): CanvasNode =>
               armAfter(
-                createTerminalNode(
-                  nodesRef.current.length + i,
-                  termCwd,
-                  placeBelow(i),
-                  args.cmd,
-                  sshFor(termCwd)
+                generated(
+                  createTerminalNode(
+                    nodesRef.current.length + i,
+                    termCwd,
+                    placeBelow(i),
+                    args.cmd,
+                    sshFor(termCwd)
+                  ),
+                  'Terminal',
+                  i,
+                  args.cmd
                 ),
                 after ?? [],
                 undefined,
@@ -8726,6 +8861,7 @@ export function Canvas() {
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
+            if (!intoGroupId) applyTray(ids)
             reply({
               ok: true,
               message:
@@ -8765,25 +8901,31 @@ export function Canvas() {
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
             const agentCwd = args.cwd || groupCwd || srcCwd
+            const agentLabel = agentConfig(agentId)?.label ?? agentId
             const make = (i: number): CanvasNode =>
               armAfter(
-                createAgentNode(
-                  agentId,
-                  nodesRef.current.length + i,
-                  agentCwd,
-                  placeBelow(i),
-                  args.prompt,
-                  sshFor(agentCwd),
-                  account,
-                  activePermissionMode(agentId),
-                  // Same project the account funnel above resolves from: the canvas the verb runs
-                  // on, whose `.nodeterm/settings.json` launch command applies to what it opens.
-                  projStore.activeProjectId,
-                  // `--model` is a pass-through: `withAgentModel` re-validates the value at the
-                  // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
-                  // so an unsupported agent's command line stays byte-identical.
-                  args.model,
-                  geometry
+                generated(
+                  createAgentNode(
+                    agentId,
+                    nodesRef.current.length + i,
+                    agentCwd,
+                    placeBelow(i),
+                    args.prompt,
+                    sshFor(agentCwd),
+                    account,
+                    activePermissionMode(agentId),
+                    // Same project the account funnel above resolves from: the canvas the verb runs
+                    // on, whose `.nodeterm/settings.json` launch command applies to what it opens.
+                    projStore.activeProjectId,
+                    // `--model` is a pass-through: `withAgentModel` re-validates the value at the
+                    // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
+                    // so an unsupported agent's command line stays byte-identical.
+                    args.model,
+                    geometry
+                  ),
+                  agentLabel,
+                  i,
+                  args.prompt
                 ),
                 after ?? [],
                 undefined,
@@ -8792,6 +8934,7 @@ export function Canvas() {
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
+            if (!intoGroupId) applyTray(ids)
             // Context-link the new session(s) back to the opener (same rationale as spawn-team:
             // the fan-out needs a fan-in). The nodes were added via setNodes in this tick, so
             // resolve their endpoints from `agentId` rather than the not-yet-updated canvas.
@@ -9145,7 +9288,16 @@ export function Canvas() {
                 vStore.activeProjectId
               )
               return armAfter(
-                { ...node, data: { ...node.data, title: `Verify: ${lens}`, titleAuto: false } },
+                {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    title: `Verify: ${lens}`,
+                    titleAuto: false,
+                    role: 'worker' as const,
+                    taskSummary: workerTaskSummary(ownerTitle, `${lens} review of ${targetTitle}`)
+                  }
+                },
                 [targetId]
               )
             })
@@ -9169,7 +9321,16 @@ export function Canvas() {
                       vMode,
                       vStore.activeProjectId
                     )
-                    return { ...j, data: { ...j.data, title: 'Verify: verdict', titleAuto: false } }
+                    return {
+                      ...j,
+                      data: {
+                        ...j.data,
+                        title: 'Verify: verdict',
+                        titleAuto: false,
+                        role: 'worker' as const,
+                        taskSummary: workerTaskSummary(ownerTitle, `verdict on ${targetTitle}`)
+                      }
+                    }
                   })(),
                   reviewerIds,
                   reviewerIds // the reviewers exist only in this tick — see armAfter
@@ -9264,7 +9425,19 @@ export function Canvas() {
                 // model its agent cannot switch simply launches bare (withAgentModel no-ops).
                 typeof r.model === 'string' ? r.model : undefined
               )
-              return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
+              const named = r.title
+                ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } }
+                : generated(node, agentConfig(memberAgent)?.label ?? memberAgent, i, r.prompt)
+              // Team members are delegated workers like any other control-opened node; their frame
+              // is built explicitly below, so they are never also swept into a tray.
+              return {
+                ...named,
+                data: {
+                  ...named.data,
+                  role: 'worker' as const,
+                  taskSummary: workerTaskSummary(ownerTitle, r.prompt)
+                }
+              }
             })
             const memberIds = members.map((m) => m.id)
             // One computed array: append → arrange in a grid below the conductor → wrap in a group.

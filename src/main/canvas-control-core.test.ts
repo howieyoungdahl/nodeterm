@@ -363,6 +363,30 @@ describe('parseControlRequest', () => {
     }
   })
 
+  // The spawn defaults are BEHAVIOUR the caller cannot see any other way: it asks for one node
+  // and gets a named worker that may have been moved into a frame. A body that does not say so
+  // describes a product that no longer exists (this repo shipped exactly that drift as #269).
+  it('both agent-facing texts describe the worker role, the generated name and the tray frame', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body.toLowerCase()).toContain('worker')
+      // The name it will actually see back from `list`, and that the session name later wins.
+      expect(body).toContain('· <agent>')
+      expect(body.toLowerCase()).toContain('summary')
+      // The single-member rule, so a caller does not report a missing frame as a bug.
+      expect(body.toLowerCase()).toContain('second worker')
+      // And the two operator gestures that legitimately leave a worker outside the frame.
+      expect(body.toLowerCase()).toContain('pinned')
+    }
+  })
+
+  it('both agent-facing texts say putting a card away does not touch the session', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body.toLowerCase()).toContain('put')
+      // Line-wrap tolerant: the SKILL body wraps this sentence, the marker block does not.
+      expect(body.toLowerCase()).toMatch(/neither touches the\s+session|keeps its session running/)
+    }
+  })
+
   it('both agent-facing texts separate a denial from an unanswered dialog', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       // The two answers carry opposite guidance — a denial is final, a timeout is retryable — and

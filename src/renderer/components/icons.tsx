@@ -348,6 +348,26 @@ export const IconMaximize = () => (
   </svg>
 )
 
+/** Grow a card back to the working size — the "put away / expand" toggle's EXPAND state. Distinct
+ *  from IconMaximize on purpose: this one grows the node to its configured size, not to the
+ *  viewport, and the two toggles sit side by side in the same header. */
+export const IconExpandCard = () => (
+  <svg {...S}>
+    <rect x="3" y="4" width="8" height="7" rx="1.5" />
+    <path d="M13 13h8v7h-8z" />
+    <path d="M13 10l7-4" />
+  </svg>
+)
+
+/** Shrink a card back to its compact footprint — the same toggle's PUT AWAY state. */
+export const IconPutAwayCard = () => (
+  <svg {...S}>
+    <rect x="13" y="13" width="8" height="7" rx="1.5" />
+    <path d="M3 4h8v7H3z" />
+    <path d="M20 6l-7 4" />
+  </svg>
+)
+
 /** Fullscreen restore — the same arrows pointing back inward: the maximize toggle's second click. */
 export const IconRestoreSize = () => (
   <svg {...S}>

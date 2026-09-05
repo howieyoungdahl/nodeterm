@@ -22,12 +22,15 @@ describe('isHidden', () => {
 
 describe('hideable inventories', () => {
   it('list the agreed ids and nothing destructive', () => {
+    // `compact-size` / `pin` (menu) and `compact` (header) are the put-away-and-pin pair: both
+    // are presentation-only — putting a card away keeps its session running — so both are
+    // hideable. Nothing that ends, restarts or discards a session is in either list.
     expect(HIDEABLE_MENU_ITEMS.map((r) => r.id)).toEqual([
       'group', 'remove-from-group', 'colors', 'duplicate', 'snap-zone', 'collapse',
-      'markdown-view', 'refresh-terminal'
+      'compact-size', 'pin', 'markdown-view', 'refresh-terminal'
     ])
     expect(HIDEABLE_HEADER_BUTTONS.map((r) => r.id)).toEqual([
-      'maximize', 'refresh', 'mic', 'ai-name', 'comments', 'hide-fanout', 'tidy-fanout'
+      'maximize', 'compact', 'refresh', 'mic', 'ai-name', 'comments', 'hide-fanout', 'tidy-fanout'
     ])
   })
   it('gives every entry a user-facing label', () => {

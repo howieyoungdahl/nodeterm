@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest'
 import {
   addSelectionToGroup,
   alignNodes,
+  applyWorkerFramePlan,
   arrangeNodes,
   commonParentId,
+  compactToggleState,
   canvasControlNodeGeometry,
   createAccountLoginNode,
   createCodexAccountLoginNode,
@@ -14,6 +16,7 @@ import {
   fitGroupToChildren,
   flowToNodeStates,
   groupSelectedNodes,
+  markManualPlacement,
   nodeStatesToFlow,
   nodeSshFor,
   normalizeLegacyServerControlSpawnMutation,
@@ -23,7 +26,10 @@ import {
   resolveNewNodeAccount,
   resizeTerminalNodeGeometry,
   selectedRootIds,
-  ungroupNodes
+  setNodesPinned,
+  toggleCompactNode,
+  ungroupNodes,
+  workerFrameNodeOf
 } from './workspace'
 import type { CanvasNode } from './workspace'
 
@@ -978,5 +984,307 @@ describe('createAgentNode prompt injection', () => {
   it('keeps argv injection byte-identical for codex and gemini', () => {
     expect(createAgentNode('codex', 0, undefined, undefined, 'do X').data.initialCommand).toBe("codex 'do X'")
     expect(createAgentNode('gemini', 0, undefined, undefined, 'do X').data.initialCommand).toBe("gemini 'do X'")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PR-A A3 — "Put away / Expand", the one action.
+//
+// The toggle is a canvas-state transform and nothing else. Two properties carry the feature:
+// the round-trip gives back the EXACT rect (size and position, remembered rather than
+// recomputed), and it never reaches the transport — putting a worker away is filing it, not
+// ending it, so the tmux session and its PTY are untouched by construction.
+// ---------------------------------------------------------------------------
+
+/** The configured "normal" size, passed explicitly so these never depend on the settings store. */
+const NORMAL = { width: 640, height: 440 }
+/** What a control-spawned worker arrives at (COMPACT_CONTROL_NODE_SIZE). */
+const COMPACT = { width: 440, height: 320 }
+
+const compactTerm = (
+  id: string,
+  pos: { x: number; y: number },
+  parentId?: string,
+  data: Partial<CanvasNode['data']> = {}
+): CanvasNode =>
+  ({
+    id,
+    type: 'terminal',
+    position: pos,
+    width: COMPACT.width,
+    height: COMPACT.height,
+    data: { title: id, color: '#888', group: null, role: 'worker', controlSize: 'compact', ...data },
+    ...(parentId ? { parentId, extent: 'parent' as const } : {})
+  }) as unknown as CanvasNode
+
+describe('compactToggleState', () => {
+  it('offers EXPAND for a card smaller than the configured normal size', () => {
+    expect(compactToggleState(compactTerm('t1', { x: 0, y: 0 }), NORMAL)).toBe('expand')
+  })
+
+  it('offers PUT AWAY for a card that remembers a compact rect', () => {
+    const node = compactTerm('t1', { x: 0, y: 0 }, undefined, {
+      compactRect: { x: 0, y: 0, ...COMPACT }
+    })
+    expect(compactToggleState({ ...node, width: 640, height: 440 } as CanvasNode, NORMAL)).toBe(
+      'put-away'
+    )
+  })
+
+  it('offers nothing for a card already at the normal size — the toggle is never a no-op', () => {
+    const normal = { ...compactTerm('t1', { x: 0, y: 0 }), width: 640, height: 440 } as CanvasNode
+    expect(compactToggleState(normal, NORMAL)).toBeNull()
+  })
+
+  it('stands down for a collapsed card, a maximized one, a frame and a missing node', () => {
+    const base = compactTerm('t1', { x: 0, y: 0 })
+    expect(
+      compactToggleState({ ...base, data: { ...base.data, collapsed: true } } as CanvasNode, NORMAL)
+    ).toBeNull()
+    expect(
+      compactToggleState(
+        {
+          ...base,
+          data: { ...base.data, premaxRect: { x: 0, y: 0, width: 10, height: 10 } }
+        } as CanvasNode,
+        NORMAL
+      )
+    ).toBeNull()
+    expect(compactToggleState(grp('g1', { x: 0, y: 0 }), NORMAL)).toBeNull()
+    expect(compactToggleState(undefined, NORMAL)).toBeNull()
+  })
+})
+
+describe('toggleCompactNode', () => {
+  it('round-trips size AND position exactly — the rect is remembered, not recomputed', () => {
+    const nodes = [compactTerm('t1', { x: 120, y: 80 })]
+    const expanded = toggleCompactNode(nodes, 't1', NORMAL)
+    const grown = expanded.find((n) => n.id === 't1')!
+    expect(grown.width).toBe(NORMAL.width)
+    expect(grown.height).toBe(NORMAL.height)
+    expect(grown.data.compactRect).toEqual({ x: 120, y: 80, ...COMPACT })
+    expect(grown.data.controlSize).toBe('normal')
+
+    const restored = toggleCompactNode(expanded, 't1', NORMAL).find((n) => n.id === 't1')!
+    expect(restored.position).toEqual({ x: 120, y: 80 })
+    expect(restored.width).toBe(COMPACT.width)
+    expect(restored.height).toBe(COMPACT.height)
+    expect(restored.data.compactRect).toBeUndefined()
+    expect(restored.data.controlSize).toBe('compact')
+  })
+
+  it('round-trips a card inside a frame to its own slot, not to the frame origin', () => {
+    // The remembered rect is ROOT-space, so a frame that grows around the expanded card (and
+    // therefore moves its own origin) must not shift the card on the way back.
+    const nodes = [grp('g1', { x: 400, y: 300 }), compactTerm('t1', { x: 40, y: 60 }, 'g1')]
+    const expanded = toggleCompactNode(nodes, 't1', NORMAL)
+    expect(expanded.find((n) => n.id === 't1')!.data.compactRect).toEqual({
+      x: 440,
+      y: 360,
+      ...COMPACT
+    })
+
+    const after = toggleCompactNode(expanded, 't1', NORMAL)
+    const restored = after.find((n) => n.id === 't1')!
+    const frame = after.find((n) => n.id === 'g1')!
+    expect(restored.parentId).toBe('g1')
+    // Root-space position is what was promised back; the frame may sit anywhere by now.
+    expect({
+      x: restored.position.x + frame.position.x,
+      y: restored.position.y + frame.position.y
+    }).toEqual({ x: 440, y: 360 })
+    expect(restored.width).toBe(COMPACT.width)
+    expect(restored.height).toBe(COMPACT.height)
+  })
+
+  it('is a no-op when the toggle has nothing to offer', () => {
+    const nodes = [{ ...compactTerm('t1', { x: 0, y: 0 }), width: 640, height: 440 } as CanvasNode]
+    expect(toggleCompactNode(nodes, 't1', NORMAL)).toBe(nodes)
+    expect(toggleCompactNode(nodes, 'nope', NORMAL)).toBe(nodes)
+  })
+
+  it('touches NOTHING that could reach the PTY — no transport call, no respawn', () => {
+    // "Put away" is filing, not closing. The transform is pure over the nodes array: it must not
+    // read window.nodeTerminal (the only route to the transport from the renderer) and must not
+    // bump respawnNonce or re-arm initialCommand, either of which restarts the session.
+    const touched: string[] = []
+    const prior = Object.getOwnPropertyDescriptor(globalThis, 'window')
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      get() {
+        touched.push('window')
+        throw new Error('the compact toggle must not reach the transport')
+      }
+    })
+    try {
+      const nodes = [
+        compactTerm('t1', { x: 10, y: 20 }, undefined, {
+          respawnNonce: 7,
+          initialCommand: 'claude'
+        } as Partial<CanvasNode['data']>)
+      ]
+      const expanded = toggleCompactNode(nodes, 't1', NORMAL)
+      const back = toggleCompactNode(expanded, 't1', NORMAL).find((n) => n.id === 't1')!
+      expect(touched).toEqual([])
+      expect(back.data.respawnNonce).toBe(7)
+      expect(back.data.initialCommand).toBe('claude')
+      expect(back.id).toBe('t1')
+      expect(back.type).toBe('terminal')
+    } finally {
+      if (prior) Object.defineProperty(globalThis, 'window', prior)
+      else delete (globalThis as Record<string, unknown>).window
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PR-A A5 — pin and manual placement.
+//
+// The durable memory of "I put it there". Nothing in this release reads it (the layout engine is
+// PR-C); what matters here is that a HAND gesture writes it and a programmatic placement never
+// does — the distinction is the whole value of the flag.
+// ---------------------------------------------------------------------------
+
+describe('markManualPlacement', () => {
+  it('flags a hand-moved node, and only that node', () => {
+    const nodes = [term('t1', { x: 0, y: 0 }), term('t2', { x: 100, y: 0 })]
+    const out = markManualPlacement(nodes, ['t1'])
+    expect(out.find((n) => n.id === 't1')!.data.manualPlacement).toBe(true)
+    expect(out.find((n) => n.id === 't2')!.data.manualPlacement).toBeUndefined()
+  })
+
+  it('returns the SAME array when nothing changes — an already-flagged node re-renders nothing', () => {
+    const nodes = [term('t1', { x: 0, y: 0 })]
+    const once = markManualPlacement(nodes, ['t1'])
+    expect(markManualPlacement(once, ['t1'])).toBe(once)
+    expect(markManualPlacement(nodes, [])).toBe(nodes)
+    expect(markManualPlacement(nodes, ['ghost'])).toBe(nodes)
+  })
+
+  it('is never set by PROGRAMMATIC placement — that is the distinction it exists to make', () => {
+    const nodes = [term('t1', { x: 0, y: 0 }), term('t2', { x: 900, y: 700 })]
+    for (const n of arrangeNodes(nodes, ['t1', 't2'])) {
+      expect(n.data.manualPlacement).toBeUndefined()
+    }
+    const tidied = applyWorkerFramePlan(
+      nodes.map((n) => ({ ...n, data: { ...n.data, role: 'worker' as const } })),
+      { kind: 'create', memberIds: ['t1', 't2'] },
+      'owner workers'
+    )
+    for (const n of tidied) expect(n.data.manualPlacement).toBeUndefined()
+  })
+})
+
+describe('setNodesPinned', () => {
+  it('pins and unpins, and an unpinned node carries no key at all', () => {
+    const nodes = [term('t1', { x: 0, y: 0 }), term('t2', { x: 10, y: 0 })]
+    const pinned = setNodesPinned(nodes, ['t1'], true)
+    expect(pinned.find((n) => n.id === 't1')!.data.pinned).toBe(true)
+    expect(pinned.find((n) => n.id === 't2')!.data.pinned).toBeUndefined()
+    // Cleared to undefined rather than false: the shared project file should not grow a key for
+    // every node the operator ever unpinned.
+    const cleared = setNodesPinned(pinned, ['t1'], false)
+    expect(cleared.find((n) => n.id === 't1')!.data.pinned).toBeUndefined()
+    expect(setNodesPinned(cleared, ['t1'], false)).toBe(cleared)
+    expect(setNodesPinned(nodes, [], true)).toBe(nodes)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PR-A A2 — the renderer half of the tray. The DECISION is shared
+// (@shared/worker-frame, unit-tested there); this is the geometry application, which goes
+// through the same transforms a hand-made frame does.
+// ---------------------------------------------------------------------------
+
+describe('applyWorkerFramePlan', () => {
+  it('wraps the members in a new frame, labelled and marked as a tray', () => {
+    const nodes = [
+      term('t1', { x: 0, y: 0 }),
+      term('t2', { x: 400, y: 0 })
+    ].map((n) => ({ ...n, data: { ...n.data, role: 'worker' as const } })) as CanvasNode[]
+    const out = applyWorkerFramePlan(nodes, { kind: 'create', memberIds: ['t1', 't2'] }, 'lane workers')
+    const frame = out.find((n) => n.type === 'group')!
+    expect(frame.data.title).toBe('lane workers')
+    expect(frame.data.taskFrame).toBe(true)
+    expect(out.find((n) => n.id === 't1')!.parentId).toBe(frame.id)
+    expect(out.find((n) => n.id === 't2')!.parentId).toBe(frame.id)
+  })
+
+  it('joins an existing frame without disturbing what is already in it', () => {
+    const nodes = [
+      grp('g1', { x: 50, y: 50 }),
+      term('t1', { x: 20, y: 20 }, 'g1'),
+      term('t2', { x: 500, y: 400 })
+    ]
+    const out = applyWorkerFramePlan(nodes, { kind: 'join', groupId: 'g1', memberIds: ['t2'] }, 'x')
+    expect(out.find((n) => n.id === 't2')!.parentId).toBe('g1')
+    // The existing member keeps its exact slot.
+    expect(out.find((n) => n.id === 't1')!.position).toEqual({ x: 20, y: 20 })
+  })
+
+  it('returns the canvas untouched for a plan with nothing to do, and for a refused wrap', () => {
+    const nodes = [term('t1', { x: 0, y: 0 })]
+    expect(applyWorkerFramePlan(nodes, { kind: 'none', reason: 'single-worker' }, 'x')).toBe(nodes)
+    // groupSelectedNodes refuses a set that does not share one container; a refusal must leave
+    // the canvas alone rather than half-forming a tray.
+    const mixed = [grp('g1', { x: 0, y: 0 }), term('t1', { x: 5, y: 5 }, 'g1'), term('t2', { x: 900, y: 0 })]
+    expect(applyWorkerFramePlan(mixed, { kind: 'create', memberIds: ['t1', 't2'] }, 'x')).toBe(mixed)
+  })
+})
+
+describe('workerFrameNodeOf', () => {
+  it('reports exactly the facts the shared planner reads', () => {
+    const node = compactTerm('t1', { x: 0, y: 0 }, 'g1', {
+      pinned: true,
+      manualPlacement: true,
+      taskFrame: true
+    })
+    expect(workerFrameNodeOf(node)).toEqual({
+      id: 't1',
+      kind: 'terminal',
+      parentId: 'g1',
+      role: 'worker',
+      pinned: true,
+      manualPlacement: true,
+      taskFrame: true
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PR-A persistence. The new fields are a statement about THIS CANVAS, so they ride the shared
+// project file (plan D6). Backward compatibility is the load-bearing half: a canvas saved before
+// any of this existed must come back byte-identically, with no role, which reads as `primary`.
+// ---------------------------------------------------------------------------
+
+describe('PR-A node fields survive a save/load round trip', () => {
+  it('carries role, taskSummary, taskFrame, compactRect, pinned and manualPlacement', () => {
+    const nodes = [
+      compactTerm('t1', { x: 10, y: 20 }, undefined, {
+        taskSummary: 'Opened by lane — do the thing',
+        compactRect: { x: 10, y: 20, ...COMPACT },
+        pinned: true,
+        manualPlacement: true
+      }),
+      { ...grp('g1', { x: 0, y: 0 }), data: { ...grp('g1', { x: 0, y: 0 }).data, taskFrame: true } } as CanvasNode
+    ]
+    const back = nodeStatesToFlow(flowToNodeStates(nodes))
+    const t1 = back.find((n) => n.id === 't1')!
+    expect(t1.data.role).toBe('worker')
+    expect(t1.data.taskSummary).toBe('Opened by lane — do the thing')
+    expect(t1.data.compactRect).toEqual({ x: 10, y: 20, ...COMPACT })
+    expect(t1.data.pinned).toBe(true)
+    expect(t1.data.manualPlacement).toBe(true)
+    expect(back.find((n) => n.id === 'g1')!.data.taskFrame).toBe(true)
+  })
+
+  it('leaves a pre-feature canvas alone — absent role reads as the operator’s own node', () => {
+    const back = nodeStatesToFlow(flowToNodeStates([term('t1', { x: 0, y: 0 })]))
+    const t1 = back.find((n) => n.id === 't1')!
+    expect(t1.data.role).toBeUndefined()
+    expect(t1.data.pinned).toBeUndefined()
+    expect(t1.data.manualPlacement).toBeUndefined()
+    expect(t1.data.compactRect).toBeUndefined()
+    expect(t1.data.taskSummary).toBeUndefined()
   })
 })
