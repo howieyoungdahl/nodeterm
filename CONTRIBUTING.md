@@ -253,12 +253,18 @@ that file advertises presents nothing forever when the file is old or unreadable
 hook script alone could heal itself, the same node proved itself through one client and was refused
 through another for the life of the session.
 
-**Local generated sh clients recover shared-Codex identity before their env gate.** A Codex tool
-shell is forked by the account-scoped app-server, so it has `CODEX_THREAD_ID` but not the pane's
-`NODETERM_*`. Managed hooks, local `nodeterm.sh`, and local `context.sh` must prepend
-`codexThreadIdentityResolverSh(codexThreadIdentityRoot())` before checking `NODETERM_NODE_ID` or
-`NODETERM_CANVAS_CONTROL`. Keep the SSH shim constants machine-neutral: baking the desktop/server
-record path into a remote host is both wrong and a local-layout leak.
+**Local generated sh clients resolve shared-Codex identity before their env gate.** A reused
+account-scoped app-server can give a tool shell absent, incomplete, or complete foreign
+`NODETERM_*`. Always look up its exact thread/account binding: recover incomplete context, accept
+matching complete context, preserve complete direct launches only when records are absent, and
+refuse conflicts or existing invalid/unreadable/ambiguous evidence by name before transport.
+Complete means a valid node and endpoint plus any nonempty client `NODETERM_CANVAS_CONTROL`;
+agent-role metadata and `NODETERM_SERVER_CANVAS_CONTROL` are not substitutes. Recovery clears
+inherited transport/credential fields before loading the bound endpoint. Managed hooks must pass
+`'hook'` to `codexThreadIdentityResolverSh` so refusal drains stdin and exits 0 with empty stdout;
+commands exit 1. The shell checks protected-record shape/scope, not HMAC signatures. See
+`docs/shared-codex-node-identity.md` for account semantics and exact comparisons. Keep the SSH shim
+constants machine-neutral: a local record root must never be baked into a remote host's copy.
 
 **A stream error is not a throw you can catch.** When a write to `process.stdout`/`stderr` fails —
 `EPIPE` down a closed pipe, `EIO` after macOS revokes a closed terminal's tty — node reports it by
