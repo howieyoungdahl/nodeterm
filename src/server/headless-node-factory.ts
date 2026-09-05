@@ -20,10 +20,12 @@ import {
   hasHooks,
   resolvePermissionMode,
   supportsSessionIdFlag,
+  supportsSessionNameFlag,
   type AgentId,
   type BuiltinAgentId
 } from '../shared/agents/config'
 import { assembleLaunchCommand } from '../shared/agents/launch'
+import { sessionNameForNode } from '../shared/agents/session-name'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 import { oneLine } from '../shared/one-line'
 import type {
@@ -1120,6 +1122,9 @@ export class HeadlessNodeFactory {
       )
 
       for (let i = 0; i < count; i++) {
+        // Minted before the command, because the node id is what makes the session's display name
+        // unique (see `buildSessionName`). Still exactly one `nextId` call per node.
+        const id = nextId('term')
         let command = args.cmd
         let title = `Terminal ${startIndex + i + 1}`
         let color: string = NODE_COLORS[(startIndex + i) % NODE_COLORS.length]
@@ -1146,6 +1151,21 @@ export class HeadlessNodeFactory {
               permissionMode,
               sessionId: mintedSessionId,
               sessionIdFlagSupported,
+              // Named for the same reason the desktop names its nodes, and it matters MORE here:
+              // this shell appends `--remote-control`, so every session it opens enters the
+              // account-wide peer list, where an unnamed one is auto-named from the hostname.
+              // Same builder, same segments — a node opened by an agent must not be named by a
+              // different rule from one opened by hand.
+              sessionName: sessionNameForNode({
+                nodeId: id,
+                agentLabel: config.label,
+                cwd,
+                task: args.prompt
+              }),
+              sessionNameFlagSupported: supportsSessionNameFlag(
+                agentId as AgentId,
+                caps?.nameFlag === true
+              ),
               launchCmdOverride: settings.agentLaunchCommands?.[agentId as BuiltinAgentId],
               sharedIdentity: codexSharedIdentity,
               model: args.model
@@ -1154,7 +1174,6 @@ export class HeadlessNodeFactory {
           ).command
         }
 
-        const id = nextId('term')
         // Match the desktop's `armAfter`: if every dependency is already done, launch now rather
         // than persisting a wait that has no future edge left to wake it.
         const pendingLaunch = command && mustWait

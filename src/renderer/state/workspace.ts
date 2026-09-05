@@ -10,8 +10,14 @@ import type {
 } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
-import { agentConfig, capabilityAgentId, supportsSessionIdFlag } from '@shared/agents/config'
+import {
+  agentConfig,
+  capabilityAgentId,
+  supportsSessionIdFlag,
+  supportsSessionNameFlag
+} from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
+import { sessionNameForNode } from '@shared/agents/session-name'
 import { agentAccountColor } from '@shared/agents/account-color'
 import { boundAccountId } from '@shared/agents/account-binding'
 import { agentEnvSnapshot } from '../lib/agentEnv'
@@ -688,6 +694,22 @@ export function createAgentNode(
   const customAgent = agentConfig(agentId)
     ? undefined
     : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
+  // Minted BEFORE the command is assembled, because the id is the only thing that makes the
+  // session's display name unique — see `buildSessionName`. It is the same value the returned node
+  // carries; `nextId` is still called exactly once.
+  const nodeId = nextId('term')
+  // The name this session will be known by in the CLI's own listings — its prompt box, its
+  // `/resume` picker and, for a Remote Control session, the account-wide peer list that spans every
+  // machine on the account. Left to itself the CLI derives one from the working directory (which
+  // collides the moment two nodes share a directory) or prefixes it with the hostname. The task
+  // segment is the launch prompt: at creation it is the only statement of what this session is for,
+  // and the node's title is still just the agent's label.
+  const sessionName = sessionNameForNode({
+    nodeId,
+    agentLabel: label,
+    cwd: ssh ? ssh.remoteCwd : cwd,
+    task: initialPrompt
+  })
   const { command: initialCommand, missingEnv } = assembleLaunchCommand(
     {
       agentId,
@@ -697,6 +719,16 @@ export function createAgentNode(
       permissionMode,
       sessionId: mintedSessionId,
       sessionIdFlagSupported,
+      sessionName,
+      // Probe-gated: an unadvertised flag makes the CLI EXIT, so an unprobed or older CLI gets the
+      // bare command line it has always had.
+      //
+      // A REMOTE node is refused outright, because the only probe we have describes the LOCAL CLI
+      // and the command runs on the host — the rule CLAUDE.md sets for claude's `auto` gate, which
+      // asks the connection's own probe rather than this one. There is no remote `--help` probe for
+      // this flag yet, so a remote session keeps the name its own CLI generates. Naming it needs
+      // that probe first; guessing from this machine's claude could kill the launch outright.
+      sessionNameFlagSupported: !ssh && supportsSessionNameFlag(agentId, cliCaps.nameFlag),
       // A per-builtin launch-command override (Settings → Agents → Launch commands) replaces the
       // program in the assembled line; undefined for a builtin with no override and for custom
       // agents (they own their launchCmd). Wins over the shared-identity launcher, like a custom
@@ -724,7 +756,7 @@ export function createAgentNode(
   }
   const size = terminalNodeSize()
   return {
-    id: nextId('term'),
+    id: nodeId,
     type: 'terminal',
     ...placeNode('terminal', center, index, size.width, size.height),
     data: {

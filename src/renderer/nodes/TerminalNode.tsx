@@ -180,13 +180,15 @@ import {
   reportsOwnCopy,
   agentConfig,
   capabilityAgentId,
+  supportsSessionNameFlag,
   type AgentId
 } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { assembleResumeCommand } from '@shared/agents/launch'
+import { sessionNameForNode } from '@shared/agents/session-name'
 import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
-import { ensureActivePermissionMode } from '../state/permissionMode'
+import { ensureActivePermissionMode, ensureClaudeCliCaps } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
 import {
   chipFor,
@@ -3368,6 +3370,19 @@ export function TerminalNode({
           const customAgent = agentConfig(agentId)
             ? undefined
             : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
+          // A cold restore with NO prior session id does not resume anything — it starts a FRESH
+          // session (18 of 40 nodes took that path after one host reboot, per the note above), and
+          // a fresh session the CLI names itself is the one that lands in the account-wide peer
+          // list under a hostname prefix. So the name is offered here too; the assembler drops it
+          // whenever an id IS known, because `--resume` joins a session that already has one.
+          // The task segment is the node's TITLE: the launch prompt is long gone by now, and the
+          // title is what this node has since been called.
+          const sessionName = sessionNameForNode({
+            nodeId: id,
+            agentLabel,
+            cwd: data.cwd,
+            task: data.title
+          })
           const { command: cmd } = assembleResumeCommand(
             {
               agentId,
@@ -3376,6 +3391,15 @@ export function TerminalNode({
               permissionMode: mode,
               model: data.agentModel,
               sharedIdentity: shared,
+              sessionName,
+              // Bounded and never-rejecting (see `ensureClaudeCliCaps`); unanswered ⇒ no flag ⇒ the
+              // command line this path has always typed. A remote session is refused here for the
+              // same reason as at creation: this probe describes the LOCAL CLI, and the line runs
+              // on the host.
+              sessionNameFlagSupported:
+                !data.ssh &&
+                !data.sshRemoteTmux &&
+                supportsSessionNameFlag(agentId, (await ensureClaudeCliCaps()).nameFlag),
               // The launch-command override rides the relaunch too, so a wrapper user's node comes
               // back through its wrapper after a reboot — the moment env/account setup matters.
               // Scoped to the OWNING project (`warmOwningProjectId`) so a project-level wrapper does

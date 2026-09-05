@@ -241,6 +241,19 @@ export const RENAME_CAPABLE = ['claude', 'grok'] as const
 // can read over the server's own socket (core/codex-session-name.ts). There is still no measured
 // rename command, so it stays out of RENAME_CAPABLE — the read⊇write invariant holds either way.
 export const TITLE_READ_CAPABLE = ['claude', 'codex', 'grok', 'gemini'] as const
+// Agents whose CLI accepts a display name for the session it is ABOUT to start, on the launch
+// command line itself.
+//
+// Distinct from RENAME_CAPABLE (which pushes `/rename` into a session that is already running) in
+// the one way that matters here: this one applies at the instant of launch and on cold restore,
+// which is exactly when there is no live session to type into. Between them they cover a session's
+// whole life — but only this one reaches the account-wide Remote Control listing, whose entries are
+// created at launch and whose auto-generated default is a hostname prefix.
+//
+// claude only, today: `-n, --name <name>` (measured on 2.1.257). Codex has `set_thread_title` and
+// its own `--remote-control`, which are a separate change — an id added here without its own
+// probe-backed leaf gets NO flag, by construction (see `supportsSessionNameFlag`).
+export const SESSION_NAME_CAPABLE = ['claude'] as const
 // Agents whose canvas nodes share ONE managed CLI server per machine and keep a stable per-node
 // identity inside it, instead of each node owning a whole process tree.
 //
@@ -387,6 +400,22 @@ export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURC
 export const reportsSessionEnd = (id: AgentId): boolean => includes(SESSION_END_CAPABLE, id)
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 export const canReadTitle = (id: AgentId): boolean => includes(TITLE_READ_CAPABLE, id)
+/** Can this agent's CLI be told its session's display name ON the launch line? See
+ *  SESSION_NAME_CAPABLE — membership alone is not enough to emit the flag; the CLI in front of us
+ *  must also advertise it (`supportsSessionNameFlag`). */
+export const namesSession = (id: AgentId): boolean => includes(SESSION_NAME_CAPABLE, id)
+/**
+ * Is the launch-line session-name flag available for this effective base harness?
+ *
+ * The `capabilityAgentId(id) === 'claude'` check is NOT redundant with the membership test above:
+ * it is what makes adding a second agent to `SESSION_NAME_CAPABLE` without its own probe fail
+ * CLOSED (no flag, today's command line) instead of silently borrowing claude's answer. That is the
+ * mistake `supportsSessionIdFlag` already names — two CLIs are installed and upgraded
+ * independently, so one's `--help` says nothing about the other's — and an unknown flag makes the
+ * CLI exit rather than degrade. A new member adds its own probe argument here.
+ */
+export const supportsSessionNameFlag = (id: AgentId, claudeFlagSupported: boolean): boolean =>
+  namesSession(id) && capabilityAgentId(id) === 'claude' && claudeFlagSupported
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
 export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
 export const canSwitchModel = (id: AgentId): boolean => includes(MODEL_SWITCH_CAPABLE, id)
@@ -459,6 +488,11 @@ const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
  * `resumeCommand` is: the value ends up on a tmux `send-keys` line, and the caller's type is a
  * compile-time promise, not a runtime one.
  */
+// The launch-line DISPLAY-NAME counterpart of this function is `withSessionName`
+// (./session-name.ts). It lives beside its own sanitiser rather than here, because the charset that
+// builds a name and the charset that re-validates it at the interpolation site must never drift
+// apart — and the import direction only works one way: session-name.ts reads `namesSession` from
+// this file.
 export function withSessionId(cmd: string, id: AgentId, sessionId: string): string {
   if (!mintsSessionId(id)) return cmd
   const sid = sessionId.trim()
