@@ -107,7 +107,12 @@ describe('every CSS variable resolves', () => {
     '--cmascot-w',
     '--cmascot-h',
     '--cmascot-sheet-w',
-    '--cmascot-sheet-h' // notch HUD sprite sheets
+    '--cmascot-sheet-h', // notch HUD sprite sheets
+    // Persistent visual preferences: set per surface by the resolved appearance
+    // (@shared/appearance `appearanceStyleVars`), absent when nothing is configured — which is
+    // exactly why every rule that reads them supplies a fallback.
+    '--nt-appearance-color',
+    '--nt-appearance-thickness'
   ])
 
   it('references no variable that is never defined', () => {

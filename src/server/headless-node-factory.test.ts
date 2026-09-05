@@ -1553,7 +1553,13 @@ describe('HeadlessNodeFactory', () => {
       const nodes = await load()
       const frames = nodes.filter((node) => node.kind === 'group')
       expect(frames).toHaveLength(1)
-      expect(frames[0]).toMatchObject({ title: 'Director workers', taskFrame: true })
+      // Collapsed on creation: "put away" is half of what the tray is for, and a tray that opens
+      // expanded has put nothing away.
+      expect(frames[0]).toMatchObject({
+        title: 'Director workers',
+        taskFrame: true,
+        collapsed: true
+      })
       expect(nodeById(nodes, first).parentId).toBe(frames[0].id)
       expect(nodeById(nodes, second).parentId).toBe(frames[0].id)
       // The frame is a creation of this caller, so it can be renamed/colored/closed like any other.

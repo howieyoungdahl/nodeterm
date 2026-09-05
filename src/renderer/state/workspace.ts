@@ -26,6 +26,7 @@ import { useSettings } from './settings'
 export { applyCanvasMutation } from '@shared/canvas-mutations'
 import { sanitizeInboundNode } from '@shared/node-exec'
 import { NODE_COLORS } from '@shared/node-colors'
+import type { BorderAppearance } from '@shared/appearance'
 import {
   COMPACT_CONTROL_NODE_SIZE,
   resolveControlNodeSize,
@@ -97,6 +98,9 @@ export interface NodeData {
    * restore toggle gives back. Persisted — see CanvasNodeState.premaxRect.
    */
   premaxRect?: { x: number; y: number; width: number; height: number }
+  /** Explicit visual override for this node/frame — the top tier of `resolveNodeAppearance`
+   *  (@shared/appearance). Persisted and git-shared; see CanvasNodeState.appearance. */
+  appearance?: BorderAppearance
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
   /**
@@ -1559,8 +1563,11 @@ export function applyWorkerFramePlan(
   // `groupSelectedNodes` refuses a set that does not share one container; a refusal returns the
   // canvas untouched rather than half-forming a tray.
   if (!frame) return nodes
+  // Collapsed on creation, like the Server path: a tray that opens expanded has put nothing away.
   return next.map((n) =>
-    n.id === frame.id ? { ...n, data: { ...n.data, title: label, taskFrame: true } } : n
+    n.id === frame.id
+      ? { ...n, data: { ...n.data, title: label, taskFrame: true, collapsed: true } }
+      : n
   )
 }
 
@@ -1938,7 +1945,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
         worktree: n.worktree,
-        trigger: n.trigger
+        trigger: n.trigger,
+        appearance: n.appearance
       }
     }
   })
@@ -2019,7 +2027,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         worktree: n.data.worktree,
         trigger: n.data.trigger,
         premaxRect: n.data.premaxRect,
-        compactRect: n.data.compactRect
+        compactRect: n.data.compactRect,
+        appearance: n.data.appearance
       }
     })
 }
