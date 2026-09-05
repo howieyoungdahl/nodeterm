@@ -12,6 +12,7 @@ import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from './agents/agent-message-fl
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from './browser-outcomes'
 import { BROWSER_KEYS, BROWSER_TIMEOUT_DEFAULT_MS, BROWSER_TIMEOUT_MAX_MS } from './browser-verb'
 import { NODE_COLORS } from '@shared/node-colors'
+import { listRowHelpLines } from '@shared/canvas-list-row'
 import { codexThreadIdentityResolverSh } from './codex-thread-identity-sh'
 
 /**
@@ -317,7 +318,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     'auto-adopted, relaunched, or controlled at boot. An unowned target receives a named refusal.',
     '',
     'Verbs:',
-    '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
+    '- `list` — current nodes. Start here when you need a node id.',
+    ...listRowHelpLines(),
     '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
     '- `open-claude [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
@@ -746,7 +748,8 @@ the server clears that creator proof; persisted nodes and queued launches are ne
 relaunched, or controlled at boot. An unowned target receives a named refusal.
 
 Verbs:
-- \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
+- \`list\` — list current nodes. Start here when you need a node id.
+${listRowHelpLines().join('\n')}
   A row ending **LAST TURN ERRORED** is a station whose last turn died on an API/model error:
   it is idle, but it produced nothing, so do not read its output or build on it. The marker
   is on the row on purpose — a fan-out of seven stations should cost one call to learn this,
