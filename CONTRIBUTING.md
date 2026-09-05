@@ -121,6 +121,11 @@ bug.
 different facts and must stay distinguishable at every layer. Collapsing them is how a panel ends up
 reporting "no sessions" on a host running thirty.
 
+**A workspace save must reject if any local project write fails.** The renderer uses that result
+to keep changes unsaved, show a warning, and retry on a bounded schedule. Swallowing a per-project
+error can leave new terminal cards only in browser memory until a refresh removes them. Keep
+initial saves on the same failure path, and never let retries override an unresolved conflict.
+
 **Degrade to nothing, never to something wrong.** A probe that fails means the bare, safe command —
 never a substituted nearest match. A hand-editable value that is unrecognised must yield the safe
 default, never something more destructive than the default.

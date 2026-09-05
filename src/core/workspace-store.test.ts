@@ -1209,13 +1209,14 @@ describe('save corruption hardening', () => {
     expect(litter).toEqual([])
   })
 
-  it('a swallowed project-file write failure still leaves no temp litter in .nodeterm', async () => {
+  it('a rejected project-file write leaves no temp litter in .nodeterm', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
     const file = path.join(projRoot, '.nodeterm', 'project.json')
     await fs.rm(file)
-    await fs.mkdir(file) // rename now fails; save() swallows per-file errors by design
-    await store.save(ws([project({ cwd: projRoot, name: 'renamed' })]))
+    await fs.mkdir(file) // rename now fails; the caller must see the error and can retry
+    await expect(store.save(ws([project({ cwd: projRoot, name: 'renamed' })])))
+      .rejects.toThrow('Canvas project writes failed')
     const litter = (await fs.readdir(path.join(projRoot, '.nodeterm'))).filter((n) => n.endsWith('.tmp'))
     expect(litter).toEqual([])
   })
