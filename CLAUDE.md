@@ -1467,6 +1467,11 @@ else, and its context links must keep classifying across restarts).
   target's verified `newTurn`/`working` hook remains the receipt that permits `delivered`; a retry
   that produces no receipt becomes `stalled`. Keep the retry bounded: repeating Enter can submit a
   human draft after the intended envelope has already moved.
+  Session presence includes detached tmux backends: an absent browser PTY is not `targetGone`.
+  The bounded tri-state probe runs after the free authorization/status gates; unknown stays
+  `targetPaneUnreadable`. Queued admissions (including trace I/O) and flushes serialize per target.
+  A rate-limited flush retries after its advertised delay, rerunning the full gate chain without
+  extending the original TTL. Other retryable outcomes still wait for a fresh idle event.
   **Claude Remote Control launches (2026-08):** Server `open-agent --agent claude` accepts
   `--remote-control[=NAME]`. `claudeCliCaps()` detects the exact option token in the installed
   CLI's `--help`; absence is a named `remote-control-unsupported` refusal before node persistence,
@@ -1484,9 +1489,12 @@ else, and its context links must keep classifying across restarts).
   `plan.test.ts` pins each row. `primary-role` is the widest and the most load-bearing — a node
   with no `role` reads as `primary`, so every canvas saved before PR-A, and every manual UI open,
   is structurally untouchable.
-  Two rules that are easy to undo by accident. **The `active` refusal is re-asked at APPLY time**
+  Marked spawn trays (`kind: group`, `taskFrame: true`) may lack a role because the spawn path
+  predates group roles. They remain layout subjects, but an explicit `role: primary` still wins;
+  unmarked legacy groups never inherit worker status. Tray collapse uses the same refusal table.
+  Two rules that are easy to undo by accident. **Every refusal is re-asked at APPLY time**
   (`gateLayoutPlan`), never taken from the plan-time verdict — a plan is previewed, read and then
-  approved, and the operator can click into any card in between; this is the same fire-time re-ask
+  approved, and the operator can pin, move, or click into any card in between; this is the same fire-time re-ask
   discipline agent hibernation uses. And **the engine cannot CREATE a frame**: the op set is
   `place | resize | reparent | collapse | label`, so the tray is minted only by the spawn path
   (`@shared/worker-frame`, with its "no frame around a single card" rule) and the engine only ever
@@ -1497,6 +1505,9 @@ else, and its context links must keep classifying across restarts).
   `organize`. Automatic triggers apply straight away, narrow by construction, reversible by ONE
   ⌘Z (`commitAsSingleUndoEntry` pushes the pre-apply array itself, because the history stack is
   debounced and a burst would otherwise cost two undos); the two explicit triggers preview first.
+  `LayoutTriggerQueue` coalesces triggers received during a plan instead of dropping them. Each
+  request carries its project identity; a late plan or preview cannot apply to a different project.
+  Cleanup reads the lease actually held at unmount, not a stale effect-time snapshot.
   **Single authority per project is a lease** (`LayoutLeaseStore`, 0600 in the shell's own data
   dir beside `node-tokens/` — never in `project.json`, which would git-merge a statement about
   which process is in charge). It expires (`LAYOUT_LEASE_TTL_MS`, 60 s, re-stamped while held) so

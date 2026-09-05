@@ -229,10 +229,7 @@ export function plan(input: LayoutInput): LayoutPlan {
       for (const trayId of trays) {
         const tray = byId.get(trayId)
         if (!tray || tray.collapsed) continue
-        if (tray.pinned) {
-          skip(collector, tray.id, 'pinned')
-          continue
-        }
+        if (!consider(tray, ctx, collector)) continue
         collector.ops.push({ op: 'collapse', nodeId: tray.id, collapsed: true })
       }
     }
@@ -277,14 +274,7 @@ export function plan(input: LayoutInput): LayoutPlan {
   )
   for (const tray of input.nodes) {
     if (tray.kind !== 'group' || !tray.taskFrame) continue
-    if (tray.pinned) {
-      skip(collector, tray.id, 'pinned')
-      continue
-    }
-    if (!ctx.owns(tray.id)) {
-      skip(collector, tray.id, 'foreign-authority')
-      continue
-    }
+    if (!consider(tray, ctx, collector)) continue
     // Members after this plan's own re-parents, so a pack accounts for the cards it just filed.
     const members = input.nodes.filter((node) => {
       if (node.kind === 'group') return false

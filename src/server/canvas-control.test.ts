@@ -310,7 +310,9 @@ describe('initServerCanvasControl', () => {
         pids: [200]
       })),
       sendEnvelope: legacySendEnvelope,
-      hasLiveSession: () => true
+      // The renderer has detached, but tmux and the agent still exist.
+      hasLiveSession: () => false,
+      sessionPresence: vi.fn(async () => 'alive' as const)
     } as unknown as PtyManager
 
     runtime = await initServerCanvasControl({

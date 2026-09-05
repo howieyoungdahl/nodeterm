@@ -106,6 +106,9 @@ export interface DeliveryRequest {
  * guarantee is checked by execution, not by grepping this file for a name.
  */
 export interface DeliveryDeps {
+  /** Optional detached-session truth, probed only AFTER the free permission/status gates.
+   * Browser attachment is not proof of whether a persistent tmux session exists. */
+  sessionPresence?(nodeId: string): Promise<'alive' | 'dead' | 'unknown'>
   /** Kernel truth about the target's pane. Unbounded by contract — this module bounds it. */
   paneOwner(nodeId: string): Promise<PaneOwner | null>
   /**
@@ -352,6 +355,14 @@ export async function deliverAgentMessage(
       targetIsRemote: req.targetIsRemote
     })
     if (cheap) return refuse(cheap)
+
+    if (deps.sessionPresence) {
+      const presence = await probeWithin(
+        () => deps.sessionPresence!(req.targetNodeId), PANE_PROBE_TIMEOUT_MS
+      )
+      if (presence === 'dead') return refuse({ kind: 'targetGone' })
+      if (presence !== 'alive') return refuse({ kind: 'targetPaneUnreadable' })
+    }
 
     // ── DO NOT RETRY AN `unknown` PANE VERDICT ON A FIXED SHORT TIMER WITHOUT A CIRCUIT BREAKER ──
     //

@@ -523,6 +523,7 @@ import {
   layoutNodesOf,
   layoutPlanRequest
 } from '../lib/layoutPlanApply'
+import { LayoutTriggerQueue, type PendingLayoutTrigger } from '../lib/layoutTriggerQueue'
 import { LayoutPlanTable } from '../components/LayoutPlanTable'
 import { statusViewFor } from '../lib/nodeStatusView'
 import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
@@ -6175,8 +6176,6 @@ export function Canvas() {
   layoutEnabledRef.current = layoutEnabled
   /** Who this renderer is, for the project layout lease. Stable for the life of the tab. */
   const layoutHolderRef = useRef(`ui-${Math.random().toString(36).slice(2, 10)}`)
-  /** One plan at a time. A spawn burst must not stack eight overlapping plans against one canvas. */
-  const layoutRunningRef = useRef(false)
   const layoutLeasedProjectRef = useRef<string | null>(null)
 
   /**
@@ -6258,20 +6257,22 @@ export function Canvas() {
    *  verdict — the same discipline agent hibernation uses, and for the same reason. */
   const applyLayoutPlanNow = useCallback(
     (plan: LayoutPlan): LayoutPlan => {
-      const gated = gateLayoutPlan(plan, { isActive: (id) => activeLayoutNodeIds().includes(id) })
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return plan
+      const gated = gateLayoutPlan(plan, {
+        isActive: (id) => activeLayoutNodeIds().includes(id),
+        current: buildLayoutRequest(projectId, plan.trigger)
+      })
       const next = applyLayoutPlan(nodesRef.current, gated)
       if (next !== nodesRef.current) commitAsSingleUndoEntry(next)
       return gated
     },
-    [activeLayoutNodeIds, commitAsSingleUndoEntry]
+    [activeLayoutNodeIds, buildLayoutRequest, commitAsSingleUndoEntry]
   )
 
-  const runLayoutTrigger = useCallback(
-    async (trigger: LayoutTrigger, createdIds?: string[]) => {
-      if (!layoutEnabledRef.current) return
-      const projectId = useProjects.getState().activeProjectId
-      if (!projectId || layoutRunningRef.current) return
-      layoutRunningRef.current = true
+  const executeLayoutTrigger = useCallback(
+    async ({ projectId, trigger, createdIds }: PendingLayoutTrigger) => {
+      if (!layoutEnabledRef.current || useProjects.getState().activeProjectId !== projectId) return
       try {
         const api = window.nodeTerminal
         const plan = await api.canvasLayout.plan(buildLayoutRequest(projectId, trigger, createdIds))
@@ -6292,8 +6293,11 @@ export function Canvas() {
           }
           return
         }
+        if (!layoutEnabledRef.current || useProjects.getState().activeProjectId !== projectId) {
+          await api.canvasLayout.release(projectId, layoutHolderRef.current)
+          return
+        }
         layoutLeasedProjectRef.current = projectId
-        if (useProjects.getState().activeProjectId !== projectId) return
         if (trigger === 'node-created' || trigger === 'status-changed') {
           applyLayoutPlanNow(plan)
           return
@@ -6309,18 +6313,29 @@ export function Canvas() {
           alert: isEmptyPlan(plan),
           onConfirm: () => {
             setConfirm(null)
+            if (!layoutEnabledRef.current || useProjects.getState().activeProjectId !== projectId) return
             if (!isEmptyPlan(plan)) applyLayoutPlanNow(plan)
           }
         })
       } catch {
         // A layout plan that could not be built changes nothing. There is no partial apply here:
         // the request either answers with a whole plan or it does not.
-      } finally {
-        layoutRunningRef.current = false
       }
     },
     [applyLayoutPlanNow, buildLayoutRequest, setConfirm]
   )
+
+  const executeLayoutTriggerRef = useRef(executeLayoutTrigger)
+  executeLayoutTriggerRef.current = executeLayoutTrigger
+  const layoutTriggerQueueRef = useRef<LayoutTriggerQueue | null>(null)
+  if (!layoutTriggerQueueRef.current) {
+    layoutTriggerQueueRef.current = new LayoutTriggerQueue((request) => executeLayoutTriggerRef.current(request))
+  }
+  const runLayoutTrigger = useCallback(async (trigger: LayoutTrigger, createdIds: string[] = []) => {
+    const projectId = useProjects.getState().activeProjectId
+    if (!projectId || !layoutEnabledRef.current) return
+    await layoutTriggerQueueRef.current!.enqueue({ projectId, trigger, createdIds })
+  }, [])
 
   runLayoutTriggerRef.current = runLayoutTrigger
 
@@ -6367,9 +6382,12 @@ export function Canvas() {
   // difference between a second instance waiting a minute and not waiting at all.
   useEffect(() => {
     const holder = layoutHolderRef.current
-    const held = layoutLeasedProjectRef.current
     return () => {
-      if (held) void window.nodeTerminal.canvasLayout.release(held, holder).catch(() => {})
+      const held = layoutLeasedProjectRef.current
+      if (held) {
+        layoutLeasedProjectRef.current = null
+        void window.nodeTerminal.canvasLayout.release(held, holder).catch(() => {})
+      }
     }
   }, [activeProjectId])
 

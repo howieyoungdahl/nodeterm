@@ -67,6 +67,8 @@ export interface AgentMessagingDeps {
   paneOwner(nodeId: string): Promise<PaneOwner | null>
   sendEnvelope(nodeId: string, envelope: string): Promise<boolean>
   hasLiveSession(nodeId: string): boolean
+  /** Persistent sessions can outlive their browser attachment. Absence preserves desktop behavior. */
+  sessionPresence?(nodeId: string): Promise<'alive' | 'dead' | 'unknown'>
   mirrorEntry?(nodeId: string): MirrorEntry | undefined
   /** The main-process projects store (`workspaceStore.persistedCanvases()` on the desktop). */
   projects(): readonly { id: string; nodes: readonly MessagingStoredNode[] }[]
@@ -519,6 +521,7 @@ export async function runDelivery(
     (deps.mirrorEntry ?? coreMirrorEntry)(req.targetNodeId)?.agentId ?? ''
 
   const delivery: DeliveryDeps = {
+    sessionPresence: deps.sessionPresence ? (id) => deps.sessionPresence!(id) : undefined,
     paneOwner: (id) => deps.paneOwner(id),
     // #210 retired the `#{bracket_paste_flag}` probe with a "do not reintroduce" note
     // (pty-manager.ts): pre-3.7 tmux cannot distinguish "the app did not ask" from "I cannot
@@ -563,7 +566,8 @@ export async function runDelivery(
         targetIsRemote: deps.isRemoteNode(req.targetNodeId),
         notPermitted,
         retryAfterMs,
-        targetLive: deps.hasLiveSession(req.targetNodeId)
+        // Server resolves detached tmux presence inside the delivery lock, after cheap gates.
+        targetLive: deps.sessionPresence ? undefined : deps.hasLiveSession(req.targetNodeId)
       },
       delivery
     )

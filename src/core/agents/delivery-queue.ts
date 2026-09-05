@@ -44,13 +44,12 @@ import type { DeliveryTraceInput } from './agent-message-trace'
  * by `delivery-queue.test.ts`, which flips the injected `deliver` from `targetBusy` to
  * `notPermitted` between enqueue and flush and asserts nothing reached the pane.
  *
- * ── SHIPS ON BOTH SHELLS, USED ON ONE ──────────────────────────────────────────────────────────
+ * ── SHARED BY BOTH SHELLS ─────────────────────────────────────────────────────────────────────
  *
  * Pure `src/core`: no electron, no main import (`no-electron.test.ts`). Every side effect — the
  * clock, the delivery, the wake, the trace, the sender-notify, the timer — is injected, so the whole
- * lifecycle is driven without a pty or a window. The desktop is the only shell that wires a consumer
- * (messaging does not exist on the Server Edition, Task 5.3); the module still compiles and ships
- * there, like everything else in this directory.
+ * lifecycle is driven without a pty or a window. Desktop and Server Edition wire the same queue;
+ * each shell still owns its independent messaging authorization and delivery adapter.
  */
 
 /** How long a message waits queued before it expires. Long enough for an orchestration turn (which
@@ -123,10 +122,9 @@ interface QueueEntry {
  *  RE-QUEUES the entry at the front (its TTL keeps counting from the original enqueue) and STOPS
  *  draining, because one idle event does not promise the target stays idle. Derived from `RETRYABLE`
  *  minus the two outcomes the queue itself produces (`queueFull`, `expired`) — so `deliver`'s
- *  retryable outcomes (`rateLimited`, `targetBusy`, `targetNotIdleUnknown`, `targetStatusStale`) all
- *  wait for the NEXT idle, and a new retryable outcome added upstream is handled here the moment it
- *  exists rather than silently dropped. `rateLimited` waiting for the next idle (not re-flushing on a
- *  timer) is what keeps the queue from spinning against the very limiter that refused it. */
+ *  retryable outcomes wait for the next idle event. A rate limit also schedules one retry after
+ *  its advertised delay: an already-idle target may never emit another idle event. Every retry
+ *  runs the full delivery gate again, and the original expiry still bounds its lifetime. */
 const REQUEUE_ON: ReadonlySet<AgentMessageOutcome['kind']> = new Set(
   (Object.keys(RETRYABLE) as AgentMessageOutcome['kind'][]).filter(
     (k) => RETRYABLE[k] && k !== 'queueFull' && k !== 'expired'
@@ -135,6 +133,11 @@ const REQUEUE_ON: ReadonlySet<AgentMessageOutcome['kind']> = new Set(
 
 export class DeliveryQueue {
   private readonly queues = new Map<string, QueueEntry[]>()
+  private readonly admissions = new Map<string, Promise<void>>()
+  private readonly pendingAdmissions = new Map<string, number>()
+  private readonly drains = new Map<string, Promise<void>>()
+  private readonly inFlight = new Set<string>()
+  private readonly retries = new Map<string, CancelTimer>()
   private readonly capacity: number
   private readonly ttlMs: number
   private readonly schedule: (ms: number, fn: () => void) => CancelTimer
@@ -180,8 +183,35 @@ export class DeliveryQueue {
   ): Promise<
     Extract<AgentMessageOutcome, { kind: 'queued' } | { kind: 'queueFull' }>
   > {
-    const list = this.queues.get(req.targetNodeId) ?? []
-    if (list.length >= this.capacity) {
+    const nodeId = req.targetNodeId
+    const pending = this.pendingAdmissions.get(nodeId) ?? 0
+    const occupied = this.depth(nodeId) + (this.inFlight.has(nodeId) ? 1 : 0) + pending
+    // The waiting admission chain is part of the bound too. A slow trace must not turn it into
+    // an unbounded second queue of retained message bodies.
+    if (occupied >= this.capacity) return { kind: 'queueFull', capacity: this.capacity }
+    this.pendingAdmissions.set(nodeId, pending + 1)
+    // Tracing awaits disk I/O. Serialize admissions before that await, otherwise simultaneous
+    // senders can each accept into a different array and overwrite an already-issued receipt.
+    const previous = this.admissions.get(req.targetNodeId) ?? Promise.resolve()
+    const admission = previous.then(() => this.enqueueNow(req, opts))
+    const settled = admission.then(() => {}, () => {})
+    this.admissions.set(req.targetNodeId, settled)
+    try {
+      return await admission
+    } finally {
+      const remaining = (this.pendingAdmissions.get(nodeId) ?? 1) - 1
+      if (remaining > 0) this.pendingAdmissions.set(nodeId, remaining)
+      else this.pendingAdmissions.delete(nodeId)
+      if (this.admissions.get(req.targetNodeId) === settled) this.admissions.delete(req.targetNodeId)
+    }
+  }
+
+  private async enqueueNow(
+    req: QueuedDeliveryRequest,
+    opts: { hibernated?: boolean }
+  ): Promise<Extract<AgentMessageOutcome, { kind: 'queued' } | { kind: 'queueFull' }>> {
+    const occupied = this.depth(req.targetNodeId) + (this.inFlight.has(req.targetNodeId) ? 1 : 0)
+    if (occupied >= this.capacity) {
       // Refused, not dropped-oldest: an accepted message is never silently discarded to make room.
       return { kind: 'queueFull', capacity: this.capacity }
     }
@@ -200,6 +230,8 @@ export class DeliveryQueue {
       queuedTraceId: t.traceId,
       cancelTimer: this.schedule(this.ttlMs, () => void this.expire(req.targetNodeId, entry))
     }
+    // A delivery may have completed while its new neighbour was being traced.
+    const list = this.queues.get(req.targetNodeId) ?? []
     list.push(entry)
     this.queues.set(req.targetNodeId, list)
     // Kick the wake for a hibernated target so it starts its resume; the flush waits on the idle
@@ -216,8 +248,25 @@ export class DeliveryQueue {
    * other outcome is terminal and the entry is gone. Draining stops the moment the target is not
    * ready again — one idle event does not promise the target stays idle across N deliveries.
    */
-  async onTargetIdle(nodeId: string): Promise<void> {
+  onTargetIdle(nodeId: string): Promise<void> {
+    const running = this.drains.get(nodeId)
+    if (running) return running
+    this.cancelRetry(nodeId)
+    // Publish the per-target lock before the first await. Two overlapping idle hooks must not
+    // paste different envelopes into the same composer while either awaits a receipt.
+    const drain = Promise.resolve().then(() => this.drain(nodeId))
+    const settled = drain.finally(() => {
+      if (this.drains.get(nodeId) === settled) this.drains.delete(nodeId)
+    })
+    this.drains.set(nodeId, settled)
+    return settled
+  }
+
+  private async drain(nodeId: string): Promise<void> {
     for (;;) {
+      // An idle hook can arrive while enqueue is awaiting its trace. Preserve that hook until
+      // the accepted messages are visible instead of leaving them stranded until expiry.
+      await this.admissions.get(nodeId)
       const list = this.queues.get(nodeId)
       if (!list || list.length === 0) return
       const entry = list[0]
@@ -225,11 +274,29 @@ export class DeliveryQueue {
       // must not flush the same entry twice. It goes back on failure, at the FRONT, preserving order.
       list.shift()
       entry.cancelTimer()
-      const outcome = await this.deps.deliver(entry.req)
+      this.inFlight.add(nodeId)
+      let outcome: AgentMessageOutcome
+      try {
+        outcome = await this.deps.deliver(entry.req)
+      } finally {
+        this.inFlight.delete(nodeId)
+      }
       if (REQUEUE_ON.has(outcome.kind)) {
         // Not ready yet (busy again, still unverified, or rate-limited): keep it, TTL counting from
         // its ORIGINAL enqueue, and stop draining — the target is evidently not idle after all.
         this.requeueFront(nodeId, entry)
+        // An idle target may emit no further hook. Wait out the rate limit, then re-run all
+        // delivery permissions and status checks. The original expiry still bounds the wait.
+        if (outcome.kind === 'rateLimited' && Number.isFinite(outcome.retryAfterMs)) {
+          const remaining = entry.ttlMs - (this.deps.now() - entry.enqueuedAt)
+          const delay = Math.max(1, outcome.retryAfterMs)
+          if (delay < remaining) {
+            this.retries.set(nodeId, this.schedule(delay, () => {
+              this.retries.delete(nodeId)
+              void this.onTargetIdle(nodeId)
+            }))
+          }
+        }
         return
       }
       // Terminal: delivered, or a refusal waiting will not fix (notPermitted from a revoked grant,
@@ -261,7 +328,10 @@ export class DeliveryQueue {
     const i = list.indexOf(entry)
     if (i < 0) return // already delivered/re-queued with a fresh timer — this fire is stale
     list.splice(i, 1)
-    if (list.length === 0) this.queues.delete(nodeId)
+    if (list.length === 0) {
+      this.queues.delete(nodeId)
+      this.cancelRetry(nodeId)
+    }
     entry.cancelTimer()
     const queuedForMs = this.deps.now() - entry.enqueuedAt
     const t = await this.deps.trace({
@@ -279,5 +349,12 @@ export class DeliveryQueue {
   resetForTests(): void {
     for (const list of this.queues.values()) for (const e of list) e.cancelTimer()
     this.queues.clear()
+    for (const cancel of this.retries.values()) cancel()
+    this.retries.clear()
+  }
+
+  private cancelRetry(nodeId: string): void {
+    this.retries.get(nodeId)?.()
+    this.retries.delete(nodeId)
   }
 }

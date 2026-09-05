@@ -38,7 +38,8 @@ function start(deps: ContextLinkDeps = {}): void {
   plat = fakePlatform({ userDataDir: dir })
   initPlatform(plat)
   captured = []
-  initContextLink(fakePty(), deps)
+  // Handler tests must not install temp-dataDir instructions into live provider homes.
+  initContextLink(fakePty(), deps, { installAgentIntegrations: false })
 }
 
 beforeEach(() => start())
