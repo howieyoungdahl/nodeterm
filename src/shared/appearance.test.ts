@@ -357,14 +357,28 @@ describe('sanitizers treat every stored value as hostile input', () => {
     expect(sanitizeAppearanceRules({ byProvider: { claude: { color: 'red' } } })).toBeUndefined()
   })
 
-  it('reads a layoutRules block field by field, ignoring an unknown version', () => {
-    // The forward-compatibility contract: a canvas saved by a NEWER build still renders here.
+  it('carries an unknown layoutRules key through instead of deleting it on the next save', () => {
+    // The forward-compatibility contract, and it is about WRITES as much as reads. `spawn` belongs
+    // to the layout-rule engine, not to this file. Reconstructing the block field by field would
+    // strip it from `project.json` — which is git-shared — every time a build without that feature
+    // saved the canvas. An unknown key is passed through untouched; a known one is re-validated.
     const parsed = sanitizeProjectLayoutRules({
       version: 99,
       spawn: { tray: 'collapsed', unknownFutureKey: true },
       appearance: { project: { color: RED, futureKnob: 'x' } }
     })
-    expect(parsed).toEqual({ version: 99, appearance: { project: { color: RED } } })
+    expect(parsed).toEqual({
+      version: 99,
+      spawn: { tray: 'collapsed', unknownFutureKey: true },
+      appearance: { project: { color: RED } }
+    })
+  })
+
+  it('still drops an unknown knob INSIDE a key this file owns', () => {
+    // Strictness stays where this file is the only writer: an unknown appearance knob is ignorable
+    // because nothing else keeps state there.
+    expect(sanitizeProjectLayoutRules({ appearance: { project: { color: RED, futureKnob: 'x' } } }))
+      .toEqual({ appearance: { project: { color: RED } } })
   })
 
   it('treats an absent or unusable layoutRules block as built-in defaults', () => {

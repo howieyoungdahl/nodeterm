@@ -653,7 +653,11 @@ describe('shared appearance rules survive the project file', () => {
   // Forward compatibility: an older build must still render a canvas a newer one saved. An unknown
   // version is kept and changes nothing, and unknown keys drop out field by field rather than
   // taking the whole block (or the whole project) down with them.
-  it('keeps an unknown rules version and ignores unknown keys instead of rejecting the block', () => {
+  it('keeps an unknown rules version and carries another owner key through the round trip', () => {
+    // `layoutRules` is shared property: the layout-rule engine keeps `spawn` / `tray` in the same
+    // block. Rebuilding it field by field would DELETE those on the next ordinary save, out of a
+    // git-shared file. An unknown top-level key survives untouched; an unknown knob inside
+    // `appearance` — a key this module is the only writer of — is still dropped.
     const f = {
       ...projectToFile(project(), 1, 'now'),
       layoutRules: {
@@ -663,7 +667,11 @@ describe('shared appearance rules survive the project file', () => {
       }
     } as any
     const back = fileToProject(f, { id: 'p1' })
-    expect(back.layoutRules).toEqual({ version: 99, appearance: { project: { color: '#7aa2f7' } } })
+    expect(back.layoutRules).toEqual({
+      version: 99,
+      appearance: { project: { color: '#7aa2f7' } },
+      someFutureHalf: { spawn: 'grid' }
+    })
   })
 
   // The colour reaches a CSS custom property, so the file is hostile input at BOTH boundaries: a

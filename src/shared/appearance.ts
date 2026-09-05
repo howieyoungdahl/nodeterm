@@ -298,20 +298,49 @@ export function sanitizeAppearanceRules(value: unknown): AppearanceRules | undef
 }
 
 /**
+ * The keys `AppearanceSettings` owns. They are machine-local by design — a window edge is a
+ * statement about this display, and reduced-motion is an accessibility choice a git-shared file
+ * must never be able to switch back on for somebody else. The carry-through below keeps another
+ * OWNER's rules alive in the shared block; it must not become a way for these to travel, whether
+ * they were hand-added or written by a confused build.
+ */
+const MACHINE_LOCAL_APPEARANCE_KEYS: ReadonlySet<string> = new Set([
+  'windowEdge',
+  'node',
+  'group',
+  'reducedMotion',
+  'effectsOff'
+])
+
+/**
  * `Project.layoutRules`, off disk.
  *
- * An unrecognised `version` is kept as-is and changes nothing: the block is read field by field, so
- * a newer writer's extra keys drop out on their own and there is no schema to reject. Rejecting on
- * version is what would stop an older build from rendering a newer canvas.
+ * An unrecognised `version` is kept as-is and changes nothing; rejecting on version is what would
+ * stop an older build from rendering a newer canvas.
+ *
+ * **Unknown TOP-LEVEL keys are carried through, not dropped.** This block is shared property: it is
+ * the same object the layout-rule engine keeps its `spawn` / `tray` rules in, and it travels in git.
+ * A build that reads a key it does not know and writes the block back without it does not "ignore"
+ * that key — it DELETES it, out of everyone's checkout, on the next ordinary save. Field-by-field
+ * reconstruction here is therefore silent data loss across two owners of one block, not strictness.
+ * Known keys are still fully re-validated below and overwrite whatever was copied.
+ *
+ * Inside a key this file owns (`appearance`), validation stays strict — an unknown *appearance*
+ * knob really is ignorable, because nothing else writes there.
  */
 export function sanitizeProjectLayoutRules(value: unknown): ProjectLayoutRules | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const raw = value as Record<string, unknown>
-  const out: ProjectLayoutRules = {}
+  const out: Record<string, unknown> = {}
+  for (const [key, v] of Object.entries(raw)) {
+    if (key === 'version' || key === 'appearance') continue
+    if (MACHINE_LOCAL_APPEARANCE_KEYS.has(key)) continue
+    if (v !== undefined) out[key] = v
+  }
   if (typeof raw.version === 'number' && Number.isFinite(raw.version)) out.version = raw.version
   const appearance = sanitizeAppearanceRules(raw.appearance)
   if (appearance) out.appearance = appearance
-  return Object.keys(out).length ? out : undefined
+  return Object.keys(out).length ? (out as ProjectLayoutRules) : undefined
 }
 
 /** `Settings.appearance`, off a hand-editable settings.json. */
