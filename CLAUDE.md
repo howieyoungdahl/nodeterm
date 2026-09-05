@@ -1460,6 +1460,51 @@ else, and its context links must keep classifying across restarts).
   never a guessed version floor or a launch with an unknown flag. The optional name is normalized
   to one line and shell-quoted by the shared command assembler. Desktop canvas control refuses the
   Server-only flag explicitly; `/rc [name]` inside an ordinary Claude session is the manual path.
+  **Automatic layout is a SEPARATE authority from creator ownership, and it is a narrower one**
+  (`src/core/canvas-layout/`, opt-in, default off). Creator ownership answers "may this caller
+  mutate that node"; the layout engine additionally asks "should anything automatic move it at
+  all", and the second question has more ways to answer no. `plan(input) -> {ops, skipped}` is
+  pure — no clock, no store, no filesystem — and every node it declines is reported with a reason
+  (`@shared/canvas-layout`): `pinned`, `manual-placement`, `active`, `loop-owned`,
+  `foreign-authority`, `primary-role`, in that order, first match wins. **The refusals are the
+  feature**, so a skip is never silent: the preview table renders them beside the changes, and
+  `plan.test.ts` pins each row. `primary-role` is the widest and the most load-bearing — a node
+  with no `role` reads as `primary`, so every canvas saved before PR-A, and every manual UI open,
+  is structurally untouchable.
+  Two rules that are easy to undo by accident. **The `active` refusal is re-asked at APPLY time**
+  (`gateLayoutPlan`), never taken from the plan-time verdict — a plan is previewed, read and then
+  approved, and the operator can click into any card in between; this is the same fire-time re-ask
+  discipline agent hibernation uses. And **the engine cannot CREATE a frame**: the op set is
+  `place | resize | reparent | collapse | label`, so the tray is minted only by the spawn path
+  (`@shared/worker-frame`, with its "no frame around a single card" rule) and the engine only ever
+  files into one. A second frame-creator is the frame churn this design was written to avoid.
+  **Nothing runs on a timer.** The triggers are `node-created` (placement happens once, at birth),
+  `status-changed` (which emits ops only for `tray.floatOnAttention` — a blocked or failed member
+  leaves a closed tray so its approval stays reachable), `rules-changed`, and an explicit
+  `organize`. Automatic triggers apply straight away, narrow by construction, reversible by ONE
+  ⌘Z (`commitAsSingleUndoEntry` pushes the pre-apply array itself, because the history stack is
+  debounced and a burst would otherwise cost two undos); the two explicit triggers preview first.
+  **Single authority per project is a lease** (`LayoutLeaseStore`, 0600 in the shell's own data
+  dir beside `node-tokens/` — never in `project.json`, which would git-merge a statement about
+  which process is in charge). It expires (`LAYOUT_LEASE_TTL_MS`, 60 s, re-stamped while held) so
+  a crash cannot lock a canvas forever, and **a refusal NAMES the holder** — a second director
+  reading "another instance holds this project's layout lease (ui-1f2e…)" stands down knowingly
+  instead of fighting. It fails OPEN (an unreadable file means nobody holds anything): two
+  instances briefly planning one canvas is recoverable and both still refuse the active node,
+  while a wrongly-denied lease is a canvas nothing can organise again.
+  **The rules split across the two tiers exactly as the rest of the file does.** WHAT the rules
+  are is shared (`Project.layoutRules`, `@shared/canvas-layout-rules`, sanitized on both
+  boundaries and on the cwd-less inline load path like `sanitizeNodeTriggers`). **WHETHER the
+  engine runs is machine-local and lives nowhere else** (`Settings.canvasLayout.enabled`, default
+  false): a repository must not be able to switch on automatic rearrangement for everyone who
+  clones it, which is the same rule reduced-motion follows. The sanitizer **preserves keys it does
+  not recognise** (`unknown`), because two machines on different builds rewrite this one file and
+  dropping is how an older build silently deletes a newer one's rules — the appearance branch's
+  `layoutRules.appearance` is exactly that case today. Registered in both shells from one core
+  body (`registerCanvasLayoutIpc`), pinned by `core/canvas-layout-parity.test.ts`.
+  Surfaces — Desktop: full. Server Edition: full (the engine is core; the ws bridge member is
+  real). Mobile: N/A — it attaches to tmux sessions over the transport protocol and has no canvas,
+  frames or geometry to arrange.
   **Control-spawn geometry:** persisted `CanvasNodeState.size` is authoritative, not renderer CSS.
   Canvas-control agent opens default to 440×320 (half the area of 640×440); `--size normal` restores
   the configured manual-open dimensions, and manual UI opens stay unchanged. The `resize` verb

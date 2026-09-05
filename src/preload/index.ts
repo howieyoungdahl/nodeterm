@@ -754,6 +754,11 @@ const api: NodeTerminalApi = {
   },
   agentStatusSnapshot: () => ipcRenderer.invoke(IPC.agentStatusSnapshot),
   nodePaneEvidence: (nodeIds: string[]) => ipcRenderer.invoke(IPC.nodeStatusPanes, nodeIds),
+  canvasLayout: {
+    plan: (request: unknown) => ipcRenderer.invoke(IPC.canvasLayoutPlan, request),
+    release: (projectId: string, holder: string) =>
+      ipcRenderer.invoke(IPC.canvasLayoutRelease, { projectId, holder })
+  },
   onAgentStatus: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentStatus, handler)

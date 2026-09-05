@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { playSfx, primeSfx } from '@renderer/lib/sfx'
 import {
@@ -461,6 +461,7 @@ import {
   toggleCompactNode,
   agentLaunchOverride,
   canvasControlNodeGeometry,
+  canvasControlNodeSize,
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   alignNodes,
@@ -507,6 +508,23 @@ import {
   placeNodeInRect,
   type CanvasNode
 } from '../state/workspace'
+import {
+  gateLayoutPlan,
+  isEmptyPlan,
+  LAYOUT_STAND_DOWN_LABELS,
+  loopOwnedFrameIds,
+  opsByNode,
+  type LayoutPlan,
+  type LayoutTrigger
+} from '@shared/canvas-layout'
+import { COMPACT_CONTROL_NODE_SIZE } from '@shared/control-node-size'
+import {
+  applyLayoutPlan,
+  layoutNodesOf,
+  layoutPlanRequest
+} from '../lib/layoutPlanApply'
+import { LayoutPlanTable } from '../components/LayoutPlanTable'
+import { statusViewFor } from '../lib/nodeStatusView'
 import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
 import { resolveNewCodexNodeAccount, planCodexAccountSwitch } from './codex-account-ops'
 import type { CodexAccount } from '@shared/codex-account'
@@ -545,6 +563,8 @@ function noticeDwellMs(text: string): number {
  *  `confirmFlags`): ONE confirm at a time, decided at call time rather than at the next render. */
 interface ConfirmState {
   message: string
+  /** Rendered ABOVE the message — the layout preview's change/refusal table, say. */
+  body?: ReactNode
   onConfirm: () => void
   /** Optional: runs when the user cancels/escapes (e.g. to reply 'denied' to an agent). */
   onCancel?: () => void
@@ -834,6 +854,18 @@ export function Canvas() {
   // `nodeterm` CLI (see the onAgentControl effect) and from browser popups to their opener.
   // Merged only at the <ReactFlow> prop and never turned into context links, but PERSISTED
   // per project (`ropes`) so the lineage survives restarts; deletable like a context link.
+  /**
+   * The layout engine's entry point, published through a ref.
+   *
+   * The two `node-created` sites sit far above the callback's own declaration (one is the
+   * server-change merge, one is the desktop control-spawn path), and both fire from inside a
+   * `setNodes`/subscription closure rather than from a render. A ref is what lets them reach the
+   * current callback without either of them re-subscribing on every canvas change — the same
+   * shape `visibilityReportRef` uses in TerminalNode for the same reason.
+   */
+  const runLayoutTriggerRef = useRef<
+    ((trigger: LayoutTrigger, createdIds?: string[]) => Promise<void>) | null
+  >(null)
   const [controlEdges, setControlEdges] = useState<Edge[]>([])
   const controlEdgesRef = useRef<Edge[]>([])
   controlEdgesRef.current = controlEdges
@@ -2534,6 +2566,13 @@ export function Canvas() {
       // union), so it has to be saved. Both sides converge on the same state — the same "two
       // clients saving one converged canvas is harmless" model the peer-mutation path relies on.
       if (adopted || plan.ropesChanged || plan.bridgesChanged) bumpDirty()
+      // `node-created`, Server Edition side: an agent opened these through the headless factory.
+      // Same trigger, same engine, same refusals — the only difference is which shell created the
+      // card. Deferred for the same reason as the desktop path: the adopt is a `setNodes`.
+      if (plan.added.length) {
+        const created = plan.added.map((node) => node.id)
+        queueMicrotask(() => void runLayoutTriggerRef.current?.('node-created', created))
+      }
     })
   }, [adoptNodesSilently, setControlEdges, setLinkEdges, bumpDirty])
 
@@ -6109,6 +6148,231 @@ export function Canvas() {
     fitAll()
   }, [setNodes, markDirty, fitAll])
 
+
+  // ---- automatic canvas layout (core/canvas-layout) -----------------------------------------
+  //
+  // The engine decides; this applies. Everything it can do goes through the same transforms a
+  // hand gesture does (`renderer/lib/layoutPlanApply.ts`), so an automatic placement and a manual
+  // one leave the same canvas — and nothing here touches a PTY.
+  //
+  // TWO PATHS, deliberately different, because a preview is only useful when there is something
+  // to read:
+  //   * `organize` / `rules-changed` — an explicit operator action over the WHOLE canvas. It
+  //     previews as a table (changes AND refusals) and applies only on confirm.
+  //   * `node-created` / `status-changed` — automatic, and narrow by construction: each addresses
+  //     only the node its event was about. A dialog per spawn would make the feature unusable, so
+  //     these apply straight away and are reversible by one ⌘Z, which is the other half of the
+  //     same requirement.
+  //
+  // The whole thing is inert unless `settings.canvasLayout.enabled`; core re-asks that on every
+  // call, so the switch never needs a restart and a stale renderer cannot keep it on.
+
+  /** Whether the engine may run on this machine. Read through a ref as well, so the automatic
+   *  triggers can ask without re-subscribing every listener on a settings change. Core re-asks
+   *  the same switch on every call — this only avoids the round trip when it is off. */
+  const layoutEnabled = useSettings((st) => st.settings.canvasLayout?.enabled === true)
+  const layoutEnabledRef = useRef(layoutEnabled)
+  layoutEnabledRef.current = layoutEnabled
+  /** Who this renderer is, for the project layout lease. Stable for the life of the tab. */
+  const layoutHolderRef = useRef(`ui-${Math.random().toString(36).slice(2, 10)}`)
+  /** One plan at a time. A spawn burst must not stack eight overlapping plans against one canvas. */
+  const layoutRunningRef = useRef(false)
+  const layoutLeasedProjectRef = useRef<string | null>(null)
+
+  /**
+   * Apply a node array as ONE undo entry.
+   *
+   * The history stack is snapshot + debounce, so a plan applied in a burst could otherwise land
+   * across two windows and cost two ⌘Z. Pushing the pre-apply array explicitly and moving
+   * `committedRef` in the same tick makes the debounced recorder see nothing left to do — one
+   * entry, whatever the plan contained.
+   */
+  const commitAsSingleUndoEntry = useCallback(
+    (next: CanvasNode[]) => {
+      if (next === committedRef.current) return
+      pastRef.current.push(committedRef.current)
+      if (pastRef.current.length > 100) pastRef.current.shift()
+      futureRef.current = []
+      committedRef.current = next
+      nodesRef.current = next
+      setNodes(next)
+      markDirty()
+      bumpHist((v) => v + 1)
+    },
+    [setNodes, markDirty]
+  )
+
+  /** The nodes the operator is using RIGHT NOW: anything selected, plus anything on screen or in
+   *  an open card modal. Deliberately generous — the cost of a false "in use" is a card that does
+   *  not move, and the cost of a false "free" is the canvas shifting under someone's hands. */
+  const activeLayoutNodeIds = useCallback((): string[] => {
+    const ids = new Set<string>()
+    for (const n of nodesRef.current) {
+      if (n.selected || isNodeWatched(n.id)) ids.add(n.id)
+    }
+    return [...ids]
+  }, [])
+
+  const buildLayoutRequest = useCallback(
+    (
+      projectId: string,
+      trigger: LayoutTrigger,
+      createdIds?: string[]
+    ): ReturnType<typeof layoutPlanRequest> => {
+      const byId = useAgentStatus.getState().byId
+      const statuses: Record<string, string> = {}
+      const now = Date.now()
+      for (const [id, status] of Object.entries(byId)) {
+        statuses[id] = statusViewFor(status, now).kind
+      }
+      const layoutNodes = layoutNodesOf(nodesRef.current)
+      // Loop-owned frames are DERIVED from a fact the hook layer already established (a node
+      // carrying a live loop / schedule / cron card), never guessed from a frame's name.
+      const loopNodeIds = Object.entries(byId)
+        .filter(([, status]) => !!status.loop)
+        .map(([id]) => id)
+      const project = useProjects.getState().projects.find((p) => p.id === projectId)
+      return layoutPlanRequest({
+        projectId,
+        trigger,
+        nodes: nodesRef.current,
+        ropes: controlEdgesRef.current.map((e) => ({ source: e.source, target: e.target })),
+        statuses,
+        actives: activeLayoutNodeIds(),
+        loopFrames: loopOwnedFrameIds(layoutNodes, loopNodeIds),
+        createdIds: createdIds ?? [],
+        projectRules: project?.layoutRules,
+        sizes: {
+          compact: COMPACT_CONTROL_NODE_SIZE,
+          // The configured normal footprint — the same resolver the control `resize` verb uses,
+          // so `--size normal` and an engine resize land on one number.
+          normal: canvasControlNodeSize('normal') ?? COMPACT_CONTROL_NODE_SIZE
+        },
+        holder: layoutHolderRef.current
+      })
+    },
+    [activeLayoutNodeIds]
+  )
+
+  /** Apply a plan, re-asking the active-node refusal NOW rather than trusting the plan-time
+   *  verdict — the same discipline agent hibernation uses, and for the same reason. */
+  const applyLayoutPlanNow = useCallback(
+    (plan: LayoutPlan): LayoutPlan => {
+      const gated = gateLayoutPlan(plan, { isActive: (id) => activeLayoutNodeIds().includes(id) })
+      const next = applyLayoutPlan(nodesRef.current, gated)
+      if (next !== nodesRef.current) commitAsSingleUndoEntry(next)
+      return gated
+    },
+    [activeLayoutNodeIds, commitAsSingleUndoEntry]
+  )
+
+  const runLayoutTrigger = useCallback(
+    async (trigger: LayoutTrigger, createdIds?: string[]) => {
+      if (!layoutEnabledRef.current) return
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId || layoutRunningRef.current) return
+      layoutRunningRef.current = true
+      try {
+        const api = window.nodeTerminal
+        const plan = await api.canvasLayout.plan(buildLayoutRequest(projectId, trigger, createdIds))
+        if (plan.stoodDown) {
+          // A stand-down is REPORTED on the path the operator asked for, naming the lease holder
+          // so a second instance can see why it lost rather than guess. On an automatic trigger it
+          // is deliberately quiet: the only reasons reachable there are "the feature is off"
+          // (nothing to say) and "another instance holds the lease" — where the visible result is
+          // an unplaced worker, i.e. exactly the pre-feature behaviour, and a modal on every spawn
+          // would be worse than the thing it reports.
+          if (trigger === 'organize' || trigger === 'rules-changed') {
+            const reason = LAYOUT_STAND_DOWN_LABELS[plan.stoodDown.reason]
+            setConfirm({
+              message: plan.stoodDown.holder ? `${reason} — ${plan.stoodDown.holder}` : reason,
+              alert: true,
+              onConfirm: () => setConfirm(null)
+            })
+          }
+          return
+        }
+        layoutLeasedProjectRef.current = projectId
+        if (useProjects.getState().activeProjectId !== projectId) return
+        if (trigger === 'node-created' || trigger === 'status-changed') {
+          applyLayoutPlanNow(plan)
+          return
+        }
+        const titleOf = (id: string): string =>
+          nodesRef.current.find((n) => n.id === id)?.data.title || id
+        setConfirm({
+          message: isEmptyPlan(plan)
+            ? 'Nothing to rearrange on this canvas.'
+            : `Rearrange ${opsByNode(plan).length} node(s) on this canvas?`,
+          body: <LayoutPlanTable plan={plan} titleOf={titleOf} />,
+          confirmLabel: isEmptyPlan(plan) ? 'Close' : 'Organize',
+          alert: isEmptyPlan(plan),
+          onConfirm: () => {
+            setConfirm(null)
+            if (!isEmptyPlan(plan)) applyLayoutPlanNow(plan)
+          }
+        })
+      } catch {
+        // A layout plan that could not be built changes nothing. There is no partial apply here:
+        // the request either answers with a whole plan or it does not.
+      } finally {
+        layoutRunningRef.current = false
+      }
+    },
+    [applyLayoutPlanNow, buildLayoutRequest, setConfirm]
+  )
+
+  runLayoutTriggerRef.current = runLayoutTrigger
+
+  const organizeCanvas = useCallback(() => {
+    void runLayoutTrigger('organize')
+  }, [runLayoutTrigger])
+
+  // `status-changed`: the ONE layout consequence of a status change, and it is what makes shipping
+  // a tray closed safe — a member that starts needing the operator leaves the closed frame instead
+  // of waiting inside it. Keyed on a compact SIGNATURE of the attention-needing set, not on the
+  // whole status map: subscribing to `byId` would re-run this on every hook event of every node
+  // (the same discipline `loopSig` and `armedDepSig` document just above).
+  const attentionSig = useAgentStatus((st) => {
+    let sig = ''
+    for (const [id, entry] of Object.entries(st.byId)) {
+      if (entry.state === 'blocked' || entry.failure) sig += `${id}|`
+    }
+    return sig
+  })
+  useEffect(() => {
+    if (!layoutEnabled || !attentionSig) return
+    void runLayoutTriggerRef.current?.('status-changed')
+  }, [attentionSig, layoutEnabled])
+
+  // `rules-changed`: the project's SHARED rule block changed — an agent wrote it, or a git pull
+  // brought someone else's. It is an explicit change to what the engine should do, so it previews
+  // like an organize rather than applying itself. The first observation per project is skipped:
+  // loading a project is not a rule change, and a dialog on every project switch is not a feature.
+  const activeLayoutRules = useProjects((st) =>
+    st.projects.find((p) => p.id === st.activeProjectId)?.layoutRules
+  )
+  const lastRulesRef = useRef<{ projectId: string; rules: unknown } | null>(null)
+  useEffect(() => {
+    const projectId = useProjects.getState().activeProjectId
+    const seen = lastRulesRef.current
+    lastRulesRef.current = { projectId, rules: activeLayoutRules }
+    if (!layoutEnabled || !seen || seen.projectId !== projectId) return
+    if (JSON.stringify(seen.rules ?? null) === JSON.stringify(activeLayoutRules ?? null)) return
+    void runLayoutTriggerRef.current?.('rules-changed')
+  }, [activeLayoutRules, layoutEnabled])
+
+  // Give the lease back when this renderer stops being the authority for a project — on switch and
+  // on unmount. A lease left held would expire on its own (`LAYOUT_LEASE_TTL_MS`), so this is the
+  // difference between a second instance waiting a minute and not waiting at all.
+  useEffect(() => {
+    const holder = layoutHolderRef.current
+    const held = layoutLeasedProjectRef.current
+    return () => {
+      if (held) void window.nodeTerminal.canvasLayout.release(held, holder).catch(() => {})
+    }
+  }, [activeProjectId])
+
   const toggleCollapseNodes = useCallback(
     (ids: string[]) => {
       const set = new Set(ids)
@@ -7549,6 +7813,18 @@ export function Canvas() {
           ...(hasArrangeableNodes()
             ? [{ label: 'Tidy canvas', icon: <IconGrid />, onClick: arrangeAllNodes } as MenuItem]
             : []),
+          // Only when the engine is switched on for this machine: with it off the row could only
+          // ever open a dialog saying the feature is off, which is a worse answer than no row.
+          ...(layoutEnabled
+            ? [
+                {
+                  label: 'Organize workers…',
+                  icon: <IconGrid />,
+                  hint: 'Files delegated workers into their trays. Shows what it will and will not touch.',
+                  onClick: organizeCanvas
+                } as MenuItem
+              ]
+            : []),
           // Project-wide: restart every idle agent CLI in place (new model pickup). Hidden on a
           // canvas with no restartable agent node — there it could only ever report "0 restarted".
           ...(hasRestartableAgents()
@@ -7573,6 +7849,8 @@ export function Canvas() {
       fitAll,
       arrangeAllNodes,
       hasArrangeableNodes,
+      layoutEnabled,
+      organizeCanvas,
       hasRestartableAgents,
       restartIdleAgents
     ]
@@ -8675,6 +8953,10 @@ export function Canvas() {
           return applyWorkerFramePlan(flow, plan, workerFrameLabel(ownerTitle))
         })
         markDirty()
+        // `node-created` — placement happens ONCE, at birth. Deferred a tick so the engine plans
+        // against the canvas WITH the new cards and their tray on it: `setNodes` is async, and a
+        // plan built from the pre-append array would refuse every one of them as "no such node".
+        queueMicrotask(() => void runLayoutTriggerRef.current?.('node-created', newIds))
       }
       // Grid slots INSIDE a group frame (open-agent --group): 2 columns of terminal-sized
       // cells under the header. Pure geometry — the frame is grown to fit before children land.
@@ -11476,6 +11758,20 @@ export function Canvas() {
             } as Command
           ]
         : []),
+      // Same visibility rule as the pane menu's row: hidden while the engine is off, where it
+      // could only report that it is off.
+      ...(layoutEnabled
+        ? [
+            {
+              id: 'organize-workers',
+              label: 'Organize workers',
+              hint: 'layout tray file workers automatic arrange',
+              section: 'View',
+              icon: <IconGrid />,
+              run: organizeCanvas
+            } as Command
+          ]
+        : []),
       { id: 'zoom-100', label: 'Zoom to 100%', icon: <IconFit />, run: zoomTo100 },
       { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() },
       // Hidden when the canvas has no restartable agent node — the row would have nothing to act
@@ -11584,6 +11880,8 @@ export function Canvas() {
     zoomTo100,
     arrangeAllNodes,
     hasArrangeableNodes,
+    layoutEnabled,
+    organizeCanvas,
     toggleFocusMode
   ])
 
@@ -12271,6 +12569,7 @@ export function Canvas() {
       {confirm && (
         <ConfirmDialog
           message={confirm.message}
+          body={confirm.body}
           confirmLabel={confirm.confirmLabel}
           cancelLabel={confirm.cancelLabel}
           danger={confirm.danger}

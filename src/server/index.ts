@@ -93,6 +93,7 @@ import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
 import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
 import { registerNodeStatusIpc } from '../core/node-status-service'
+import { registerCanvasLayoutIpc } from '../core/canvas-layout'
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
@@ -566,6 +567,11 @@ export async function startServer(
   // backend is still there. Same primitive `ServerNodeOps` probes with, double-checked in core
   // before it answers `dead`. Registered in both shells (see src/main/index.ts).
   registerNodeStatusIpc({ panePresence: (nodeId) => ptyManager.sessionPresence(nodeId) })
+  // Automatic canvas layout (`core/canvas-layout/`): the ONE way in. Nothing here polls — a plan
+  // is built only when the renderer asks, on a node-created / status-changed / rules-changed /
+  // organize trigger. Off unless `settings.canvasLayout.enabled` says otherwise, read at call
+  // time so the switch takes effect without a restart. Registered in both shells (see src/main/index.ts).
+  registerCanvasLayoutIpc({ settings: () => settingsStore.get().canvasLayout })
   // Phone→host read-acks: the phone drops `~/.nodeterm/acks/<nodeId>.seen` on this host when it READS
   // a finished session. Sweep it (15s cadence, cheap dir-mtime gate) and for each ack: `ackDone`
   // (mirror resolve + phone Live-Activity dismiss) + broadcast `agent:unread-clear` so the browser

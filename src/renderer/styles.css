@@ -1699,6 +1699,61 @@ body,
   flex: 0 0 auto;
 }
 
+/* The layout preview's table: what the engine will change, and what it will leave alone.
+   The two halves are given the same weight on purpose — an automatic layout feature is only
+   usable if you can see that it refused to touch your own workspace, so the refusal rows are not
+   an appendix and are not dimmed away. They ARE set in the secondary label colour, which is what
+   distinguishes "will change" from "left alone" alongside the heading; the reason itself is a
+   word, never a colour. */
+.layout-plan {
+  max-height: 46vh;
+  overflow-y: auto;
+  margin-bottom: 12px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.layout-plan__section + .layout-plan__section {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.layout-plan__heading {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-2);
+  margin-bottom: 6px;
+}
+
+.layout-plan__row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 3px 0;
+}
+
+.layout-plan__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 48%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.layout-plan__what {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+}
+
+.layout-plan__row--skipped .layout-plan__name {
+  color: var(--muted);
+}
+
 /* QUEUED: a node armed with canvas-control `--after`, holding its launch until the stations it
    waits on go idle. Grey — it is not an alert, it is "not started yet". */
 .term-node__status--queued {

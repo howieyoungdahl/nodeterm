@@ -12,6 +12,10 @@ import { projectCapabilityFields, readProjectCapabilities } from '../shared/proj
 import { loadedAgentBrowserPartition } from '../shared/browser-partition'
 import { sanitizeProjectIcon, type ProjectIcon } from '../shared/project-icon'
 import { sanitizeTriggerSpec } from '../shared/trigger'
+import {
+  sanitizeCanvasLayoutRules,
+  type CanvasLayoutRules
+} from '../shared/canvas-layout-rules'
 
 /**
  * Drop a browser node's persisted `partition` unless it is exactly the jar THIS project (its
@@ -123,6 +127,17 @@ export interface ProjectFileV1 {
   agentMessaging?: boolean
   dinoHighScore?: number
   kanban?: ProjectKanban
+  /**
+   * Shared canvas rules (@shared/canvas-layout-rules) — the layout engine's half of the block.
+   * Hostile input like every other field here, so it is sanitized on BOTH boundaries, and keys
+   * this build does not recognise are carried through untouched rather than dropped: two machines
+   * on different builds read and rewrite this same file, and dropping is how an older one would
+   * silently delete a newer one's rules on the next save.
+   *
+   * Whether the engine RUNS is not here and never will be — that is `Settings.canvasLayout`,
+   * machine-local (see the field's doc in @shared/types).
+   */
+  layoutRules?: CanvasLayoutRules
 }
 
 /** One workspace.json v3 entry. Exactly one of: `cwd` (local ref), `ssh` (remote ref),
@@ -255,6 +270,7 @@ export function projectToFile(
     stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
   )
   const icon = sanitizeProjectIcon(p.icon)
+  const layoutRules = sanitizeCanvasLayoutRules(p.layoutRules)
   return {
     version: 1,
     rev,
@@ -273,7 +289,11 @@ export function projectToFile(
     // the acknowledgment is machine-local (IndexEntryV3.capabilityAck) and must never travel.
     ...projectCapabilityFields(p),
     ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {}),
-    ...(p.kanban ? { kanban: p.kanban } : {})
+    ...(p.kanban ? { kanban: p.kanban } : {}),
+    // Normalised on the way OUT too, for the same reason trigger specs are: a malformed block
+    // that reached the live project some other way (a peer mutation, a hand edit) must never be
+    // written into the shared file as though this build had authored it.
+    ...(layoutRules ? { layoutRules } : {})
   }
 }
 
@@ -322,6 +342,7 @@ export function fileToProject(
 ): Project {
   const defaultAccountId = base.defaultAccountId ?? f.defaultAccountId
   const icon = sanitizeProjectIcon(f.icon)
+  const fileLayoutRules = sanitizeCanvasLayoutRules(f.layoutRules)
   return {
     id: base.id,
     name: f.name,
@@ -349,6 +370,7 @@ export function fileToProject(
     ...readProjectCapabilities(f),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
     ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
+    ...(fileLayoutRules ? { layoutRules: fileLayoutRules } : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {}),
