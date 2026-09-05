@@ -16,6 +16,7 @@ import { resolveTerminalRenderer } from '../shared/webgl'
 import { resolveTerminalTheme } from './terminal/themes'
 import { resolveUiScale } from '../shared/ui-scale'
 import { useAppTheme } from './state/useAppTheme'
+import { AppearanceLayer } from './components/AppearanceLayer'
 
 export default function App() {
   // Apply the terminal-rendering setting to the two GPU coordinators, live. 'auto' is
@@ -75,6 +76,10 @@ export default function App() {
         <Canvas />
         {/* In-app window.prompt replacement (Electron has no prompt); driven by promptDialog(). */}
         <PromptDialogHost />
+        {/* Publishes the appearance environment every node resolves against, and paints the
+            window/app edge over everything (pointer-events: none, so it blocks nothing). Renders
+            null until the user configures an edge. */}
+        <AppearanceLayer />
       </ReactFlowProvider>
     </SessionProvider>
   )
