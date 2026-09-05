@@ -4,6 +4,7 @@ import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
 import type { AgentState, NormalizedAgentEvent } from './agents/normalize'
+import type { PaneEvidence } from './node-status'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
 import type { BrowserLeasePush } from './browser-indicator'
@@ -1230,6 +1231,9 @@ export interface ObservedClaudeAccount {
  * until each one happened to post again. A display SEED only: nothing may gate on it (the mirror's
  * `restored` rule for messaging is unchanged), and the renderer applies its own freshness cut.
  */
+/** Re-exported so every `NodeTerminalApi` consumer speaks one vocabulary (see ./node-status). */
+export type { PaneEvidence }
+
 export interface AgentStatusSnapshotEntry {
   state?: AgentState
   agentId?: AgentId
@@ -3177,6 +3181,15 @@ export interface NodeTerminalApi {
   /** Last-known status per node from the shell's mirror — a display seed for a fresh renderer
    *  (see `AgentStatusSnapshot`). Both shells serve it from core. */
   agentStatusSnapshot(): Promise<AgentStatusSnapshot>
+  /**
+   * Prove whether the terminal backend behind each node id is still there. Answers every id it was
+   * given; `'unknown'` for anything it could not check, including on a shell that wired no prober.
+   * This is the ONLY input to the `failed` status badge (`shared/node-status.ts`) — the renderer
+   * never infers a failure from what a terminal looks like, and a `dead` answer here is
+   * double-checked in core before it is returned. Both shells serve it from
+   * `core/node-status-service.ts`; a relay tab asks the REMOTE core, which is where its nodes live.
+   */
+  nodePaneEvidence(nodeIds: string[]): Promise<Record<string, PaneEvidence>>
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

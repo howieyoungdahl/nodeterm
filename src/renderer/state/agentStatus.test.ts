@@ -268,10 +268,13 @@ describe('the verified evidence for a transition', () => {
 
   it('Canvas hands the event\'s flag to the store — the drop this whole change exists to fix', () => {
     // A store field with no writer is the same bug in a new place, and this one is a plain
-    // argument list: nothing else in the suite would notice if the last argument disappeared.
+    // argument list: nothing else in the suite would notice if an argument disappeared. The
+    // trailing evidence object is pinned here for the same reason — `reason` and `askKind` are
+    // what the status badge shows for "why does this need me?", and both already ride every
+    // broadcast event, so losing them again would be silent.
     const src = readFileSync(resolve(__dirname, '../../..', 'src/renderer/canvas/Canvas.tsx'), 'utf8')
     expect(src).toMatch(
-      /cs\.setState\(\s*e\.nodeId,\s*e\.state,\s*e\.agentId,\s*e\.newTurn,\s*e\.pendingId,\s*e\.verified\s*\)/
+      /cs\.setState\(\s*e\.nodeId,\s*e\.state,\s*e\.agentId,\s*e\.newTurn,\s*e\.pendingId,\s*e\.verified,\s*\{\s*reason:\s*e\.lastMessage,\s*askKind:\s*e\.askKind\s*\}\s*\)/
     )
   })
 

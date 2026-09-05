@@ -1177,6 +1177,61 @@ else, and its context links must keep classifying across restarts).
   Settings (`notifyOnClaudeDone`). Selecting, focusing, dwelling into, or opening a session card
   clears `unread` and ACKs the finish across phone/notch surfaces — existing read-on-view behavior.
   This NEVER changes the workflow bucket: read state is independent from agent state.
+- **The status badge (six states, and where each one may come from)** — `shared/node-status.ts` is
+  the whole model: `working | waiting | blocked | completed | failed | unknown`, rendered by ONE
+  component (`components/StatusBadge.tsx`) on the node header, on a group frame's label pill
+  (rolled up, worst member wins) and on a kanban card. It replaced the header's separate RUNNING and
+  NEEDS YOU chips and the card's own pair — a session seen on two surfaces must not describe itself
+  in two vocabularies, and NEEDS YOU could not tell an approval from a question.
+  **Never infer state from what a terminal looks like.** No output parsing, no "it has not printed
+  in a while so it is stuck". Exactly two sources:
+  - `working | waiting | blocked | completed` come from the hook-fed mirror (`AgentState`, with
+    `stateAt` as the freshness — the clock that was previously documented as never rendered; this
+    badge is the reader it now has). `done` is spelled `completed` on screen.
+  - `failed` comes ONLY from a session fact: the last hook state was `working`, `waiting` or
+    `blocked` (`FAILABLE_STATES`) **and** the pane is PROVEN dead. The proof is
+    `PtyManager.sessionPresence` — the same tri-state primitive `ServerNodeOps`' dead-card sweep
+    asks — served by `core/node-status-service.ts`, which repeats the probe before it will answer
+    `dead` (one miss is a busy tmux, two is a fact). Both shells register that channel from the one
+    core body; `core/node-status-parity.test.ts` pins it, because a shell that stopped calling it
+    would boot fine and simply never say `failed`. **`done` is the one state a dead pane does not
+    change**: a session that finished and then had its terminal closed is a tidied-up success, and
+    failing it would put a red badge on every one of them. That exclusion is the whole reason the
+    original decision named `working` alone; a dead pane is otherwise a fact about the SESSION, not
+    about the turn, so the other two fail with it — which is what stops a node that was `blocked` on
+    a permission request when its session died from reading `BLOCKED` forever, inviting the operator
+    to answer a prompt that no longer exists.
+  Everything else is `unknown`, **which is a word on screen, never silence**: no status event, or a
+  probe that could not tell. A missing prober can never manufacture `failed` — `runFailureProbe`
+  records `unknown` for every candidate on a surface with none, which is what stops a stale
+  `working` from quietly reading as healthy.
+  Three more rules the code depends on:
+  - **Nothing status-derived touches disk.** The badge is computed at render time; `reason`,
+    `askKind`, `pane` and the latched `failure` are all excluded from the agentStatus localStorage
+    allow-list, and none of it reaches `project.json`. That is what keeps a fact that changes every
+    few seconds from re-raising the Reload/Keep-mine conflict bar (pinned in
+    `agentStatus.persist.test.ts`).
+  - **Never colour alone.** Every state carries a distinct glyph AND a distinct word (and `stale` is
+    a word too), asserted in `node-status.test.ts`. Do not add a state whose only difference is a
+    CSS class.
+  - **The failure LATCHES, and only a live hook event clears it.** `sweepStaleWorking` blanks a
+    stale `working` entry, so without the latch a proven failure would decay back to `unknown`
+    minutes after it was proven. `markFailed` re-asks eligibility at write time (the probe is
+    async), and a node carrying a latch is deliberately excluded from `setState`'s same-state fast
+    path so the self-heal actually re-renders.
+  Probing is lazy: `paneProbeCandidates` picks only `FAILABLE_STATES` entries past
+  `NODE_STATUS_STALE_MS` (10 min — half the mirror's 20-minute presumed-gone window, and just past
+  the longest legitimate gap between hook events) whose pane has not been asked about within
+  `PANE_RECHECK_MS`, so a canvas of healthy agents makes zero probes. That second bound is
+  load-bearing since `waiting`/`blocked` joined: unlike `working` they never decay out of the
+  candidate set on their own, so an overnight parked approval would otherwise be re-probed on every
+  pass. Only `working` is downgraded to `unknown` by an INCONCLUSIVE probe — it claims something is
+  happening now, while `waiting`/`blocked` claim a standing request that does not become less true
+  by sitting still, and those are exactly the states an operator parks. Freshness is rendered
+  by one shared 15 s ticker (`lib/statusClock.ts`), not a timer per node. Desktop and Server Edition
+  both have the whole surface (the bridge member is real, and a relay tab asks the remote core its
+  nodes actually live on); the sessions sidebar keeps its own coarser `StatusKind` buckets and does
+  not yet show `failed`.
 - **Status-grouped sessions** — three always-visible sections: **Waiting for your response** maps
   internal `done`, `waiting`, and `blocked` together (a completed turn, question, or approval all
   need the user); **Running** maps `working`; **Unknown** means no live hook state is available.

@@ -92,6 +92,7 @@ import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
 import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
+import { registerNodeStatusIpc } from '../core/node-status-service'
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
@@ -561,6 +562,10 @@ export async function startServer(
   // boot but only ever pushes on a live event, so without this every pane read idle after a Server
   // restart. Registered in both shells (see src/main/index.ts) from one core body.
   registerAgentStatusSnapshotIpc()
+  // The one input that may produce a `failed` badge: prove whether a node's tmux/session-host
+  // backend is still there. Same primitive `ServerNodeOps` probes with, double-checked in core
+  // before it answers `dead`. Registered in both shells (see src/main/index.ts).
+  registerNodeStatusIpc({ panePresence: (nodeId) => ptyManager.sessionPresence(nodeId) })
   // Phone→host read-acks: the phone drops `~/.nodeterm/acks/<nodeId>.seen` on this host when it READS
   // a finished session. Sweep it (15s cadence, cheap dir-mtime gate) and for each ack: `ackDone`
   // (mirror resolve + phone Live-Activity dismiss) + broadcast `agent:unread-clear` so the browser

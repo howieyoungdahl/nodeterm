@@ -1593,6 +1593,112 @@ body,
   color: var(--accent);
 }
 
+/* ── The status badge (shared/node-status.ts) ────────────────────────────────────────────────────
+   ONE badge for the whole state model, on a node header and on a group frame's label pill.
+
+   COLOUR IS REDUNDANT ENCODING ONLY. Every distinction below is already carried by the glyph and
+   the word, which is why the badge still works in a monochrome screenshot, for a colourblind
+   reader, and with effects off. Do not remove a word to make room; remove the age instead. */
+.nt-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  min-width: 0;
+  flex-shrink: 1;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.nt-status__glyph {
+  font-weight: 700;
+  line-height: 1;
+}
+
+.nt-status__word {
+  white-space: nowrap;
+}
+
+/* Freshness. Quieter than the state itself — it qualifies the fact, it is not the fact. */
+.nt-status__age {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  opacity: 0.65;
+}
+
+/* Past the freshness window. A WORD, not a colour change: "this is old news" has to survive the
+   same readers the state does. */
+.nt-status__stale {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  opacity: 0.8;
+}
+
+/* Why attention is needed, from the hook event's own text — never invented, always truncated by
+   the model (STATUS_REASON_MAX) before it gets here. Ellipsised again in CSS so a narrow header
+   never pushes the buttons off the end. */
+.nt-status__reason {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.75;
+}
+
+/* Clay, matching the working spinner and the node glow — the same colour RUNNING always had. */
+.nt-status--working {
+  color: #d97757;
+}
+
+.nt-status--working .nt-status__glyph {
+  animation: nt-pulse 1.1s ease-in-out infinite;
+}
+
+/* Waiting and blocked are both "you", and both red, as NEEDS YOU was — the word is what separates
+   an answer the agent wants from an approval it is stopped on. */
+.nt-status--waiting,
+.nt-status--blocked {
+  color: var(--danger);
+}
+
+.nt-status--blocked .nt-status__glyph {
+  animation: nt-pulse 1.1s ease-in-out infinite;
+}
+
+/* Failed: proven, not guessed — the session was working and its terminal session is gone. */
+.nt-status--failed {
+  color: var(--danger);
+}
+
+.nt-status--completed {
+  color: var(--success);
+}
+
+/* Unknown is deliberately visible rather than absent: a node nothing has reported for must say so,
+   not read as idle. Grey, because it is not an alarm — it is an admission. */
+.nt-status--unknown {
+  color: var(--muted);
+}
+
+/* On a group frame's label pill: the frame is the only thing on screen once its members are put
+   away, so the roll-up sits inline with the frame name. */
+.nt-status--rollup {
+  margin-left: 6px;
+}
+
+/* On a kanban card the badge shares one tight row with the title, so it never grows and never
+   shrinks the title away. */
+.kanban-card__row .nt-status {
+  margin-left: 4px;
+  flex: 0 0 auto;
+}
+
 /* QUEUED: a node armed with canvas-control `--after`, holding its launch until the stations it
    waits on go idle. Grey — it is not an alert, it is "not started yet". */
 .term-node__status--queued {
@@ -8799,16 +8905,9 @@ button.group-node__setup:disabled {
   padding: 2px 5px;
   flex: 0 0 auto;
 }
-.kanban-badge--running {
-  color: var(--success);
-  background: rgba(50, 215, 75, 0.12);
-  /* reuse the terminal-header badge pulse (nt-pulse) rather than a bespoke keyframe */
-  animation: nt-pulse 1.1s ease-in-out infinite;
-}
-.kanban-badge--needs {
-  color: var(--warn);
-  background: rgba(255, 159, 10, 0.12);
-}
+/* The card's RUNNING / NEEDS YOU pair is gone: the board renders the same `.nt-status` badge the
+   node header does, so one session cannot describe itself in two vocabularies. `--sleeping` stays
+   because Eco is a different fact, not a different state. */
 /* Eco: the agent CLI was exited to reclaim RAM. Quiet — the session is fine. */
 .kanban-badge--sleeping {
   color: var(--muted);
