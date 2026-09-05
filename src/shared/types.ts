@@ -5,6 +5,8 @@ import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
 import type { AgentState, NormalizedAgentEvent } from './agents/normalize'
 import type { PaneEvidence } from './node-status'
+import type { CanvasLayoutRules, CanvasLayoutSettings } from './canvas-layout-rules'
+import type { LayoutPlan, LayoutPlanRequest } from './canvas-layout'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
 import type { BrowserLeasePush } from './browser-indicator'
@@ -729,6 +731,20 @@ export interface Project {
    *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
   defaultPermissionMode?: AgentPermissionMode
   /**
+   * Shared canvas rules, in two halves that share one block: WHAT the automatic layout engine
+   * should do with this canvas (`spawn` / `tray`, @shared/canvas-layout-rules) and the appearance
+   * derivation table (`appearance`, @shared/appearance). GIT-SHARED and hand-editable, so it is
+   * read as hostile input on every load path, exactly like `nodes[].trigger`. Keys a build does
+   * not recognise are carried through rather than dropped — the two halves write the same block,
+   * and dropping is how one build would silently delete the other's rules on the next save.
+   *
+   * What is deliberately NOT here: WHETHER the engine runs (`Settings.canvasLayout.enabled`,
+   * default off) and the machine-local appearance (window edge, reduced-motion, effects-off, in
+   * `Settings.appearance`). Cloning a repo must never restyle someone's app or start rearranging
+   * their canvas.
+   */
+  layoutRules?: CanvasLayoutRules & ProjectLayoutRules
+  /**
    * Per-project capability switch: agents may drive browser nodes THEY opened in this project.
    * GIT-SHARED (rides .nodeterm/project.json) and therefore hostile input — the raw bit is read
    * ONLY through `projectCapabilityFlagInFile` (@shared/project-capabilities, strict `=== true`,
@@ -753,13 +769,6 @@ export interface Project {
   dinoHighScore?: number
   /** Kanban task board — shared via .nodeterm/project.json like nodes. */
   kanban?: ProjectKanban
-  /**
-   * Shared canvas rules — today the appearance derivation table (@shared/appearance), later the
-   * layout engine's own halves. Rides .nodeterm/project.json like `kanban`, and is read through
-   * `sanitizeProjectLayoutRules` on every load path: an unknown `version` and unknown keys are
-   * IGNORED rather than rejected, so an older build still renders a canvas a newer one saved.
-   */
-  layoutRules?: ProjectLayoutRules
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
   /**
@@ -1341,6 +1350,16 @@ export interface Settings {
    *  keeps the active project expanded and collapses the others, off leaves everything expanded.
    *  Explicit toggles live in `sidebarCollapsedItems` and always win. */
   sidebarAutoCollapse: boolean
+  /**
+   * Automatic canvas layout (`core/canvas-layout/`) — this machine's switch and its default
+   * rules. **`enabled` lives HERE and nowhere else, and defaults to off.** A shared project file
+   * must not be able to switch on automatic rearrangement for everyone who clones the repo, which
+   * is the same rule the reduced-motion preference follows and for the same reason: what an
+   * application is allowed to do to your screen is not the repository's decision. Absent (or any
+   * shape this build does not recognise) reads as off, so an existing install upgrades to
+   * byte-identical behaviour. See @shared/canvas-layout-rules.
+   */
+  canvasLayout?: CanvasLayoutSettings
   /** Persisted disclosure choices for the sessions tree, keyed `project:<id>` and
    *  `project:<id>:group:<groupId>` (true = collapsed). Pruned on every write against the live
    *  tree, so a deleted frame or project cannot grow settings.json forever. */
@@ -1699,6 +1718,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
+  canvasLayout: { enabled: false },
   sidebarCollapsedItems: {},
   sidebarGrouping: 'project',
   defaultProjectView: 'canvas',
@@ -3190,6 +3210,21 @@ export interface NodeTerminalApi {
    * `core/node-status-service.ts`; a relay tab asks the REMOTE core, which is where its nodes live.
    */
   nodePaneEvidence(nodeIds: string[]): Promise<Record<string, PaneEvidence>>
+  /**
+   * Automatic canvas layout (`core/canvas-layout/`). `plan` returns what the engine WOULD do,
+   * never applies it — the renderer previews the answer and applies the ops itself, so the one
+   * place a node is actually moved is the same `setNodes` every manual gesture goes through.
+   *
+   * A plan whose `stoodDown` is set is an empty answer WITH a reason (the feature is off on this
+   * machine, another instance holds the project's lease and is named, or there is no project).
+   * That distinction is the point: an empty `ops` with no reason cannot be told apart from "there
+   * was nothing to do". Both shells serve it from one core body; see `canvas-layout-parity`.
+   */
+  canvasLayout: {
+    plan(request: LayoutPlanRequest): Promise<LayoutPlan>
+    /** Give the lease back — on project switch, or when the renderer goes away. */
+    release(projectId: string, holder: string): Promise<boolean>
+  }
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

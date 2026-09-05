@@ -139,6 +139,14 @@ export const IPC = {
    *  `unknown` for every id, never `dead`. Registered in both shells from one core body
    *  (`core/node-status-service.ts`). */
   nodeStatusPanes: 'node-status:panes',
+  /** Renderer → main/server: build a layout plan for one project (`core/canvas-layout/`). Payload:
+   *  `LayoutPlanRequest`; resolves a `LayoutPlan` whose `stoodDown` says why it is empty when it
+   *  is. The canvas travels in the request because the renderer's React Flow array is the live
+   *  truth for the active project. Registered in both shells from one core body. */
+  canvasLayoutPlan: 'canvas-layout:plan',
+  /** Renderer → main/server: give back this project's layout lease. Payload:
+   *  `{ projectId, holder }`; resolves boolean. Releasing someone else's lease is a no-op. */
+  canvasLayoutRelease: 'canvas-layout:release',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
    *  docs/hook-reply-approvals.md. */

@@ -172,6 +172,7 @@ import { initKeepAwake } from './keep-awake'
 import type { KeepAwakeTracker } from '../core/keep-awake'
 import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
 import { registerNodeStatusIpc } from '../core/node-status-service'
+import { registerCanvasLayoutIpc } from '../core/canvas-layout'
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { registerPtmxLimitHandler } from './ptmx-limit'
@@ -2432,6 +2433,11 @@ app.whenReady().then(async () => {
   // backend is still there. Same primitive the operator API's dead-card sweep uses, double-checked
   // in core before it answers `dead`. Registered in both shells (see src/server/index.ts).
   registerNodeStatusIpc({ panePresence: (nodeId) => ptyManager.sessionPresence(nodeId) })
+  // Automatic canvas layout (`core/canvas-layout/`): the ONE way in. Nothing here polls — a plan
+  // is built only when the renderer asks, on a node-created / status-changed / rules-changed /
+  // organize trigger. Off unless `settings.canvasLayout.enabled` says otherwise, read at call
+  // time so the switch takes effect without a restart. Registered in both shells (see src/server/index.ts).
+  registerCanvasLayoutIpc({ settings: () => settingsStore.get().canvasLayout })
   // Phone→host read-acks (this feature, the other direction): the phone drops
   // `~/.nodeterm/acks/<nodeId>.seen` on the SESSION host when it READS a finished session. For each
   // ack: `ackDone` (mirror resolves the done event → phone Inbox archives it + the paired phone's

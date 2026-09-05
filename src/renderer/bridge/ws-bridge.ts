@@ -53,7 +53,8 @@ import {
   type WorkspaceApi,
   AgentStatusSnapshot,
   type PaneEvidence
-} from '../../shared/types'
+} from '@shared/types'
+import type { LayoutPlan } from '@shared/canvas-layout'
 import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
@@ -636,6 +637,7 @@ export function buildAgentApi(
   | 'onAgentStatus'
   | 'agentStatusSnapshot'
   | 'nodePaneEvidence'
+  | 'canvasLayout'
   | 'onSubagentActivity'
   | 'onUnreadClear'
   | 'answerPermission'
@@ -652,6 +654,13 @@ export function buildAgentApi(
     // owns the sessions is the one being asked. See shared/node-status.ts.
     nodePaneEvidence: (nodeIds) =>
       client.request(IPC.nodeStatusPanes, nodeIds) as Promise<Record<string, PaneEvidence>>,
+    // REAL over the bridge. The engine lives in core, so the Server Edition already has it; a stub
+    // here would leave the browser canvas with a feature that silently never plans anything.
+    canvasLayout: {
+      plan: (request) => client.request(IPC.canvasLayoutPlan, request) as Promise<LayoutPlan>,
+      release: (projectId, holder) =>
+        client.request(IPC.canvasLayoutRelease, { projectId, holder }) as Promise<boolean>
+    },
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>

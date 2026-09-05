@@ -17,6 +17,57 @@ import {
   sanitizeProjectLayoutRules,
   type ProjectLayoutRules
 } from '../shared/appearance'
+import {
+  sanitizeCanvasLayoutRules,
+  type CanvasLayoutRules
+} from '../shared/canvas-layout-rules'
+
+/**
+ * The two halves of `layoutRules`, in one type. The appearance derivation table
+ * (`@shared/appearance`) and the layout engine's spawn/tray rules (`@shared/canvas-layout-rules`)
+ * were built on sibling branches and each keeps its rules in this one shared block.
+ */
+export type ProjectLayoutRulesBlock = ProjectLayoutRules & CanvasLayoutRules
+
+/**
+ * MERGE RESOLUTION. Each half shipped a sanitizer that could not import the other, so each carries
+ * the other's keys through as unknown — the appearance half verbatim at the top level, the layout
+ * half nested under its own `unknown` bag. Once both are in one tree that is no longer enough: the
+ * bag moves `appearance` somewhere the appearance reader does not look, so one save by a build that
+ * had only the layout half would strip the border rules out of a git-shared file for everybody.
+ *
+ * So the halves are composed here. Each still validates only the keys it owns; anything NEITHER
+ * recognises is flattened back to the top level rather than left in the bag, and the machine-local
+ * appearance keys are excluded exactly as the appearance sanitizer excludes them — a window edge or
+ * a reduced-motion choice must never travel in the shared file, however it got into the block.
+ */
+function sanitizeLayoutRulesBlock(value: unknown): ProjectLayoutRulesBlock | undefined {
+  const layout = sanitizeCanvasLayoutRules(value)
+  const appearance = sanitizeProjectLayoutRules(value)
+  if (!layout && !appearance) return undefined
+  const out: Record<string, unknown> = {}
+  for (const [key, v] of Object.entries(layout?.unknown ?? {})) {
+    if (key === 'appearance') continue
+    if (MACHINE_LOCAL_LAYOUT_RULE_KEYS.has(key)) continue
+    out[key] = v
+  }
+  const version = layout?.version ?? appearance?.version
+  if (version !== undefined) out.version = version
+  if (layout?.spawn) out.spawn = layout.spawn
+  if (layout?.tray) out.tray = layout.tray
+  if (layout?.triggers) out.triggers = layout.triggers
+  if (appearance?.appearance) out.appearance = appearance.appearance
+  return Object.keys(out).length ? (out as ProjectLayoutRulesBlock) : undefined
+}
+
+/** Mirrors the appearance sanitizer's own exclusion set; see its doc for why these never travel. */
+const MACHINE_LOCAL_LAYOUT_RULE_KEYS: ReadonlySet<string> = new Set([
+  'windowEdge',
+  'node',
+  'group',
+  'reducedMotion',
+  'effectsOff'
+])
 
 /**
  * Drop a browser node's persisted `partition` unless it is exactly the jar THIS project (its
@@ -149,14 +200,22 @@ export interface ProjectFileV1 {
   dinoHighScore?: number
   kanban?: ProjectKanban
   /**
-   * Shared canvas rules (@shared/appearance) — today the appearance derivation table, later the
-   * layout engine's own halves. Deliberately IN the git-shared file: "workers of this director get
-   * a red border" is a statement about the canvas, and the team shares it. Which is why it is read
-   * through `sanitizeProjectLayoutRules` (unknown `version` and unknown keys ignored, never a
-   * reason to reject the block) and why the MACHINE-LOCAL half — the window edge, reduced-motion,
-   * effects-off — is not here at all but in `Settings.appearance`.
+   * Shared canvas rules, in two halves that share one block: the appearance derivation table
+   * (@shared/appearance) and the layout engine's spawn/tray rules (@shared/canvas-layout-rules).
+   * Deliberately IN the git-shared file: "workers of this director get a red border" and "workers
+   * open into a collapsed tray" are both statements about the canvas, and the team shares them.
+   *
+   * Hostile input like every other field here, so it is sanitized on BOTH boundaries, and keys this
+   * build does not recognise are carried through untouched rather than dropped: two machines on
+   * different builds read and rewrite this same file, and dropping is how one would silently delete
+   * the other's rules on the next save.
+   *
+   * What is NOT here: the MACHINE-LOCAL halves. The window edge, reduced-motion and effects-off
+   * live in `Settings.appearance`, and whether the engine RUNS at all is `Settings.canvasLayout`.
+   * A repository must not be able to restyle, or start automatically rearranging, everyone who
+   * clones it.
    */
-  layoutRules?: ProjectLayoutRules
+  layoutRules?: ProjectLayoutRulesBlock
 }
 
 /** One workspace.json v3 entry. Exactly one of: `cwd` (local ref), `ssh` (remote ref),
@@ -289,7 +348,7 @@ export function projectToFile(
     sanitizeNodeTriggers(stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes))
   )
   const icon = sanitizeProjectIcon(p.icon)
-  const layoutRules = sanitizeProjectLayoutRules(p.layoutRules)
+  const layoutRules = sanitizeLayoutRulesBlock(p.layoutRules)
   return {
     version: 1,
     rev,
@@ -309,9 +368,9 @@ export function projectToFile(
     ...projectCapabilityFields(p),
     ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {}),
     ...(p.kanban ? { kanban: p.kanban } : {}),
-    // Normalised on the way OUT too, like the trigger specs above: a malformed rule block that
-    // reached the live project some other way (a hand edit, a peer mutation) is never written into
-    // the shared file as if it were ours. An empty block adds no bytes to the committed file.
+    // Normalised on the way OUT too, for the same reason trigger specs are: a malformed block that
+    // reached the live project some other way (a hand edit, a peer mutation) must never be written
+    // into the shared file as though this build had authored it. An empty block adds no bytes.
     ...(layoutRules ? { layoutRules } : {})
   }
 }
@@ -361,7 +420,7 @@ export function fileToProject(
 ): Project {
   const defaultAccountId = base.defaultAccountId ?? f.defaultAccountId
   const icon = sanitizeProjectIcon(f.icon)
-  const layoutRules = sanitizeProjectLayoutRules(f.layoutRules)
+  const layoutRules = sanitizeLayoutRulesBlock(f.layoutRules)
   return {
     id: base.id,
     name: f.name,
@@ -391,11 +450,11 @@ export function fileToProject(
     ...readProjectCapabilities(f),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
     ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
-    // Hostile input, same treatment as the capability bits above: an unknown `version` and unknown
-    // keys are ignored field by field, so an unusable block simply means built-in defaults rather
-    // than a rejected project. NOTE what is NOT read from here — the machine-local appearance
-    // (window edge, reduced-motion, effects-off) lives in settings.json, and the shape has no
-    // place for a file field claiming otherwise.
+    // Hostile input, same treatment as the capability bits above: an unusable block simply means
+    // built-in defaults rather than a rejected project. NOTE what is NOT read from here — the
+    // machine-local appearance (window edge, reduced-motion, effects-off) and the engine's own
+    // on/off switch live in settings.json, and the shape has no place for a file field claiming
+    // otherwise.
     ...(layoutRules ? { layoutRules } : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
