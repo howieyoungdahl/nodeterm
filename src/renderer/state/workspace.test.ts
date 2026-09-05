@@ -1206,6 +1206,8 @@ describe('applyWorkerFramePlan', () => {
     const frame = out.find((n) => n.type === 'group')!
     expect(frame.data.title).toBe('lane workers')
     expect(frame.data.taskFrame).toBe(true)
+    // …and it ships collapsed, the same as the Server path.
+    expect(frame.data.collapsed).toBe(true)
     expect(out.find((n) => n.id === 't1')!.parentId).toBe(frame.id)
     expect(out.find((n) => n.id === 't2')!.parentId).toBe(frame.id)
   })
