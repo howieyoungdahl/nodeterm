@@ -1704,6 +1704,13 @@ else, and its context links must keep classifying across restarts).
   `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
   node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
   identity never defaults to Claude.
+  **Server message submit verification:** `sendSettledEnvelope` first waits until pane capture sees
+  the pasted envelope, then sends Enter and captures again. A fresh Claude composer can render a
+  paste before it is ready to consume Enter; an unchanged composed snapshot therefore gets exactly
+  one more Enter plus re-capture. The boolean still means only "bytes reached the pane" — the
+  target's verified `newTurn`/`working` hook remains the receipt that permits `delivered`; a retry
+  that produces no receipt becomes `stalled`. Keep the retry bounded: repeating Enter can submit a
+  human draft after the intended envelope has already moved.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
   the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
   `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim
