@@ -73,12 +73,16 @@ describe('canvas-layout channel parity', () => {
 
   it('the shared rule block is sanitized on BOTH boundaries, and on the inline load path', () => {
     const files = read('src/core/workspace-files.ts')
+    // Both halves of the block go through ONE sanitizer (`sanitizeLayoutRulesBlock`), which calls
+    // `sanitizeCanvasLayoutRules` for the layout keys and the appearance sanitizer for its own.
+    // Two sanitizers over one shared block is how one half deletes the other's keys on save.
+    expect(files).toContain('sanitizeCanvasLayoutRules(flat)')
     // Read (fileToProject) and write (projectToFile).
-    expect(files).toContain('sanitizeCanvasLayoutRules(f.layoutRules)')
-    expect(files).toContain('sanitizeCanvasLayoutRules(p.layoutRules)')
+    expect(files).toContain('sanitizeLayoutRulesBlock(f.layoutRules)')
+    expect(files).toContain('sanitizeLayoutRulesBlock(p.layoutRules)')
     // …and the cwd-less inline branch, which deliberately skips fileToProject.
     expect(read('src/core/workspace-store.ts')).toContain(
-      'sanitizeCanvasLayoutRules(base.layoutRules)'
+      'sanitizeLayoutRulesBlock(base.layoutRules)'
     )
   })
 

@@ -56,24 +56,50 @@ describe('layoutRules at the project-file boundary', () => {
     expect(file.layoutRules).toBeUndefined()
   })
 
-  it('PRESERVES a key this build does not know, through a whole read/write cycle', () => {
-    const withUnknown = {
+  it('keeps BOTH halves of the block through a whole read/write cycle', () => {
+    // `appearance` is no longer a foreign key: the two halves now share one sanitizer, so it is
+    // validated and kept at the TOP level rather than parked in the unknown bag. What must not
+    // change is the guarantee — neither half erases the other's keys on an ordinary save.
+    const both = {
       version: 2,
       spawn: { place: 'tray' as const },
       appearance: { byProvider: { claude: { color: '#0a84ff' } } }
     }
     const loaded = fileToProject(
-      { ...projectToFile(project(), 3, 't'), layoutRules: withUnknown } as ProjectFileV1,
+      { ...projectToFile(project(), 3, 't'), layoutRules: both } as ProjectFileV1,
       { id: 'p1' }
     )
-    expect(loaded.layoutRules?.unknown).toEqual({
-      appearance: { byProvider: { claude: { color: '#0a84ff' } } }
-    })
-    // …and it survives the save, so an older build does not erase a newer one's half of the block.
+    expect(loaded.layoutRules).toEqual(both)
     const written = projectToFile(loaded, 4, 't')
-    expect(written.layoutRules?.unknown).toEqual({
+    expect(written.layoutRules).toEqual(both)
+  })
+
+  it('lifts a key an older build had parked in the unknown bag back to the top level', () => {
+    // A build that shipped only the layout half nested everything foreign under `unknown`. Reading
+    // that file must find `appearance` where the appearance half looks, or the border rules read as
+    // absent and the next save writes them away for good.
+    const parked = {
+      version: 2,
+      unknown: { appearance: { byProvider: { claude: { color: '#0a84ff' } } } }
+    }
+    const loaded = fileToProject(
+      { ...projectToFile(project(), 3, 't'), layoutRules: parked } as ProjectFileV1,
+      { id: 'p1' }
+    )
+    expect(loaded.layoutRules).toEqual({
+      version: 2,
       appearance: { byProvider: { claude: { color: '#0a84ff' } } }
     })
+  })
+
+  it('still carries a key NEITHER half knows, at the top level', () => {
+    const future = { version: 2, someThirdHalf: { mode: 'x' } }
+    const loaded = fileToProject(
+      { ...projectToFile(project(), 3, 't'), layoutRules: future } as ProjectFileV1,
+      { id: 'p1' }
+    )
+    expect(loaded.layoutRules).toEqual(future)
+    expect(projectToFile(loaded, 4, 't').layoutRules).toEqual(future)
   })
 
   it('is byte-identical for a pre-feature project — an existing canvas gains nothing', () => {

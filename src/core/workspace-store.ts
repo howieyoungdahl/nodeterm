@@ -10,10 +10,9 @@ import {
 } from '../shared/types'
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, resolveNodes, sameProjectContent,
-  sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validKanban,
+  sanitizeLayoutRulesBlock, sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
-import { sanitizeCanvasLayoutRules } from '../shared/canvas-layout-rules'
 import { readProjectSettingsFile, writeProjectSettingsFile } from './project-settings-files'
 import {
   parseProjectSettingsFile, sameProjectSettingsContent, sanitizeProjectLocalSettings,
@@ -303,7 +302,7 @@ export class WorkspaceStore {
         const base = validKanban(kanban) ? e.project : rest
         // …and the same rule for the shared layout-rule block, which reaches the layout engine and
         // therefore must not arrive unvalidated on the one load path that skips fileToProject.
-        const layoutRules = sanitizeCanvasLayoutRules(base.layoutRules)
+        const layoutRules = sanitizeLayoutRulesBlock(base.layoutRules)
         const { layoutRules: _rawRules, ...withoutRules } = base
         built.push({
           entry: e,
