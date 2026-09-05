@@ -731,17 +731,19 @@ export interface Project {
    *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
   defaultPermissionMode?: AgentPermissionMode
   /**
-   * Shared canvas rules — WHAT the automatic layout engine should do with this canvas
-   * (@shared/canvas-layout-rules). GIT-SHARED and hand-editable, so it is read as hostile input
-   * on every load path (`sanitizeCanvasLayoutRules`), exactly like `nodes[].trigger`.
+   * Shared canvas rules, in two halves that share one block: WHAT the automatic layout engine
+   * should do with this canvas (`spawn` / `tray`, @shared/canvas-layout-rules) and the appearance
+   * derivation table (`appearance`, @shared/appearance). GIT-SHARED and hand-editable, so it is
+   * read as hostile input on every load path, exactly like `nodes[].trigger`. Keys a build does
+   * not recognise are carried through rather than dropped — the two halves write the same block,
+   * and dropping is how one build would silently delete the other's rules on the next save.
    *
-   * WHETHER the engine runs is deliberately NOT here: that switch is machine-local
-   * (`Settings.canvasLayout.enabled`, default off), so cloning a repo can never start
-   * rearranging someone's canvas. The visual-preferences branch adds an `appearance` half to this
-   * same block; until the two meet, each sanitizer carries the other's key through untouched
-   * rather than either of them validating JSON it does not read.
+   * What is deliberately NOT here: WHETHER the engine runs (`Settings.canvasLayout.enabled`,
+   * default off) and the machine-local appearance (window edge, reduced-motion, effects-off, in
+   * `Settings.appearance`). Cloning a repo must never restyle someone's app or start rearranging
+   * their canvas.
    */
-  layoutRules?: CanvasLayoutRules
+  layoutRules?: CanvasLayoutRules & ProjectLayoutRules
   /**
    * Per-project capability switch: agents may drive browser nodes THEY opened in this project.
    * GIT-SHARED (rides .nodeterm/project.json) and therefore hostile input — the raw bit is read
@@ -767,13 +769,6 @@ export interface Project {
   dinoHighScore?: number
   /** Kanban task board — shared via .nodeterm/project.json like nodes. */
   kanban?: ProjectKanban
-  /**
-   * Shared canvas rules — today the appearance derivation table (@shared/appearance), later the
-   * layout engine's own halves. Rides .nodeterm/project.json like `kanban`, and is read through
-   * `sanitizeProjectLayoutRules` on every load path: an unknown `version` and unknown keys are
-   * IGNORED rather than rejected, so an older build still renders a canvas a newer one saved.
-   */
-  layoutRules?: ProjectLayoutRules
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
   /**
