@@ -11415,3 +11415,174 @@ body.focus-mode .dock:hover {
   border: 1px solid var(--warn);
   background: transparent;
 }
+
+/* ── Persistent visual preferences (Settings → Appearance) ────────────────────────────────────
+   Everything below is inert until the user configures something: the surfaces emit no class and
+   no custom property when the resolver returns the built-in appearance (@shared/appearance), so
+   an existing install renders byte-identically to the release before this feature.
+
+   THE RING IS AN OUTLINE, deliberately — not a border and not a box-shadow.
+   A border would change the box, and a terminal node's box change is a tmux SIGWINCH: every
+   thickness tweak would re-cols/rows every session on the canvas. A box-shadow is already spoken
+   for three times over on these elements (the node's drop shadow, and the unread / working /
+   attention status glows), and a *preference* must never be able to suppress a *status* signal by
+   competing for the same slot. An outline costs no layout, follows `border-radius`, and composes
+   with all of them. */
+.term-node--tinted,
+.term-node--sized,
+.term-node--focus.selected {
+  outline: var(--nt-appearance-thickness, 2px) solid var(--nt-appearance-color, var(--accent));
+}
+
+/* Focus highlighting is the ring, emphasised — the node that has the selection gets a couple of
+   extra pixels rather than a second colour, because colour is never the only carrier of anything
+   here and a "which node am I on" cue has to survive a colour-blind reader. */
+.term-node--focus.selected {
+  outline-width: calc(var(--nt-appearance-thickness, 2px) + 2px);
+}
+
+/* A frame keeps its dashed border and its label pill — that is how a group reads as a group — and
+   the preference EXTENDS it with a ring just outside, rather than replacing it. */
+.group-node--tinted,
+.group-node--sized,
+.group-node--focus.selected {
+  outline: var(--nt-appearance-thickness, 2px) solid var(--nt-appearance-color, var(--accent));
+  outline-offset: 2px;
+}
+
+.group-node--focus.selected {
+  outline-width: calc(var(--nt-appearance-thickness, 2px) + 2px);
+}
+
+/* The optional glow, as its own element behind the surface (see components/AppearanceGlow.tsx for
+   why it is not a pseudo-element). Static on purpose: a border preference is not an event, and a
+   canvas of forty pulsing terminals is what "reduce motion" exists to escape. */
+.appearance-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  box-shadow:
+    0 0 0 1px var(--nt-appearance-color, var(--accent)),
+    0 0 20px 3px var(--nt-appearance-color, var(--accent));
+  opacity: 0.55;
+}
+
+.appearance-glow--node {
+  border-radius: 10px;
+}
+
+.appearance-glow--group {
+  border-radius: 14px;
+}
+
+/* The window/app edge — a fixed overlay, never a border on a real element: the app is a
+   full-viewport flex column and giving one of its children a variable-width frame would reflow
+   the canvas (and every terminal's cols/rows) on each thickness change. `pointer-events: none`,
+   so it sits above everything and blocks nothing. */
+.window-edge {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9000;
+  border: var(--nt-appearance-thickness, 2px) solid var(--nt-appearance-color, var(--accent));
+  border-radius: 8px;
+}
+
+.window-edge--glow {
+  box-shadow: inset 0 0 22px 0 var(--nt-appearance-color, var(--accent));
+}
+
+/* Focus highlighting on the edge answers "which window am I typing into" — the frame dims while
+   the window is in the background and comes back at full strength when it is focused. */
+.window-edge--blurred {
+  opacity: 0.3;
+}
+
+/* The machine-local "reduce motion" switch (Settings → Appearance), BESIDE the
+   `prefers-reduced-motion` media queries this stylesheet already carries — it adds the user's own
+   request to the OS's, it does not replace it.
+   Deliberately one blanket rule rather than a second copy of every per-effect block: those each
+   freeze one animation at a chosen frame, and restating them here would be a list to keep in sync
+   forever. Durations are collapsed rather than removed so an animation whose final keyframe IS
+   the visible state still settles there instead of being stuck at frame 0. */
+[data-reduced-motion='1'] *,
+[data-reduced-motion='1'] *::before,
+[data-reduced-motion='1'] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* The per-node / per-frame border override, inside the colour popover both node kinds already
+   open. The popover is a 4-column grid of swatches, so the picker spans the full width and lays
+   its own row out; the swatch buttons inherit the popover's circular button rule. */
+.border-picker {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 2px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+
+.border-picker__label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.border-picker__swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.border-picker__none {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+}
+
+.border-picker__swatches .is-current {
+  border-color: var(--text);
+  border-width: 2px;
+}
+
+.border-picker__note {
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--muted);
+  max-width: 150px;
+}
+
+/* The Settings → Appearance preview swatch. A small stand-in for a terminal node, carrying the
+   SAME `--nt-appearance-*` custom properties and the same `term-node--tinted/--sized` classes the
+   canvas node does — the values come from the one resolver, so the preview cannot promise
+   something the canvas does not draw. */
+.appearance-preview {
+  position: relative;
+  width: 108px;
+  height: 62px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  overflow: hidden;
+}
+
+.appearance-preview__bar {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 12px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(var(--tint-rgb), 0.18);
+}

@@ -13,6 +13,7 @@ import type {
 import { collisionSeed, derivedProjectId } from '@shared/project-id'
 import type { ProjectCapability } from '@shared/project-capabilities'
 import type { ProjectIcon } from '@shared/project-icon'
+import type { ProjectLayoutRules } from '@shared/appearance'
 import { recordCapabilityAck, type CapabilityAnswer } from '@shared/project-capability-consent'
 import { applyCanvasMutation, createProject, reorderGroupWithinParent } from './workspace'
 import { markWorkspaceDirty } from './workspaceDirty'
@@ -92,6 +93,11 @@ interface ProjectsState {
   setDinoHighScore(id: string, score: number): void
   /** Replaces the project's kanban board (the UI computes the next board via lib/kanban). */
   setProjectKanban(id: string, kanban: ProjectKanban): void
+  /** Replaces a project's shared canvas rules (@shared/appearance). Handed over whole, the same
+   *  convention as setProjectKanban; `undefined` removes the block so an unconfigured project adds
+   *  no bytes to the committed file. The caller owes a `markWorkspaceDirty()` — this is state, the
+   *  debounced save is Canvas's. */
+  setProjectLayoutRules(id: string, layoutRules: ProjectLayoutRules | undefined): void
   /** Replaces the project's breadcrumb (navigation history) list wholesale — the UI computes the
    *  next list via lib/breadcrumbs and hands it over whole, same convention as setProjectKanban. */
   setProjectBreadcrumbs(id: string, breadcrumbs: NavStop[]): void
@@ -427,6 +433,17 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   setProjectKanban(id, kanban) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, kanban } : p))
+    }))
+  },
+
+  setProjectLayoutRules(id, layoutRules) {
+    set((s) => ({
+      projects: s.projects.map((p) => {
+        if (p.id !== id) return p
+        if (layoutRules) return { ...p, layoutRules }
+        const { layoutRules: _dropped, ...rest } = p
+        return rest
+      })
     }))
   },
 
