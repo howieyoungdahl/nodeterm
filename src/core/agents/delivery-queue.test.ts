@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   DeliveryQueue,
   DELIVERY_QUEUE_CAPACITY,
@@ -104,6 +104,94 @@ describe('DeliveryQueue', () => {
     expect(a).toMatchObject({ kind: 'queued', position: 1 })
     expect(b).toMatchObject({ kind: 'queued', position: 2 })
     expect(q.depth('dst')).toBe(2)
+  })
+
+  it('keeps every concurrent enqueue in order and enforces capacity during tracing', async () => {
+    const h = harness()
+    const q = new DeliveryQueue(h.deps, { capacity: 2 })
+    const results = await Promise.all(['first', 'second', 'third'].map((body) => q.enqueue(req({ body }))))
+    expect(results.map((result) => result.kind)).toEqual(['queued', 'queued', 'queueFull'])
+    expect(q.depth('dst')).toBe(2)
+    await q.onTargetIdle('dst')
+    expect(h.delivered.map((message) => message.body)).toEqual(['first', 'second'])
+  })
+
+  it('serializes overlapping idle signals while a delivery is awaiting its receipt', async () => {
+    let release!: () => void
+    const receipt = new Promise<void>((resolve) => { release = resolve })
+    const started: string[] = []
+    const h = harness({ deliver: async (message) => {
+      started.push(message.body)
+      if (message.body === 'first') await receipt
+      return { kind: 'delivered', traceId: message.body, traced: 'memory', receipt: 'observed', signal: 'newTurn' }
+    } })
+    const q = new DeliveryQueue(h.deps)
+    await q.enqueue(req({ body: 'first' }))
+    await q.enqueue(req({ body: 'second' }))
+    const first = q.onTargetIdle('dst')
+    await vi.waitFor(() => expect(started).toEqual(['first']))
+    const second = q.onTargetIdle('dst')
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(started).toEqual(['first'])
+    } finally {
+      release()
+      await Promise.all([first, second])
+    }
+    expect(started).toEqual(['first', 'second'])
+    expect(h.flushed).toHaveLength(2)
+  })
+
+  it('bounds pending admissions even when the first trace is stalled', async () => {
+    let release!: () => void
+    const tracing = new Promise<void>((resolve) => { release = resolve })
+    const h = harness({ trace: async () => {
+      await tracing
+      return { traceId: 'held', traced: 'memory' }
+    } })
+    const q = new DeliveryQueue(h.deps, { capacity: 2 })
+    const first = q.enqueue(req({ body: 'first' }))
+    const second = q.enqueue(req({ body: 'second' }))
+    try {
+      expect(await q.enqueue(req({ body: 'overflow' }))).toEqual({ kind: 'queueFull', capacity: 2 })
+      expect(q.depth('dst')).toBe(0)
+    } finally {
+      release()
+      await Promise.all([first, second])
+      q.resetForTests()
+    }
+  })
+
+  it('does not lose an idle event received while the queued receipt is being traced', async () => {
+    let release!: () => void
+    const tracing = new Promise<void>((resolve) => { release = resolve })
+    const h = harness({ trace: async () => {
+      await tracing
+      return { traceId: 'trace', traced: 'memory' }
+    } })
+    const q = new DeliveryQueue(h.deps)
+    const admission = q.enqueue(req())
+    const idle = q.onTargetIdle('dst')
+    release()
+    await Promise.all([admission, idle])
+    expect(h.delivered).toHaveLength(1)
+    expect(q.depth('dst')).toBe(0)
+  })
+
+  it('retries a queued rate limit after its delay without requiring another idle event', async () => {
+    const h = harness()
+    const q = new DeliveryQueue(h.deps)
+    await q.enqueue(req())
+    h.setOutcome({ kind: 'rateLimited', retryAfterMs: 10_000 })
+    await q.onTargetIdle('dst')
+    const retry = h.timers.find((timer) => !timer.cancelled && timer.ms === 10_000)
+    expect(retry).toBeDefined()
+    h.setClock(11_000)
+    // The retry must use the full delivery gate again, including a grant revoked during the wait.
+    h.setOutcome({ kind: 'notPermitted', reason: 'switch-off' })
+    retry!.fn()
+    await vi.waitFor(() => expect(q.depth('dst')).toBe(0))
+    expect(h.flushed.at(-1)?.outcome.kind).toBe('notPermitted')
   })
 
   it('reports per-target depths without exposing queue contents', async () => {

@@ -15,6 +15,18 @@ const plan: LayoutPlan = {
 }
 
 describe('gateLayoutPlan', () => {
+  it('keeps collapse ops for marked spawn trays that predate group roles', () => {
+    const collapse: LayoutPlan = {
+      trigger: 'node-created', ops: [{ op: 'collapse', nodeId: 'tray', collapsed: true }], skipped: []
+    }
+    expect(gateLayoutPlan(collapse, {
+      isActive: () => false, current: { nodes: [{ id: 'tray', kind: 'group', taskFrame: true }] }
+    })).toBe(collapse)
+    expect(gateLayoutPlan(collapse, {
+      isActive: () => false,
+      current: { nodes: [{ id: 'tray', kind: 'group', taskFrame: true, role: 'primary' }] }
+    }).ops).toEqual([])
+  })
   it('drops EVERY op for a node that became active after the plan was built', () => {
     const gated = gateLayoutPlan(plan, { isActive: (id) => id === 'a' })
     expect(gated.ops).toEqual([{ op: 'reparent', nodeId: 'b', parentId: 'tray' }])
@@ -30,6 +42,31 @@ describe('gateLayoutPlan', () => {
 
   it('returns the SAME object when nothing changed — the preview is still exactly what applies', () => {
     expect(gateLayoutPlan(plan, { isActive: () => false })).toBe(plan)
+  })
+
+  it.each([
+    [{ pinned: true }, 'pinned'],
+    [{ manualPlacement: true }, 'manual-placement'],
+    [{ role: 'primary' }, 'primary-role']
+  ] as const)('honors changed operator intent when applying a preview: %s', (change, reason) => {
+    const gated = gateLayoutPlan(plan, {
+      isActive: () => false,
+      current: { nodes: [{ id: 'a', kind: 'terminal', role: 'worker', ...change }] }
+    })
+    expect(gated.ops.some((op) => op.nodeId === 'a')).toBe(false)
+    expect(gated.skipped).toContainEqual({ nodeId: 'a', reason })
+  })
+
+  it('honors a loop adopting the worker while the preview is open', () => {
+    const gated = gateLayoutPlan(plan, {
+      isActive: () => false,
+      current: {
+        nodes: [{ id: 'a', kind: 'terminal', role: 'worker', parentId: 'loop-frame' }],
+        loopFrames: ['loop-frame']
+      }
+    })
+    expect(gated.ops.some((op) => op.nodeId === 'a')).toBe(false)
+    expect(gated.skipped).toContainEqual({ nodeId: 'a', reason: 'loop-owned' })
   })
 
   it('does not double-report a node the plan had already refused', () => {

@@ -183,6 +183,7 @@ export async function initServerCanvasControl(
     sendEnvelope: (nodeId, envelope) =>
       sendSettledEnvelope(deps.ptyManager, nodeId, envelope),
     hasLiveSession: (nodeId) => deps.ptyManager.hasLiveSession(nodeId),
+    sessionPresence: (nodeId) => deps.ptyManager.sessionPresence(nodeId),
     mirrorEntry,
     projects: () => deps.workspaceStore.persistedCanvases(),
     isRemoteNode: () => false,

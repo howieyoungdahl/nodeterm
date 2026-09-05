@@ -11,6 +11,8 @@
 // indistinguishable from a bug; every one of them is a row with a reason.
 
 /** What woke the engine. There is deliberately no `timer`: nothing here polls. */
+import { refusalContext, refuse, type LayoutRefusalInput } from './canvas-layout-refusals'
+
 export type LayoutTrigger =
   /** A node was just created. Placement happens ONCE, at birth. */
   | 'node-created'
@@ -307,14 +309,14 @@ export function loopOwnedFrameIds(
 // hibernation uses (CLAUDE.md: "Fire-time re-asks: still-offscreen, remote, eligibility — a
 // plan-time verdict is stale by seconds"), for the same reason.
 //
-// Nothing else is re-asked here. `pinned` and `manualPlacement` are durable persisted facts and
-// the applier reads them off the very nodes it is about to write, so a second reading would be
-// the same reading; loop ownership and creator ownership do not change inside a preview.
+// Pinning, manual placement, node roles and loop membership can also change while the preview
+// is open. Reuse the planner's refusal table against current nodes before applying its old ops.
 
 
 export interface ApplyGateDeps {
   /** Asked NOW, per node, for every node the plan would touch. */
   isActive: (nodeId: string) => boolean
+  current?: LayoutRefusalInput
 }
 
 /**
@@ -325,15 +327,19 @@ export interface ApplyGateDeps {
  * preview it showed is still exactly what it is about to apply.
  */
 export function gateLayoutPlan(plan: LayoutPlan, deps: ApplyGateDeps): LayoutPlan {
-  const dropped = new Set<string>()
+  const dropped = new Map<string, LayoutSkipReason>()
+  const context = deps.current ? refusalContext(deps.current) : undefined
   for (const op of plan.ops) {
-    if (deps.isActive(op.nodeId)) dropped.add(op.nodeId)
+    if (context && deps.isActive(op.nodeId)) context.actives.add(op.nodeId)
+    const node = context?.byId.get(op.nodeId)
+    const reason = node && context ? refuse(node, context) : deps.isActive(op.nodeId) ? 'active' : null
+    if (reason) dropped.set(op.nodeId, reason)
   }
   if (!dropped.size) return plan
   const already = new Set(plan.skipped.map((s) => s.nodeId))
   const added: LayoutSkip[] = [...dropped]
-    .filter((nodeId) => !already.has(nodeId))
-    .map((nodeId) => ({ nodeId, reason: 'active' as const }))
+    .filter(([nodeId]) => !already.has(nodeId))
+    .map(([nodeId, reason]) => ({ nodeId, reason }))
   return {
     ...plan,
     ops: plan.ops.filter((op) => !dropped.has(op.nodeId)),

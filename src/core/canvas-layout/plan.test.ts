@@ -60,6 +60,18 @@ function canvasWithTray(worker: LayoutNode): LayoutNode[] {
 const TRAY_ROPES = [{ source: 'spawner', target: 'w1' }]
 
 describe('plan() — the refusals', () => {
+  it.each([
+    [{ manualPlacement: true }, 'manual-placement'],
+    [{}, 'active'],
+    [{ role: 'primary' }, 'primary-role']
+  ] as const)('does not collapse a protected tray: %s', (change, reason) => {
+    const result = plan(input({
+      nodes: [frame('tray', change), node('spawner', { parentId: 'tray' }), node('w1')],
+      ropes: TRAY_ROPES, createdIds: ['w1'], actives: reason === 'active' ? ['tray'] : []
+    }))
+    expect(result.ops.some((op) => op.op === 'collapse')).toBe(false)
+    expect(result.skipped).toContainEqual({ nodeId: 'tray', reason })
+  })
   it('places a plain new worker (the control case every refusal below is measured against)', () => {
     const result = plan(
       input({ nodes: canvasWithTray(node('w1')), ropes: TRAY_ROPES, createdIds: ['w1'] })

@@ -301,10 +301,18 @@ refused, with a reason, when it is pinned, hand-placed, in use right now, inside
 frame, created by another authority, or simply not a delegated worker (an absent `role` reads as
 `primary`, so every pre-existing canvas is untouchable by construction). **Report every refusal —
 a silent skip and a bug look identical from outside.** Two rules a refactor keeps wanting to undo:
-the "in use" question is re-asked at APPLY time rather than trusted from the plan (a preview sits
-on screen while the operator clicks somewhere), and the engine has no op that creates a frame, so
+all refusal rules are re-asked at APPLY time rather than trusted from the plan (the operator may
+pin, move, or start using a card while its preview is open), and the engine has no op that creates a frame, so
 it can never become a second frame-creator racing the spawn path. Nothing runs on a timer, and
 nothing on this path may reach a PTY.
+
+Layout events received during an asynchronous plan must be coalesced and drained, not discarded.
+Capture their project identity, reject application after a project switch, and release the actual
+held lease on unmount. Messaging likewise serializes admission and delivery per target; a queued
+rate limit retries once its advertised delay passes, with every authorization gate rechecked and
+the original expiry unchanged. Server session presence must include detached tmux sessions, and
+that probe runs only after the free permission/status checks. Test fixtures disable agent-hook
+and instruction installation; temporary test paths must never reach live provider homes.
 
 ## Testing
 
