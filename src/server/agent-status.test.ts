@@ -446,4 +446,62 @@ describe('wireAgentStatus — the grok raw-listener branch', () => {
     })
     expect(grokSessionDirFor('gs-5')).toBeUndefined()
   })
+  // ── Scoped delivery of the three per-node channels (§ display scope) ─────────────────────────
+  //
+  // The decision itself is exercised at the transport in platform-server.test.ts. What these pin is
+  // the WIRING: that the events wireAgentStatus pushes carry the owning project, and that a client
+  // looking elsewhere is skipped. The scope is a display filter, never a permission.
+  it('agent:status is delivered only to clients scoped to the owning project (unscoped gets all)', () => {
+    const fh = fakeHooks()
+    // `projectOf` stands in for the pane-ownership ledger, whose entries only exist for panes this
+    // process freshly spawned. Injecting it keeps the test off that global.
+    wireAgentStatus(platform, {
+      hooks: fh.hooks as never,
+      projectOf: (nodeId) => (nodeId === 'n-a' ? 'proj-a' : nodeId === 'n-b' ? 'proj-b' : undefined)
+    })
+    const seen = (texts: string[]): unknown[] =>
+      texts
+        .map((t) => JSON.parse(t) as { channel?: string; args?: unknown[] })
+        .filter((m) => m.channel === IPC.agentStatus)
+        .map((m) => (m.args?.[0] as { nodeId?: string }).nodeId)
+    const a: string[] = []
+    const b: string[] = []
+    const open: string[] = []
+    const uiA = platform.attach({ sendText: (j) => a.push(j), sendBinary: () => {} })
+    const uiB = platform.attach({ sendText: (j) => b.push(j), sendBinary: () => {} })
+    platform.attach({ sendText: (j) => open.push(j), sendBinary: () => {} })
+    platform.setClientScope(uiA, 'proj-a')
+    platform.setClientScope(uiB, 'proj-b')
+    fh.fireNormalized({ nodeId: 'n-a', agentId: 'claude', kind: 'state', state: 'working' })
+    fh.fireNormalized({ nodeId: 'n-b', agentId: 'claude', kind: 'state', state: 'working' })
+    expect(seen(a)).toEqual(['n-a'])
+    expect(seen(b)).toEqual(['n-b'])
+    expect(seen(open)).toEqual(['n-a', 'n-b'])
+  })
+
+  it('a node with no proven owner is broadcast to everyone, scoped clients included', () => {
+    // The ledger fails closed by design (an attached-not-spawned pane answers undefined). Unknown
+    // must therefore mean DELIVER: after a restart nothing is proven, and the opposite reading
+    // would blank every scoped client's badges with no error anywhere.
+    const fh = fakeHooks()
+    wireAgentStatus(platform, { hooks: fh.hooks as never, projectOf: () => undefined })
+    const a: string[] = []
+    const uiA = platform.attach({ sendText: (j) => a.push(j), sendBinary: () => {} })
+    platform.setClientScope(uiA, 'proj-a')
+    fh.fireNormalized({ nodeId: 'n-unproven', agentId: 'claude', kind: 'state', state: 'done' })
+    expect(a.some((t) => (JSON.parse(t) as { channel?: string }).channel === IPC.agentStatus)).toBe(true)
+  })
+
+  it('every per-node channel goes through the scoped push, none through the bare broadcast', () => {
+    // A source-level pin, for the same reason hook-verified-parity.test.ts is one: a call site left
+    // on `platform.broadcast` still compiles, still passes every behavioural test in this file, and
+    // silently opts that channel out of scoping. `agent:subagent-activity` is the one that carries
+    // live transcript TEXT, and it is only reachable through a callback the real tail owns — so it
+    // has no end-to-end test here and this is what guards it.
+    const src = fs.readFileSync(path.join(__dirname, 'agent-status.ts'), 'utf8').replace(/\r\n/g, '\n')
+    for (const ch of ['IPC.agentStatus', 'IPC.agentSubagentActivity', 'IPC.contextUpdate']) {
+      expect(src).not.toContain(`platform.broadcast(${ch}`)
+      expect(src).toContain(`pushForNode(${ch}`)
+    }
+  })
 })

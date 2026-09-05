@@ -26,6 +26,7 @@ import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
 import { linkedClaudeConfigDirs } from '../core/claude-config-dir'
 import { isAsyncSubagentLaunch, grokRawFields, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { applyGrokHookSession } from '../core/grok-hook-session'
+import { paneOwnerProject } from '../core/agents/pane-ownership'
 import { IPC } from '../shared/ipc'
 import type { ServerPlatform } from './platform-server'
 
@@ -49,6 +50,15 @@ export interface WireAgentStatusOptions {
   /** One tap on the normalized, mirror-enriched stream for in-process consumers such as the
    * Server Edition delivery queue and `--after` scheduler. */
   onEvent?: (event: NormalizedAgentEvent) => void
+  /**
+   * Which project a node belongs to, for the DISPLAY scope on the three per-node pushes below
+   * (`agent:status`, `agent:subagent-activity`, `context:update`). Defaults to the runtime pane
+   * ownership ledger, which answers `undefined` for any pane this run did not freshly spawn — and
+   * `undefined` means "broadcast to everyone", so an unknown node is never a client that goes
+   * quiet. Injectable for tests. See ServerPlatform.broadcastScoped: this narrows what the server
+   * volunteers, and is not an access-control boundary.
+   */
+  projectOf?: (nodeId: string) => string | undefined
 }
 
 /**
@@ -73,12 +83,49 @@ export function wireAgentStatus(
   const nodeContextSession = new Map<string, string>()
   // nodeId → active subagent tool_use_ids
   const nodeSubagents = new Map<string, Set<string>>()
+  // tool_use_id / codex agent_id → the node whose session spawned it. The reverse of
+  // nodeSubagents, kept because the subagent ACTIVITY callback is handed only the id — and that is
+  // the one channel here that carries live transcript TEXT, so it is the one that most needs to
+  // know whose canvas it belongs on.
+  const subagentOwner = new Map<string, string>()
+
+  // The two subagent maps must never disagree, so there is ONE definition of "this node started /
+  // stopped owning this subagent id" rather than a `subagentOwner` write beside each of the four
+  // `nodeSubagents` writes. A drifted pair is silent: the card keeps streaming and only its
+  // DELIVERY scope is wrong, which no test of the card would notice.
+  const startSubagent = (nodeId: string, subId: string): void => {
+    const set = nodeSubagents.get(nodeId) ?? new Set<string>()
+    set.add(subId)
+    nodeSubagents.set(nodeId, set)
+    subagentOwner.set(subId, nodeId)
+  }
+  const endSubagent = (nodeId: string | undefined, subId: string): void => {
+    if (nodeId) nodeSubagents.get(nodeId)?.delete(subId)
+    subagentOwner.delete(subId)
+  }
+
+  const projectOf = opts.projectOf ?? paneOwnerProject
+  /** Push one per-node event, scoped to the project that owns the node (unknown ⇒ everyone). */
+  const pushForNode = (channel: string, nodeId: string | undefined, payload: unknown): void => {
+    platform.broadcastScoped(channel, nodeId ? projectOf(nodeId) : undefined, payload)
+  }
 
   const subagentTail =
     opts.subagentTail ??
     createSubagentTail(({ toolUseId, chunk }) => {
-      platform.broadcast(IPC.agentSubagentActivity, { toolUseId, chunk })
+      pushForNode(IPC.agentSubagentActivity, subagentOwner.get(toolUseId), { toolUseId, chunk })
     })
+
+  /** End every subagent still open for a node whose session is over (SessionEnd, destroy, recycle):
+   *  their ends will never arrive, and an owner entry nobody clears is a leak on a long-lived
+   *  server. Iterating the set before deleting it is why this is not a loop over `endSubagent`. */
+  const releaseSubagents = (nodeId: string): void => {
+    for (const subId of nodeSubagents.get(nodeId) ?? []) {
+      subagentTail.finish(subId)
+      subagentOwner.delete(subId)
+    }
+    nodeSubagents.delete(nodeId)
+  }
 
   // Async subagents (Claude's default) end via a <task-notification> queued into the PARENT
   // transcript — their PostToolUse is only a launch ack. The context tail reads that transcript,
@@ -96,10 +143,10 @@ export function wireAgentStatus(
       toolUseId: n.toolUseId,
       result: n.result
     } satisfies NormalizedAgentEvent
-    platform.broadcast(IPC.agentStatus, taskDoneEvent)
+    pushForNode(IPC.agentStatus, nodeId, taskDoneEvent)
     recordAgentEvent(taskDoneEvent)
     subagentTail.finish(n.toolUseId)
-    nodeSubagents.get(nodeId)?.delete(n.toolUseId)
+    endSubagent(nodeId, n.toolUseId)
   }
 
   /** See the identical handler in src/main/index.ts: a tool RESULT settles an ask that ended with
@@ -117,23 +164,26 @@ export function wireAgentStatus(
       kind: 'state',
       state: 'working'
     } satisfies NormalizedAgentEvent
-    platform.broadcast(IPC.agentStatus, ev)
+    pushForNode(IPC.agentStatus, nodeId, ev)
     recordAgentEvent(ev)
   }
 
   // Every context tail pushes through here, so an agent's meter reaches the browser and the phone's
   // context ring identically whichever CLI produced the numbers.
   const pushContextUpdate = (payload: unknown): void => {
-    platform.broadcast(IPC.contextUpdate, payload)
-    // Feed the mirror's per-node context ring (mobile-usage-inbox). The context tail keys by
-    // sessionId; map it back to the node via the same association the raw listener records.
+    // The tail keys by sessionId; the SAME association the raw listener records maps it back to a
+    // node — which is both what the mirror's per-node context ring needs (mobile-usage-inbox) and
+    // what the display scope needs, so it is resolved once. No association yet ⇒ no node ⇒
+    // broadcast to everyone, as before.
     const cw = payload as { sessionId?: string; usedPercent?: number }
+    let owner: string | undefined
     for (const [nid, sid] of nodeContextSession) {
-      if (sid === cw.sessionId && typeof cw.usedPercent === 'number') {
-        recordContextUsage(nid, cw.usedPercent)
-        break
-      }
+      if (sid !== cw.sessionId) continue
+      owner = nid
+      if (typeof cw.usedPercent === 'number') recordContextUsage(nid, cw.usedPercent)
+      break
     }
+    pushForNode(IPC.contextUpdate, owner, payload)
   }
   const contextTail =
     opts.contextTail ?? createContextTail(pushContextUpdate, { onTaskNotification, onToolResult })
@@ -160,7 +210,7 @@ export function wireAgentStatus(
     // event ENRICHED for a needs-you edge (a question strips its pendingId), so the browser canvas
     // keys off the same single source of truth as the mirror/phone. Then broadcast the enriched one.
     const enriched = recordAgentEvent(e) ?? e
-    platform.broadcast(IPC.agentStatus, enriched)
+    pushForNode(IPC.agentStatus, enriched.nodeId, enriched)
     opts.onEvent?.(enriched)
   })
 
@@ -290,14 +340,10 @@ export function wireAgentStatus(
             safeTranscriptPath(p.transcript_path),
             createCodexSubagentFormatter
           )
-          if (nodeId) {
-            const set = nodeSubagents.get(nodeId) ?? new Set<string>()
-            set.add(p.agent_id)
-            nodeSubagents.set(nodeId, set)
-          }
+          if (nodeId) startSubagent(nodeId, p.agent_id)
         } else if (p.hook_event_name === 'SubagentStop') {
           subagentTail.finish(p.agent_id)
-          if (nodeId) nodeSubagents.get(nodeId)?.delete(p.agent_id)
+          endSubagent(nodeId, p.agent_id)
         }
         return
       }
@@ -337,22 +383,15 @@ export function wireAgentStatus(
     if (p.tool_use_id && p.tool_name && SUBAGENT_TOOLS.has(p.tool_name)) {
       if (p.hook_event_name === 'PreToolUse') {
         subagentTail.track(p.tool_use_id, transcriptPath)
-        if (nodeId) {
-          const set = nodeSubagents.get(nodeId) ?? new Set<string>()
-          set.add(p.tool_use_id)
-          nodeSubagents.set(nodeId, set)
-        }
+        if (nodeId) startSubagent(nodeId, p.tool_use_id)
       } else if (p.hook_event_name === 'PostToolUse' && !asyncLaunch) {
         subagentTail.finish(p.tool_use_id)
-        if (nodeId) nodeSubagents.get(nodeId)?.delete(p.tool_use_id)
+        endSubagent(nodeId, p.tool_use_id)
       }
     }
     // Session over → release any still-tracked async subagent tails for this node (their
     // task-notifications will never arrive once the session is gone).
-    if (p.hook_event_name === 'SessionEnd' && nodeId) {
-      for (const toolUseId of nodeSubagents.get(nodeId) ?? []) subagentTail.finish(toolUseId)
-      nodeSubagents.delete(nodeId)
-    }
+    if (p.hook_event_name === 'SessionEnd' && nodeId) releaseSubagents(nodeId)
   })
 
   // Session end → tear down its tails and clear the maps (server parity with desktop
@@ -375,11 +414,7 @@ export function wireAgentStatus(
       grokContextTail.untrack(sessionId)
       nodeContextSession.delete(nodeId)
     }
-    const subs = nodeSubagents.get(nodeId)
-    if (subs) {
-      for (const toolUseId of subs) subagentTail.finish(toolUseId)
-      nodeSubagents.delete(nodeId)
-    }
+    releaseSubagents(nodeId)
   }
   platform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   platform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))

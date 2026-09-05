@@ -87,6 +87,7 @@ import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor, registerClaudeAccountsSource } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
+import { registerClientScope } from './client-scope'
 import { initCanvasSync } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
 import { initServerContextLink } from './context-link'
@@ -262,6 +263,10 @@ export async function startServer(
   // Team presence (hello / cursor / focus / chat). The hub itself is joined per WebSocket in
   // ws.ts; this only registers the RPC surface. Presence is transient — nothing is persisted.
   presenceHub.registerIpc()
+  // …and, on the SAME cast, remember which canvas each connection is looking at, so the per-node
+  // agent pushes can skip connections that cannot draw them. A DISPLAY filter, default-open, never
+  // a permission — see client-scope.ts.
+  registerClientScope(platform)
 
   // WS backpressure: when a connection's socket send buffer fills while streaming pty
   // output, pause that tmux client so the OS pipe applies real backpressure (resumes below

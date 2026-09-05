@@ -173,6 +173,74 @@ describe('ServerPlatform', () => {
     expect(p.clientIds()).toEqual([2])
   })
 
+  // ── Scoped broadcast (a DISPLAY filter, default-open — see setClientScope) ────────────────────
+  it('broadcastScoped: a scoped connection gets its own project and not another, unscoped gets both', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    const a = fakeSink(); const b = fakeSink(); const open = fakeSink()
+    const uiA = p.attach(a.sink); const uiB = p.attach(b.sink); p.attach(open.sink)
+    p.setClientScope(uiA, 'proj-a')
+    p.setClientScope(uiB, 'proj-b')
+    p.broadcastScoped('agent:status', 'proj-a', { nodeId: 'n1' })
+    p.broadcastScoped('agent:status', 'proj-b', { nodeId: 'n2' })
+    const args = (s: ReturnType<typeof fakeSink>) =>
+      s.texts.map((t) => (JSON.parse(t) as { args: unknown[] }).args[0])
+    expect(args(a)).toEqual([{ nodeId: 'n1' }])
+    expect(args(b)).toEqual([{ nodeId: 'n2' }])
+    // The connection that declared nothing is the pre-scoping behaviour, unchanged.
+    expect(args(open)).toEqual([{ nodeId: 'n1' }, { nodeId: 'n2' }])
+  })
+
+  it('broadcastScoped with an unknown project delivers to EVERYONE, scoped connections included', () => {
+    // The resolvers feeding this fail closed (an unproven pane answers undefined), so "we could not
+    // attribute this event" must never mean "nobody sees it".
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    const a = fakeSink(); const open = fakeSink()
+    const uiA = p.attach(a.sink); p.attach(open.sink)
+    p.setClientScope(uiA, 'proj-a')
+    p.broadcastScoped('agent:status', undefined, { nodeId: 'orphan' })
+    expect(a.texts).toHaveLength(1)
+    expect(open.texts).toHaveLength(1)
+  })
+
+  it('a scope naming a project that no longer exists still receives that project\'s own events', () => {
+    // A canvas can be deleted under a viewer. The scope is just a string compare, so its events
+    // keep arriving — the client keeps its badges instead of going silent with nothing to explain
+    // it. Nothing here consults the workspace, deliberately.
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    const a = fakeSink()
+    const uiA = p.attach(a.sink)
+    p.setClientScope(uiA, 'deleted-project')
+    p.broadcastScoped('agent:status', 'deleted-project', { nodeId: 'n1' })
+    expect(a.texts).toHaveLength(1)
+  })
+
+  it('setClientScope(null) and a non-string clear the declaration back to everything', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    const a = fakeSink()
+    const uiA = p.attach(a.sink)
+    p.setClientScope(uiA, 'proj-a')
+    expect(p.clientScope(uiA)).toBe('proj-a')
+    p.setClientScope(uiA, null)
+    expect(p.clientScope(uiA)).toBeUndefined()
+    p.setClientScope(uiA, '') // an empty id is not a project
+    expect(p.clientScope(uiA)).toBeUndefined()
+    p.broadcastScoped('agent:status', 'proj-b', { nodeId: 'n2' })
+    expect(a.texts).toHaveLength(1)
+  })
+
+  it('detach forgets the scope: a reconnect starts undeclared (= everything), never inheriting one', () => {
+    const p = new ServerPlatform({ userDataDir: '/tmp/x', appVersion: '1.0.0' })
+    const first = fakeSink()
+    const uiA = p.attach(first.sink)
+    p.setClientScope(uiA, 'proj-a')
+    p.detach(uiA)
+    expect(p.clientScope(uiA)).toBeUndefined()
+    const again = fakeSink()
+    p.attach(again.sink) // fresh uiId, no declaration yet
+    p.broadcastScoped('agent:status', 'proj-b', { nodeId: 'n2' })
+    expect(again.texts).toHaveLength(1)
+  })
+
   it('exposes userDataDir/appVersion/isPackaged; openExternal rejects', async () => {
     const p = new ServerPlatform({ userDataDir: '/data', appVersion: '9.9.9' })
     expect(p.userDataDir).toBe('/data')
