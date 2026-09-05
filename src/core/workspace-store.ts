@@ -94,8 +94,7 @@ export async function writeAtomic(filePath: string, content: string): Promise<vo
   // poll's index write) must never share a tmp file — interleaved writes into one shared tmp
   // published spliced JSON under the atomic rename. writeFileAtomic also removes its own temp on
   // failure (project.json temps live in the USER'S repo, where litter is visible) and retries the
-  // rename over Windows sharing violations. The error still propagates; per-file callers swallow
-  // it by design.
+  // rename over Windows sharing violations. Save callers must report errors so the UI can retry.
   await writeFileAtomic(filePath, content)
 }
 
@@ -955,6 +954,7 @@ export class WorkspaceStore {
     // One probe per node id per save (the rescue's "cache the probe per save" — a node id can only
     // reach the rescue once anyway, but two tabs on one folder can put the same id in two files).
     const probedBackends = new Map<string, boolean>()
+    const writeFailures: Error[] = []
     for (const [cwd, candidate] of files) {
       const projectId = projectIdForCwd.get(cwd) ?? cwd
       const file = projectFilePath(cwd)
@@ -982,7 +982,11 @@ export class WorkspaceStore {
         await writeAtomic(file, content)
         this.lastWritten.set(file, content)
         this.revs.set(projectId, next.rev)
-      } catch { /* folder gone (unmounted disk): the entry simply stays stale → unavailable next load */ }
+      } catch (cause) {
+        // Keep saving the other projects and the index, but never acknowledge a partial save as
+        // durable. Otherwise the renderer clears dirty and new cards vanish on refresh.
+        writeFailures.push(new Error(`Could not save canvas: ${file}`, { cause }))
+      }
     }
 
     // ssh caches: bump rev on change so a later remote write can win; mirror write in Task 8.
@@ -1041,6 +1045,7 @@ export class WorkspaceStore {
     }
 
     this.onPersist?.()
+    if (writeFailures.length) throw new AggregateError(writeFailures, 'Canvas project writes failed')
   }
 
   /**

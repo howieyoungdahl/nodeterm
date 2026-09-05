@@ -182,7 +182,18 @@ describe('mergeIncomingNodes', () => {
 
 describe('conflict copy', () => {
   it('keeps the historical sentence when nothing was added', () => {
-    expect(conflictBarMessage(0)).toBe('Project file changed on disk (git pull or another machine).')
+    expect(conflictBarMessage(0)).toContain(
+      'Project file changed on disk (git pull or another machine).'
+    )
+  })
+  it('always says the autosave is suspended — in every wording', () => {
+    // The bar SUSPENDS the debounced whole-workspace save for as long as it is up (Canvas's
+    // autosaveDelay returns null on a conflict), and it is cleared only by its own two buttons or
+    // a project switch. A user who read this strip as an FYI about someone else's git pull had no
+    // way to know their own canvas had stopped being written — 2026-09-02: two and a half hours,
+    // eight session cards opened and never persisted, no signal anywhere.
+    for (const n of [0, 1, 2])
+      expect(conflictBarMessage(n)).toContain('not being saved until you choose')
   })
   it('names what arrived, and says it is already on the canvas', () => {
     const msg = conflictBarMessage(1)

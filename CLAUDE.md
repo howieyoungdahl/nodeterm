@@ -143,6 +143,14 @@ adding terminal-session features, extend the interface — do not reach around i
 
 ## State & persistence model
 
+Workspace saves report partial local-project write failures after saving the remaining projects
+and index. A successful index write alone is not proof that the canvas reached disk. The renderer's
+`useSavePersistence` and `useAutosave` hooks retain failed delivery state and schedule five bounded
+retries, including failures before the first edit. An exhausted schedule leaves a visible Retry
+button; an unresolved external-change conflict pauses saving. Regression tests mount the hooks and
+exercise real timers under fake time, and drive failed project writes through the store IPC handler.
+This protects both desktop and Server Edition; it does not create or restart terminal backends.
+
 **React Flow is the single live source of truth** for nodes. There is intentionally no
 separate store mirroring node state — earlier dual-source designs caused sync bugs.
 `src/renderer/state/workspace.ts` holds only pure helpers: the color palette, the node

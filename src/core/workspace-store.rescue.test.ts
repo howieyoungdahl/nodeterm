@@ -7,6 +7,7 @@ import { fakePlatform } from './platform-fake'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { WorkspaceStore, type WorkspaceBackendGuards } from './workspace-store'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
+import * as atomic from './fs-atomic'
 
 /**
  * The 2026-09-01 loss, pinned.
@@ -74,6 +75,33 @@ afterEach(async () => {
 })
 
 describe('local save rescue', () => {
+  it('rejects a failed project write, preserves the old cards, and saves the latest snapshot on retry', async () => {
+    const fake = fakePlatform({ userDataDir: userData })
+    initPlatform(fake)
+    const store = new WorkspaceStore()
+    store.registerIpc()
+    const save = (workspace: Workspace) => fake.handlers['workspace:save'](7, workspace)
+    await save(ws([project({ cwd: projRoot })]))
+    const target = path.join(projRoot, '.nodeterm/project.json')
+    const write = atomic.writeFileAtomic
+    const refused = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async (file, content) => {
+      if (file === target) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' })
+      await write(file, content)
+    })
+    const latest = ws([
+      project({ cwd: projRoot, nodes: [node('term-1'), node('term-2'), node('term-3')] }),
+      project({ id: 'inline', name: 'other canvas' })
+    ])
+    await expect(save(latest)).rejects.toThrow('Canvas project writes failed')
+    expect(await readNodes(projRoot)).toEqual(['term-1', 'term-2'])
+    // Other projects and the index still save; one unavailable disk must not freeze them too.
+    expect((await new WorkspaceStore().load()).projects[1].name).toBe('other canvas')
+    refused.mockRestore()
+    await save(latest)
+    const refreshed = await new WorkspaceStore().load()
+    expect(refreshed.projects[0].nodes.map((n) => n.id)).toEqual(['term-1', 'term-2', 'term-3'])
+  })
+
   it('keeps a node the save omitted while its backend is still live', async () => {
     const store = new WorkspaceStore(undefined, guards({ hasLiveBackend: (id) => id === 'term-2' }))
     await store.save(ws([project({ cwd: projRoot })]))
