@@ -3,6 +3,7 @@
 // (and CLI_SCRIPT) are unit-testable. The electron/fs/ipc wiring lives in context-link.ts.
 import type { ContextLinkInfo } from '../shared/types'
 import { sessionName } from './tmux-naming'
+import { TRANSCRIPT_DEFAULT_LINES } from './context-link-render'
 import { HOOK_CURL_HEADERS_SH } from './agents/hook-curl-config-sh'
 import { CODEX_SANDBOX_BLOCKED_LINE, CODEX_SANDBOX_HINT_SH } from './agents/hook-sandbox-hint-sh'
 import { HOOK_ENDPOINT_FALLBACK_SH, STALE_ENDPOINT_HINT } from './agents/hook-endpoint-failover-sh'
@@ -88,7 +89,7 @@ export function buildLinkedContextInstructions(shimPath: string): string {
     '```sh',
     `sh "${shimPath}" list                        # nodes you are linked to (start here)`,
     `sh "${shimPath}" summary --node <id|title>   # last lines of its conversation`,
-    `sh "${shimPath}" transcript --node <id|title>`,
+    `sh "${shimPath}" transcript --node <id|title>  # capped at the last ${TRANSCRIPT_DEFAULT_LINES} lines; -n N for more`,
     `sh "${shimPath}" terminal --node <id|title>  # its recent terminal output`,
     '```',
     '',
@@ -343,7 +344,9 @@ sh "${shimPath}" <command> [--node <id|title>] [-n <N>]
 Commands:
 - \`list\` — list the nodes you are linked to (start here).
 - \`summary [--node X] [-n 15]\` — the last N lines of a linked node's conversation.
-- \`transcript [--node X]\` — the linked node's full conversation transcript.
+- \`transcript [--node X] [-n ${TRANSCRIPT_DEFAULT_LINES}]\` — the linked node's conversation transcript. Capped at the LAST
+  ${TRANSCRIPT_DEFAULT_LINES} lines by default so one read cannot swallow your context; when it truncates it says so and
+  prints the exact \`-n\` to pass for the whole thing.
 - \`terminal [--node X]\` — the linked node's recent terminal output (visible buffer).
 
 Linked sticky notes appear in \`list\` marked \`(note)\`; \`summary\` or \`transcript\` on a note
