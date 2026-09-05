@@ -28,6 +28,7 @@ import {
 import { withPermissionMode } from './approval-mode'
 import { resolveAgentConfig } from './custom-agent'
 import { withAgentModel } from './model-gateway'
+import { withSessionName } from './session-name'
 
 export interface LaunchInputs {
   agentId: AgentId
@@ -61,6 +62,14 @@ export interface LaunchInputs {
    *  `--session-id` is emitted even for a claude-base agent — an unknown flag would kill the
    *  launch, so this fails open to the bare command. */
   sessionIdFlagSupported?: boolean
+  /** The display name to give the session this launch CREATES (`sessionNameForNode`). Undefined =
+   *  no flag, and the CLI generates its own name — which is what puts a session into the
+   *  account-wide Remote Control listing under a hostname prefix. */
+  sessionName?: string
+  /** Whether the local claude CLI advertises `-n, --name` (probe result). Same fail-closed shape as
+   *  `sessionIdFlagSupported`: false ⇒ no flag ⇒ today's command line, because an unknown flag
+   *  makes the CLI exit rather than ignore it. */
+  sessionNameFlagSupported?: boolean
   /** Should a SHARED_IDENTITY_CAPABLE agent (codex) name its managed launcher instead of the bare
    *  CLI? The caller's answer to "will the launcher actually be there?" — false (the default) emits
    *  the bare command byte-for-byte. A remote node must pass false (the host has no launcher). */
@@ -78,6 +87,13 @@ export interface ResumeInputs {
   permissionMode?: AgentPermissionMode
   /** Per-node model override, applied through the effective base harness. */
   model?: string
+  /** The display name for a session this resume would have to CREATE — i.e. only when no session
+   *  id is known and the command below degrades to a fresh launch (a cold restore whose id was
+   *  lost). A real `--resume <id>` joins a session that already carries a name, so the flag is not
+   *  emitted there; see `withSessionName`. */
+  sessionName?: string
+  /** Whether the local claude CLI advertises `-n, --name`. Same meaning as on `LaunchInputs`. */
+  sessionNameFlagSupported?: boolean
   /** Should a SHARED_IDENTITY_CAPABLE agent (codex) name its managed launcher on resume? Same
    *  semantics as `LaunchInputs.sharedIdentity`. */
   sharedIdentity?: boolean
@@ -220,12 +236,21 @@ export function assembleLaunchCommand(
     const withMode = inputs.permissionMode
       ? withPermissionMode(cmd, capId, inputs.permissionMode)
       : cmd
+    // The session's display name: capability-gated (SESSION_NAME_CAPABLE, checked inside
+    // `withSessionName`) AND probe-gated by the caller, so an unprobed or older CLI emits the bare
+    // command line it always did. Composed HERE rather than at the end, so it lands on the same
+    // side of an argv prompt separator as every other flag — a name after grok's `--` would be
+    // read as prompt text, which is the trap CLAUDE.md names.
+    const withName =
+      inputs.sessionName && inputs.sessionNameFlagSupported
+        ? withSessionName(withMode, capId, inputs.sessionName)
+        : withMode
     // Session-id minting: claude-base + CLI supports the flag. On resume this branch is never
     // taken (assembleResumeCommand does not pass sessionId).
     if (inputs.sessionId && mintsSessionId(capId) && inputs.sessionIdFlagSupported) {
-      return withAgentModel(withSessionId(withMode, capId, inputs.sessionId), capId, inputs.model)
+      return withAgentModel(withSessionId(withName, capId, inputs.sessionId), capId, inputs.model)
     }
-    return withAgentModel(withMode, capId, inputs.model)
+    return withAgentModel(withName, capId, inputs.model)
   }
 
   const command = usesSep ? `${flagged(baseCmd)} ${sep} ${promptArg}` : flagged(withPrompt)
@@ -263,6 +288,15 @@ export function assembleResumeCommand(
   const withMode = inputs.permissionMode
     ? withPermissionMode(base, capId, inputs.permissionMode)
     : base
-  const command = withAgentModel(withMode, capId, inputs.model)
+  // A resume with a known session id joins a session that already has a name, so it is left alone.
+  // With NO id this function emits a FRESH LAUNCH (the cold restore whose id was lost after a
+  // reboot) — that creates a new session, and an unnamed new session is exactly what this feature
+  // exists to prevent. One composition, so the two paths cannot disagree about what a fresh launch
+  // is called.
+  const named =
+    !resumeBase && inputs.sessionName && inputs.sessionNameFlagSupported
+      ? withSessionName(withMode, capId, inputs.sessionName)
+      : withMode
+  const command = withAgentModel(named, capId, inputs.model)
   return { command, missingEnv: [...m1, ...m2] }
 }

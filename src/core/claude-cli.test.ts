@@ -7,7 +7,8 @@ describe('claudeCliCapsFrom', () => {
       version: '2.1.207 (Claude Code)',
       autoPermissionMode: true,
       fullscreenTui: true,
-      sessionIdFlag: false
+      sessionIdFlag: false,
+      nameFlag: false
     })
   })
 
@@ -16,7 +17,8 @@ describe('claudeCliCapsFrom', () => {
       version: '2.1.50 (Claude Code)',
       autoPermissionMode: false,
       fullscreenTui: false,
-      sessionIdFlag: false
+      sessionIdFlag: false,
+      nameFlag: false
     })
   })
 
@@ -85,6 +87,64 @@ Options:
   it('is orthogonal to the version-gated caps', () => {
     const c = claudeCliCapsFrom('2.1.50 (Claude Code)', HELP)
     expect(c.sessionIdFlag).toBe(true)
+    expect(c.autoPermissionMode).toBe(false)
+  })
+})
+
+describe('claudeCliCapsFrom — -n/--name is feature-detected too', () => {
+  // Verbatim from `claude --help` on 2.1.257, including the column gaps and the wrapped
+  // continuation lines the CLI actually emits. The neighbouring `--remote-control*` options are
+  // kept on purpose: they are the near-misses this probe has to survive, and they are also the
+  // reason the flag matters — an unnamed session is auto-named from the hostname in the
+  // account-wide Remote Control listing.
+  const HELP = `Options:
+  -n, --name <name>                     Set a display name for this session
+                                        (shown in the prompt box, /resume
+                                        picker, and terminal title)
+  --no-chrome                           Disable Claude in Chrome integration
+  --remote-control [name]               Start an interactive session with Remote
+                                        Control enabled (optionally named)
+  --remote-control-session-name-prefix <prefix>
+      Prefix for auto-generated Remote Control session names (default: hostname)
+`
+
+  it('says yes when the CLI advertises the flag', () => {
+    expect(claudeCliCapsFrom('2.1.257 (Claude Code)', HELP).nameFlag).toBe(true)
+  })
+
+  it('says no for help text without it — an older CLI would EXIT on an unknown flag', () => {
+    const old = 'Options:\n  --model <model>   Model for the current session.\n'
+    expect(claudeCliCapsFrom('2.1.50 (Claude Code)', old).nameFlag).toBe(false)
+  })
+
+  it('says no when the help probe produced nothing (it degrades on its own)', () => {
+    expect(claudeCliCapsFrom('2.1.257 (Claude Code)', null).nameFlag).toBe(false)
+    expect(claudeCliCapsFrom('2.1.257 (Claude Code)').nameFlag).toBe(false)
+  })
+
+  // The dangerous near-miss, and the reason the match is anchored: this option is present in the
+  // help of every CLI that has Remote Control, INCLUDING ones with no `--name` of their own.
+  it('is not fooled by --remote-control-session-name-prefix', () => {
+    const only =
+      '  --remote-control-session-name-prefix <prefix>\n      Prefix for auto-generated Remote Control session names (default: hostname)\n'
+    expect(claudeCliCapsFrom('2.1.257', only).nameFlag).toBe(false)
+  })
+
+  it('does not mistake a longer flag or prose for the real one', () => {
+    expect(claudeCliCapsFrom('2.1.257', '  --names <list>  several of them\n').nameFlag).toBe(false)
+    expect(claudeCliCapsFrom('2.1.257', '  --title  aliases--name\n').nameFlag).toBe(false)
+  })
+
+  it('accepts the `--name=<name>` spelling too', () => {
+    expect(claudeCliCapsFrom('2.1.257', '  --name=<name>  set it\n').nameFlag).toBe(true)
+  })
+
+  // Independent capabilities: a CLI can advertise one flag and not the other, and neither says
+  // anything about the version-gated caps.
+  it('is orthogonal to the other caps', () => {
+    const c = claudeCliCapsFrom('2.1.50 (Claude Code)', HELP)
+    expect(c.nameFlag).toBe(true)
+    expect(c.sessionIdFlag).toBe(false)
     expect(c.autoPermissionMode).toBe(false)
   })
 })

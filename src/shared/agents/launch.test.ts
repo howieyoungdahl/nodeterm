@@ -226,6 +226,78 @@ describe('assembleResumeCommand', () => {
   })
 })
 
+describe('the session display name — which of the two paths may emit it', () => {
+  const NAME = 'web-app·audit·Claude-Code·9afef0'
+
+  it('names a fresh launch', () => {
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'claude', sessionName: NAME, sessionNameFlagSupported: true },
+        ENV
+      ).command
+    ).toBe(`claude --name '${NAME}'`)
+  })
+
+  it('leaves a real --resume alone: that session already carries a name', () => {
+    expect(
+      assembleResumeCommand(
+        { agentId: 'claude', sessionId: 'abc-123', sessionName: NAME, sessionNameFlagSupported: true },
+        ENV
+      ).command
+    ).toBe('claude --resume abc-123')
+  })
+
+  it('DOES name the resume that is really a fresh launch (no session id survived the reboot)', () => {
+    // `assembleResumeCommand` with no id emits a bare launch, which creates a NEW session — and an
+    // unnamed new session is the thing this feature exists to prevent. One composition for both
+    // paths, so a cold-started session is named exactly as a hand-opened one is.
+    expect(
+      assembleResumeCommand(
+        { agentId: 'claude', sessionName: NAME, sessionNameFlagSupported: true },
+        ENV
+      ).command
+    ).toBe(`claude --name '${NAME}'`)
+  })
+
+  it('emits nothing when the CLI was not probed, or answered no', () => {
+    for (const supported of [undefined, false]) {
+      expect(
+        assembleLaunchCommand(
+          { agentId: 'claude', sessionName: NAME, sessionNameFlagSupported: supported },
+          ENV
+        ).command
+      ).toBe('claude')
+      expect(
+        assembleResumeCommand(
+          { agentId: 'claude', sessionName: NAME, sessionNameFlagSupported: supported },
+          ENV
+        ).command
+      ).toBe('claude')
+    }
+  })
+
+  it('a claude-base proxy inherits it; an agent outside the list never gets it', () => {
+    setCustomAgentBaseResolver((id) => (id === 'custom:proxy' ? 'claude' : undefined))
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'custom:proxy',
+          customAgent: claudeProxy,
+          sessionName: NAME,
+          sessionNameFlagSupported: true
+        },
+        ENV
+      ).command
+    ).toBe(`claude-wopr '--model' 'sonnet' --name '${NAME}'`)
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'codex', sessionName: NAME, sessionNameFlagSupported: true },
+        ENV
+      ).command
+    ).toBe('codex')
+  })
+})
+
 describe('quoting by construction — env values can never become shell syntax or extra argv', () => {
   const proxyWith = (args: string): CustomAgent => ({
     id: 'custom:proxy',

@@ -115,7 +115,8 @@ describe('initServerCanvasControl', () => {
         version: null,
         autoPermissionMode: false,
         fullscreenTui: false,
-        sessionIdFlag: false
+        sessionIdFlag: false,
+        nameFlag: false
       }),
       codexSharedIdentity: async () => true,
       installAgentIntegrations: false
