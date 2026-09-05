@@ -153,7 +153,8 @@ describe('HeadlessNodeFactory', () => {
         version: null,
         autoPermissionMode: false,
         fullscreenTui: false,
-        sessionIdFlag: false
+        sessionIdFlag: false,
+        nameFlag: false
       }),
       // Stated, not defaulted — the required field is what stops a probe being forgotten.
       grokCaps: async () => ({ sessionIdFlag: false }),

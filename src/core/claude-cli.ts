@@ -21,11 +21,12 @@ export { UNKNOWN_CLAUDE_CLI_CAPS, type ClaudeCliCaps }
 /**
  * Pure: probe output → caps. The impure probe below is just plumbing around it.
  *
- * `--session-id` is FEATURE-detected from `--help` rather than gated on a version, because the
- * release it first appeared in is not documented anywhere this repo can verify. Guessing a floor
- * is uniquely dangerous for this flag: an unrecognised flag makes the CLI exit, so a floor set too
- * low would kill every claude launch on the machines below it. Reading the help text asks the CLI
- * in front of us what it actually accepts. Absent help output ⇒ false ⇒ no flag ⇒ today's command.
+ * `--session-id` and `--name` are both FEATURE-detected from `--help` rather than gated on a
+ * version, because the release each first appeared in is not documented anywhere this repo can
+ * verify. Guessing a floor is uniquely dangerous for these flags: an unrecognised flag makes the
+ * CLI exit, so a floor set too low would kill every claude launch on the machines below it.
+ * Reading the help text asks the CLI in front of us what it actually accepts. Absent help output
+ * ⇒ false ⇒ no flag ⇒ today's command.
  */
 export function claudeCliCapsFrom(
   versionOutput: string | null | undefined,
@@ -38,7 +39,15 @@ export function claudeCliCapsFrom(
     fullscreenTui: supportsFullscreenTui(version),
     // Anchored on a word boundary so `--session-id-file` or prose mentioning the flag inside
     // another option's description cannot answer yes for it.
-    sessionIdFlag: /(^|\s)--session-id(\s|=|$)/m.test(helpOutput ?? '')
+    sessionIdFlag: /(^|\s)--session-id(\s|=|$)/m.test(helpOutput ?? ''),
+    // Same anchoring, same reason. Matched on the LONG spelling only: that is what we emit, and
+    // the short one appears in the help as `-n,` — followed by a comma, so it would not satisfy
+    // this anchor anyway. Measured against claude 2.1.257, whose help carries exactly one line
+    // containing `--name`:
+    //   `  -n, --name <name>                     Set a display name for this session`
+    // The anchor is what keeps `--remote-control-session-name-prefix` (which contains `-name-`,
+    // not `--name`) and any future `--names` from answering yes for a flag the CLI would exit on.
+    nameFlag: /(^|\s)--name(\s|=|$)/m.test(helpOutput ?? '')
   }
 }
 

@@ -2591,6 +2591,23 @@ export interface ClaudeCliCaps {
    * the CLI exit, so a wrong guess kills every claude launch rather than degrading.
    */
   sessionIdFlag: boolean
+  /**
+   * Whether this CLI accepts `-n, --name <name>` ("Set a display name for this session", measured
+   * verbatim on claude 2.1.257), which lets nodeterm NAME the session it launches instead of
+   * leaving the CLI to auto-generate one.
+   *
+   * Why it matters: an unnamed session enters the account-wide Remote Control list under a
+   * `--remote-control-session-name-prefix` default of the HOSTNAME, and locally under a name
+   * derived from the cwd basename plus two hex characters. Measured on one account (2026-09-04):
+   * one peer listing returned 227 sessions of which 60 were hostname-named on two other machines,
+   * and four of six live sessions on the second account read as `claude-XX` because they shared a
+   * cwd. Naming is the only half of that surface we own.
+   *
+   * Feature-detected from `claude --help` for exactly the reason `sessionIdFlag` is: an unknown
+   * flag makes the CLI EXIT rather than ignore it, so a guessed version floor would kill every
+   * claude launch below it. Absent/unreadable help ⇒ false ⇒ no flag ⇒ today's command line.
+   */
+  nameFlag: boolean
 }
 
 export interface GrokCliCaps {
@@ -2634,7 +2651,8 @@ export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
   version: null,
   autoPermissionMode: false,
   fullscreenTui: false,
-  sessionIdFlag: false
+  sessionIdFlag: false,
+  nameFlag: false
 }
 
 /** Whether a Codex node launched on this machine right now would get a managed shared identity.
