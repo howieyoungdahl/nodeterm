@@ -645,8 +645,15 @@ describe('RemoteHooks.installContextLink', () => {
     expect(shim).not.toContain('ELECTRON_RUN_AS_NODE')
     const skill = calls.find((c) => isWriteTo(c.args, '/home/u/.claude/skills/get-linked-context/SKILL.md'))?.stdin ?? ''
     expect(skill).toContain('name: get-linked-context')
-    expect(skill).toContain('sh "/home/u/.nodeterm/context.sh"')
+    // The documented command is home-relative against the REMOTE home (shimPathForAgentDocs), so a
+    // dotfile-managed `~/.claude` on the host does not acquire this connection's absolute home. The
+    // shim itself is still WRITTEN at the absolute path asserted above; only the copied command
+    // changes, and `$HOME` expands because the builders emit it inside double quotes.
+    expect(skill).toContain('sh "$HOME/.nodeterm/context.sh"')
+    expect(skill).not.toContain('/home/u/.nodeterm/context.sh')
     expect(calls.some((c) => (c.stdin ?? '').includes('nodeterm:get-linked-context:start'))).toBe(true)
+    // `~` is NOT interchangeable with `$HOME` here: it does not expand inside the double quotes
+    // these commands are written with, so a `~/` in any of them would be a literal directory name.
     expect(joined.some((j) => j.includes('~/'))).toBe(false)
   })
 
