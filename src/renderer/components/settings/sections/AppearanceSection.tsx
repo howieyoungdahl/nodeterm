@@ -17,6 +17,23 @@ import { isBrowserRuntime } from '@renderer/bridge/runtime'
 import { UI_SCALE_CHOICES, resolveUiScale, uiScaleLabel } from '@shared/ui-scale'
 import { SectionReset } from '../SectionReset'
 import { APPEARANCE_RESET_KEYS } from '@renderer/lib/settingsReset'
+import {
+  APPEARANCE_RULES_VERSION,
+  sanitizeAppearanceSettings,
+  sanitizeBorderAppearance,
+  type AppearanceSettings,
+  type BorderAppearance
+} from '@shared/appearance'
+import { useProjects } from '@renderer/state/projects'
+import { markWorkspaceDirty } from '@renderer/state/workspaceDirty'
+import { useSystemReducedMotion } from '@renderer/state/appearance'
+import {
+  BorderEditor,
+  BorderPreview,
+  previewCaption,
+  previewResolved,
+  previewWindowEdge
+} from './appearance-borders'
 
 const ROWS = {
   appTheme: {
@@ -53,6 +70,28 @@ const ROWS = {
   headerButtons: {
     title: 'Terminal header buttons',
     keywords: ['terminal', 'header', 'buttons', 'icons', 'hide']
+  },
+  windowEdge: {
+    title: 'Window edge',
+    keywords: ['window', 'edge', 'border', 'frame', 'app', 'outline', 'glow', 'thickness', 'focus']
+  },
+  nodeBorders: {
+    title: 'Node and group borders',
+    keywords: [
+      'node', 'group', 'frame', 'border', 'terminal', 'outline', 'glow', 'thickness', 'focus',
+      'colour', 'color'
+    ]
+  },
+  projectBorders: {
+    title: 'This project',
+    keywords: ['project', 'border', 'rule', 'shared', 'team', 'canvas', 'colour', 'color']
+  },
+  motion: {
+    title: 'Motion and effects',
+    keywords: [
+      'motion', 'reduce', 'reduced', 'animation', 'effects', 'glow', 'accessibility', 'a11y',
+      'vestibular', 'pulse'
+    ]
   },
   reset: {
     title: 'Reset appearance',
@@ -158,6 +197,60 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
   const showResumeCard = useSettings((s) => s.settings.showResumeCard)
   const windowTitleActiveSession = useSettings((s) => s.settings.windowTitleActiveSession)
   const update = useSettings((s) => s.update)
+
+  // The visual preferences (@shared/appearance). Read through the sanitizer: settings.json is
+  // hand-editable, so what comes back out of it is input, not state we wrote.
+  const rawAppearance = useSettings((s) => s.settings.appearance)
+  const appearance: AppearanceSettings = sanitizeAppearanceSettings(rawAppearance) ?? {}
+  const systemReducedMotion = useSystemReducedMotion()
+  const patchAppearance = (next: AppearanceSettings): void => {
+    update({ appearance: Object.keys(next).length ? next : undefined })
+  }
+  const setSurface = (
+    key: 'windowEdge' | 'node' | 'group',
+    value: BorderAppearance | undefined
+  ): void => {
+    const next: AppearanceSettings = { ...appearance }
+    if (value) next[key] = value
+    else delete next[key]
+    patchAppearance(next)
+  }
+  const setFlag = (key: 'reducedMotion' | 'effectsOff', on: boolean): void => {
+    const next: AppearanceSettings = { ...appearance }
+    if (on) next[key] = true
+    else delete next[key]
+    patchAppearance(next)
+  }
+  // Effects-off is applied LAST by the resolver and overrides every shared rule, so the effect
+  // switches must say so rather than silently doing nothing when it is on.
+  const effectsNote = appearance.effectsOff
+    ? 'Effects are switched off below, so glow and focus highlighting stay off everywhere.'
+    : undefined
+
+  // The SHARED half — the active project's `layoutRules.appearance.project`, which rides
+  // .nodeterm/project.json and therefore travels to everyone who clones the repo. That is the
+  // whole reason it is edited in its own row, captioned as shared, rather than mixed into the
+  // machine-local block above.
+  const activeProject = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
+  const setProjectLayoutRules = useProjects((s) => s.setProjectLayoutRules)
+  const projectRule = sanitizeBorderAppearance(activeProject?.layoutRules?.appearance?.project)
+  const setProjectRule = (value: BorderAppearance | undefined): void => {
+    if (!activeProject) return
+    const rules = { ...(activeProject.layoutRules?.appearance ?? {}) }
+    if (value) rules.project = value
+    else delete rules.project
+    const hasRules = Object.keys(rules).length > 0
+    const layoutRules = hasRules
+      ? { ...activeProject.layoutRules, version: APPEARANCE_RULES_VERSION, appearance: rules }
+      : undefined
+    setProjectLayoutRules(activeProject.id, layoutRules)
+    // The store holds state; the debounced workspace save is Canvas's, reached through this seam.
+    markWorkspaceDirty()
+  }
+
+  const nodePreview = previewResolved(appearance, projectRule, systemReducedMotion)
+  const edgePreview = previewWindowEdge(appearance, systemReducedMotion)
+
   return (
     <SettingsSection
       id="appearance"
@@ -269,6 +362,111 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
             where="in the terminal header"
             onChange={(next) => update({ hiddenHeaderButtons: next })}
           />
+        </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.windowEdge}>
+        <div>
+          <h4 className="text-[13px] font-medium text-text">Window edge</h4>
+          <p className="mt-1 text-[13px] leading-relaxed text-muted">
+            A frame around the whole app window, separate from the borders on canvas nodes. Stored
+            on this computer only — it describes this display, so a project you share never carries
+            it to anyone else.
+          </p>
+          <div className="mt-3 space-y-3 border-l border-border pl-4">
+            <BorderEditor
+              value={appearance.windowEdge}
+              onChange={(v) => setSurface('windowEdge', v)}
+              colorLabel="Edge colour"
+              effectsDisabledNote={effectsNote}
+            />
+            <BorderPreview resolved={edgePreview} caption={previewCaption(edgePreview)} />
+          </div>
+        </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.nodeBorders}>
+        <div>
+          <h4 className="text-[13px] font-medium text-text">Node and group borders</h4>
+          <p className="mt-1 text-[13px] leading-relaxed text-muted">
+            Your default for every project on this computer. A project rule beats it, and a border
+            set on one card beats both. Borders are decoration only — a session's state is always
+            told by its badge, in words, never by colour alone.
+          </p>
+          <div className="mt-3 space-y-4 border-l border-border pl-4">
+            <BorderEditor
+              value={appearance.node}
+              onChange={(v) => setSurface('node', v)}
+              colorLabel="Terminal and other nodes"
+              effectsDisabledNote={effectsNote}
+            />
+            <BorderEditor
+              value={appearance.group}
+              onChange={(v) => setSurface('group', v)}
+              colorLabel="Group frames"
+              colorDescription="Drawn just outside the frame's own dashed border, which stays as it is."
+              effectsDisabledNote={effectsNote}
+            />
+            <BorderPreview resolved={nodePreview} caption={previewCaption(nodePreview)} />
+          </div>
+        </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.projectBorders}>
+        <div>
+          <h4 className="text-[13px] font-medium text-text">This project</h4>
+          <p className="mt-1 text-[13px] leading-relaxed text-muted">
+            {activeProject
+              ? 'A border for every node in this project, overriding your default above. Saved in ' +
+                'the project\u2019s .nodeterm/project.json, so it is shared with everyone who ' +
+                'opens this folder \u2014 unlike everything else in this section.'
+              : 'Open a project to set a border rule for it.'}
+          </p>
+          <div className="mt-3 space-y-3 border-l border-border pl-4">
+            {activeProject ? (
+              <BorderEditor
+                value={projectRule}
+                onChange={setProjectRule}
+                colorLabel="Project border"
+                effectsDisabledNote={effectsNote}
+              />
+            ) : null}
+          </div>
+        </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.motion}>
+        <div>
+          <h4 className="text-[13px] font-medium text-text">Motion and effects</h4>
+          <p className="mt-1 text-[13px] leading-relaxed text-muted">
+            Both are stored on this computer and both win over any project rule — a shared
+            project file can never switch motion or effects back on for you.
+          </p>
+          <div className="mt-3 space-y-3 border-l border-border pl-4">
+            <FieldRow
+              label="Reduce motion"
+              description="Freeze the app's animations, including the pulsing session glows. Already on automatically when your system asks for reduced motion."
+              note={
+                systemReducedMotion && !appearance.reducedMotion
+                  ? 'Your system already asks for reduced motion, so this is on regardless.'
+                  : undefined
+              }
+              control={
+                <Switch
+                  checked={appearance.reducedMotion === true}
+                  onChange={(v) => setFlag('reducedMotion', v)}
+                  ariaLabel="Reduce motion"
+                />
+              }
+            />
+            <FieldRow
+              label="Turn effects off"
+              description="Drop every glow and focus highlight, here and in any project. Border colours and thicknesses are kept."
+              control={
+                <Switch
+                  checked={appearance.effectsOff === true}
+                  onChange={(v) => setFlag('effectsOff', v)}
+                  ariaLabel="Turn effects off"
+                />
+              }
+            />
+          </div>
         </div>
       </SearchableRow>
       <SearchableRow {...ROWS.reset}>

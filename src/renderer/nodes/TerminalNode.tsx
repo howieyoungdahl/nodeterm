@@ -23,6 +23,9 @@ import type { TerminalTransport } from '../terminal/transport'
 import { guardMiddleClickPaste } from '../terminal/middle-click'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { focusedNodeId, subscribeFocusedNode, focusSurfaceEl } from '../state/focusNode'
+import { appearanceAttrs, useNodeAppearance } from '../state/appearance'
+import { AppearanceGlow } from '../components/AppearanceGlow'
+import { NodeBorderPicker } from '../components/NodeBorderPicker'
 import { parseOsc52 } from '../terminal/osc52'
 import { activateUnicode11 } from '../terminal/unicode-width'
 import {
@@ -1198,6 +1201,17 @@ export function TerminalNode({
   // for the same ordering reason: the `glyphOff` term computed this render must agree with the
   // reparent this same commit performs, or the shared-glyph teardown runs a pass behind the DOM.
   const [, bumpFocused] = useState(0)
+  // Persistent visual preference for THIS node — the one resolver, against the environment Canvas
+  // publishes (@shared/appearance). Nothing status-derived reaches it: the resolver has no status
+  // parameter, so a border can never become the only channel a state is communicated on.
+  const resolvedAppearance = useNodeAppearance({
+    nodeId: id,
+    kind: 'node',
+    override: data.appearance,
+    provider: data.agentId,
+    parentId
+  })
+  const appearance = appearanceAttrs(resolvedAppearance, 'term-node')
   const focused = focusedNodeId() === id
   const focusedRef = useRef(focused)
   focusedRef.current = focused
@@ -4450,14 +4464,21 @@ export function TerminalNode({
     <>
     {/* Sibling of the root: .term-node is overflow:hidden and would clip the half-pill. */}
     <ColumnPill nodeId={id} />
+    {resolvedAppearance.glow && (
+      <AppearanceGlow style={appearance.style} variant="node" />
+    )}
     <div
       className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}${
         isUnread ? ' unread' : ''
       }${status?.state === 'working' ? ' working' : ''}${
         status?.state === 'waiting' || status?.state === 'blocked' ? ' attention' : ''
-      }${glyphMounted ? ' term-node--glyphgrid' : ''}${focused ? ' term-node--focused' : ''}`}
+      }${glyphMounted ? ' term-node--glyphgrid' : ''}${focused ? ' term-node--focused' : ''}${
+        appearance.className ? ` ${appearance.className}` : ''
+      }`}
       ref={rootRef}
-      style={{ borderTopColor: data.color }}
+      // The appearance vars are custom properties only (never `borderTopColor` or another key this
+      // element already sets), so the spread can add to the inline style without fighting it.
+      style={{ borderTopColor: data.color, ...appearance.style }}
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
     >
@@ -4526,6 +4547,14 @@ export function TerminalNode({
                 }}
               />
             ))}
+            {/* The explicit per-node border override. It stays OPEN after a pick, unlike the node
+                colour above: choosing a border is a comparison ("is that the one?"), and closing
+                the popover on every click would mean reopening it to try the next swatch. */}
+            <NodeBorderPicker
+              override={data.appearance}
+              resolved={resolvedAppearance}
+              onChange={(next) => updateNodeData(id, { appearance: next })}
+            />
           </div>
         )}
         {editingTitle ? (

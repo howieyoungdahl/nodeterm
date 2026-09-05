@@ -13,6 +13,7 @@ import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type { CodexAccount } from './codex-account'
 import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
+import type { AppearanceSettings, BorderAppearance, ProjectLayoutRules } from './appearance'
 import type {
   ModelDiscoveryResult,
   ModelGatewayCredentialStatus,
@@ -425,6 +426,18 @@ export interface CanvasNodeState {
    */
   trigger?: import('./trigger').TriggerSpec
   /**
+   * Explicit visual override for THIS node or frame — the top tier of `resolveNodeAppearance`
+   * (@shared/appearance), above every `layoutRules.appearance` derivation rule.
+   *
+   * Git-shared CONTENT, deliberately: "make the reviewer frame red" is a statement about the
+   * canvas, and the team shares it. Which is exactly why it is treated as hostile input on every
+   * load path (`sanitizeNodeAppearances` in core/workspace-files) — the colour ends up in a CSS
+   * custom property, so it survives only as a literal hex value and anything else degrades to the
+   * built-in look. Nothing status-derived is ever written here: appearance the app computes from
+   * live agent state is rendered, never persisted.
+   */
+  appearance?: BorderAppearance
+  /**
    * Set while the node is maximized to fill the viewport (issue #399): the rect to give back on
    * the toggle's second click — the node's ROOT-space (absolute canvas) position plus its size.
    * Absent = not maximized. Persisted so the restore survives a reload. Root-space on purpose:
@@ -701,6 +714,13 @@ export interface Project {
   dinoHighScore?: number
   /** Kanban task board — shared via .nodeterm/project.json like nodes. */
   kanban?: ProjectKanban
+  /**
+   * Shared canvas rules — today the appearance derivation table (@shared/appearance), later the
+   * layout engine's own halves. Rides .nodeterm/project.json like `kanban`, and is read through
+   * `sanitizeProjectLayoutRules` on every load path: an unknown `version` and unknown keys are
+   * IGNORED rather than rejected, so an older build still renders a canvas a newer one saved.
+   */
+  layoutRules?: ProjectLayoutRules
   /** Bridge links between Claude nodes (optional; absent in pre-bridge files). */
   bridges?: BridgeLink[]
   /**
@@ -1539,6 +1559,23 @@ export interface Settings {
   notchWidth: number
   /** Expand the notch panel on hover (after a short dwell). Off = click the capsule to expand. */
   notchHoverExpand: boolean
+  /**
+   * MACHINE-LOCAL visual preferences (@shared/appearance): the window/app edge, the global default
+   * for node and group borders, and the two accessibility switches.
+   *
+   * Machine-local on purpose, and the split is load-bearing. The window edge is a statement about
+   * THIS display, so `resolveWindowEdgeAppearance` takes no project rules at all — a git-shared
+   * project.json is structurally incapable of painting someone's window frame. `reducedMotion` and
+   * `effectsOff` live here for the stronger version of the same reason: they are applied LAST and
+   * override every shared rule, because accessibility is never something a repo file can switch
+   * back on. The per-canvas half (derivation rules, per-node overrides) rides
+   * `Project.layoutRules.appearance` instead.
+   *
+   * Optional and absent from DEFAULT_SETTINGS: absent means built-in defaults, i.e. the exact look
+   * of the release before this setting existed. Hand-editable, so it is re-read through
+   * `sanitizeAppearanceSettings` rather than trusted by its type.
+   */
+  appearance?: AppearanceSettings
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
   /** Keyboard-shortcut overrides by command id (see shared/keybindings.ts). Absent id = the

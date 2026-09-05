@@ -26,6 +26,7 @@ import { useSettings } from './settings'
 export { applyCanvasMutation } from '@shared/canvas-mutations'
 import { sanitizeInboundNode } from '@shared/node-exec'
 import { NODE_COLORS } from '@shared/node-colors'
+import type { BorderAppearance } from '@shared/appearance'
 import {
   COMPACT_CONTROL_NODE_SIZE,
   resolveControlNodeSize,
@@ -80,6 +81,9 @@ export interface NodeData {
    * restore toggle gives back. Persisted — see CanvasNodeState.premaxRect.
    */
   premaxRect?: { x: number; y: number; width: number; height: number }
+  /** Explicit visual override for this node/frame — the top tier of `resolveNodeAppearance`
+   *  (@shared/appearance). Persisted and git-shared; see CanvasNodeState.appearance. */
+  appearance?: BorderAppearance
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
   /**
@@ -1778,7 +1782,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
         worktree: n.worktree,
-        trigger: n.trigger
+        trigger: n.trigger,
+        appearance: n.appearance
       }
     }
   })
@@ -1853,7 +1858,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         sshFs: n.data.sshFs,
         worktree: n.data.worktree,
         trigger: n.data.trigger,
-        premaxRect: n.data.premaxRect
+        premaxRect: n.data.premaxRect,
+        appearance: n.data.appearance
       }
     })
 }

@@ -12,6 +12,11 @@ import { projectCapabilityFields, readProjectCapabilities } from '../shared/proj
 import { loadedAgentBrowserPartition } from '../shared/browser-partition'
 import { sanitizeProjectIcon, type ProjectIcon } from '../shared/project-icon'
 import { sanitizeTriggerSpec } from '../shared/trigger'
+import {
+  sanitizeBorderAppearance,
+  sanitizeProjectLayoutRules,
+  type ProjectLayoutRules
+} from '../shared/appearance'
 
 /**
  * Drop a browser node's persisted `partition` unless it is exactly the jar THIS project (its
@@ -48,6 +53,26 @@ export function sanitizeNodeTriggers(nodes: CanvasNodeState[]): CanvasNodeState[
       if (safe) return { ...n, trigger: safe }
     }
     const { trigger: _dropped, ...rest } = n
+    return rest
+  })
+}
+
+/**
+ * The appearance twin of `sanitizeNodeTriggers`, applied on the same read AND write boundary.
+ *
+ * A node's explicit `appearance` override is git-shared CONTENT (the team shares "the reviewer
+ * frame is red"), and the file is hostile input: the colour ends up in a CSS custom property,
+ * which the browser stores as arbitrary text, so only a literal hex value survives. Unknown keys
+ * are dropped while known ones live — that is the forward-compatibility rule — and an override
+ * that contributes nothing is removed rather than written back as empty bytes in a committed file.
+ * See @shared/appearance for the whole model.
+ */
+export function sanitizeNodeAppearances(nodes: CanvasNodeState[]): CanvasNodeState[] {
+  return nodes.map((n) => {
+    if (n.appearance === undefined) return n
+    const safe = sanitizeBorderAppearance(n.appearance)
+    if (safe) return { ...n, appearance: safe }
+    const { appearance: _dropped, ...rest } = n
     return rest
   })
 }
@@ -123,6 +148,15 @@ export interface ProjectFileV1 {
   agentMessaging?: boolean
   dinoHighScore?: number
   kanban?: ProjectKanban
+  /**
+   * Shared canvas rules (@shared/appearance) — today the appearance derivation table, later the
+   * layout engine's own halves. Deliberately IN the git-shared file: "workers of this director get
+   * a red border" is a statement about the canvas, and the team shares it. Which is why it is read
+   * through `sanitizeProjectLayoutRules` (unknown `version` and unknown keys ignored, never a
+   * reason to reject the block) and why the MACHINE-LOCAL half — the window edge, reduced-motion,
+   * effects-off — is not here at all but in `Settings.appearance`.
+   */
+  layoutRules?: ProjectLayoutRules
 }
 
 /** One workspace.json v3 entry. Exactly one of: `cwd` (local ref), `ssh` (remote ref),
@@ -251,10 +285,11 @@ export function projectToFile(
   // Trigger specs are additionally normalized on the way OUT too, so a malformed spec that
   // reached the live nodes some other way (a peer mutation, a hand edit) is never written into
   // the shared file as if it were ours.
-  const nodes = sanitizeNodeTriggers(
-    stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
+  const nodes = sanitizeNodeAppearances(
+    sanitizeNodeTriggers(stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes))
   )
   const icon = sanitizeProjectIcon(p.icon)
+  const layoutRules = sanitizeProjectLayoutRules(p.layoutRules)
   return {
     version: 1,
     rev,
@@ -273,7 +308,11 @@ export function projectToFile(
     // the acknowledgment is machine-local (IndexEntryV3.capabilityAck) and must never travel.
     ...projectCapabilityFields(p),
     ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {}),
-    ...(p.kanban ? { kanban: p.kanban } : {})
+    ...(p.kanban ? { kanban: p.kanban } : {}),
+    // Normalised on the way OUT too, like the trigger specs above: a malformed rule block that
+    // reached the live project some other way (a hand edit, a peer mutation) is never written into
+    // the shared file as if it were ours. An empty block adds no bytes to the committed file.
+    ...(layoutRules ? { layoutRules } : {})
   }
 }
 
@@ -322,6 +361,7 @@ export function fileToProject(
 ): Project {
   const defaultAccountId = base.defaultAccountId ?? f.defaultAccountId
   const icon = sanitizeProjectIcon(f.icon)
+  const layoutRules = sanitizeProjectLayoutRules(f.layoutRules)
   return {
     id: base.id,
     name: f.name,
@@ -334,10 +374,12 @@ export function fileToProject(
     // `partition` survives only when it is exactly the one THIS project (base.id, machine-local)
     // would mint — a foreign/cloned/unsafe one drops to un-owned default session. See
     // loadedAgentBrowserPartition; without it a cloned project.json forges another project's jar.
-    nodes: sanitizeNodeTriggers(
-      sanitizeBrowserPartitions(
-        applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
-        base.id
+    nodes: sanitizeNodeAppearances(
+      sanitizeNodeTriggers(
+        sanitizeBrowserPartitions(
+          applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
+          base.id
+        )
       )
     ),
     ...(f.bridges ? { bridges: f.bridges } : {}),
@@ -349,6 +391,12 @@ export function fileToProject(
     ...readProjectCapabilities(f),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
     ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
+    // Hostile input, same treatment as the capability bits above: an unknown `version` and unknown
+    // keys are ignored field by field, so an unusable block simply means built-in defaults rather
+    // than a rejected project. NOTE what is NOT read from here — the machine-local appearance
+    // (window edge, reduced-motion, effects-off) lives in settings.json, and the shape has no
+    // place for a file field claiming otherwise.
+    ...(layoutRules ? { layoutRules } : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {}),
