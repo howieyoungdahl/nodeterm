@@ -2,14 +2,23 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { randomBytes } from 'node:crypto'
 import { execFileSync } from 'child_process'
 import { ServerPlatform } from '../platform-server'
 import { registerCoreHandlers } from './index'
 import { IPC } from '../../shared/ipc'
-import { DEFAULT_SETTINGS, type GitStatus } from '../../shared/types'
+import { DEFAULT_SETTINGS, type CodexIdentityCaps, type GitStatus } from '../../shared/types'
 import { initPlatform, resetPlatformForTests } from '../../core/platform'
 import { DownloadTickets } from '../../core/download-tickets'
 import { projectImagesDir } from '../../core/canvas-images'
+import {
+  refreshCodexIdentityCaps,
+  resetCodexIdentityCapsForTests
+} from '../../core/codex-identity-caps'
+import {
+  resetCodexThreadIdentityAuthSecret,
+  setCodexThreadIdentityAuthSecret
+} from '../../core/codex-identity-proxy'
 
 // The per-account hook writers are exercised by src/core/claude-accounts-service.test.ts. Observe
 // them here instead of running them: the real installer writes into the USER's `~/.nodeterm`, and
@@ -24,6 +33,8 @@ vi.mock('../../core/agents/hooks/claude', () => ({
 
 let repo: string, platform: ServerPlatform, ui: number
 beforeEach(() => {
+  resetCodexIdentityCapsForTests()
+  resetCodexThreadIdentityAuthSecret()
   repo = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-git-'))
   const git = (...a: string[]) => execFileSync('git', a, { cwd: repo })
   git('init', '-q')
@@ -41,6 +52,8 @@ beforeEach(() => {
   ui = platform.attach({ sendText: () => {}, sendBinary: () => {} })
 })
 afterEach(() => {
+  resetCodexIdentityCapsForTests()
+  resetCodexThreadIdentityAuthSecret()
   resetPlatformForTests()
   fs.rmSync(repo, { recursive: true, force: true })
 })
@@ -73,6 +86,25 @@ describe('registerCoreHandlers (git)', () => {
     // The worktree dialog derives its default path from this: an empty answer would suggest
     // `/worktrees/…` at the filesystem ROOT, which the (often root-run) server would create.
     expect(await call(IPC.appUserDataDir)).toBe(repo)
+  })
+})
+
+describe('registerCoreHandlers (Codex identity)', () => {
+  it('keeps an early RPC pending, then returns the Server boot capability refresh', async () => {
+    const early = call(IPC.codexIdentityCaps) as Promise<CodexIdentityCaps>
+    let settled = false
+    void early.then(() => (settled = true))
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    setCodexThreadIdentityAuthSecret(randomBytes(32))
+    await refreshCodexIdentityCaps(async () => true, async () => true)
+
+    await expect(early).resolves.toMatchObject({
+      shared: true,
+      remoteFlag: true,
+      appServer: true
+    })
   })
 })
 
