@@ -1164,19 +1164,42 @@ describe('HeadlessNodeFactory', () => {
     }
 
     const nodes = (await store.load({ sideline: false })).projects[0].nodes
-    const overlap = (a: CanvasNodeState, b: CanvasNodeState): boolean =>
-      a.position.x < b.position.x + b.size.width &&
-      a.position.x + a.size.width > b.position.x &&
-      a.position.y < b.position.y + b.size.height &&
-      a.position.y + a.size.height > b.position.y
+    // Spawned workers collect under a tray frame, so a persisted position is parent-relative from
+    // the second spawn on: the no-overlap rule is about where cards LAND, which is absolute. The
+    // frame itself is excluded because containing its members is what a frame is.
+    const absolute = (node: CanvasNodeState): { x: number; y: number } => {
+      let { x, y } = node.position
+      const seen = new Set<string>([node.id])
+      let parentId = node.parentId
+      while (parentId && !seen.has(parentId)) {
+        seen.add(parentId)
+        const parent = nodes.find((candidate) => candidate.id === parentId)
+        if (!parent) break
+        x += parent.position.x
+        y += parent.position.y
+        parentId = parent.parentId
+      }
+      return { x, y }
+    }
+    const overlap = (a: CanvasNodeState, b: CanvasNodeState): boolean => {
+      const pa = absolute(a)
+      const pb = absolute(b)
+      return (
+        pa.x < pb.x + b.size.width &&
+        pa.x + a.size.width > pb.x &&
+        pa.y < pb.y + b.size.height &&
+        pa.y + a.size.height > pb.y
+      )
+    }
+    const cards = nodes.filter((candidate) => candidate.kind !== 'group')
     for (const id of spawnedIds) {
       const node = nodes.find((candidate) => candidate.id === id)!
-      expect(nodes.filter((candidate) => candidate.id !== id).some((candidate) => overlap(node, candidate)), id)
+      expect(cards.filter((candidate) => candidate.id !== id).some((candidate) => overlap(node, candidate)), id)
         .toBe(false)
     }
     expect(new Set(spawnedIds.map((id) => {
-      const node = nodes.find((candidate) => candidate.id === id)!
-      return `${node.position.x},${node.position.y}`
+      const position = absolute(nodes.find((candidate) => candidate.id === id)!)
+      return `${position.x},${position.y}`
     })).size).toBe(spawnedIds.length)
   })
 
@@ -1486,6 +1509,155 @@ describe('HeadlessNodeFactory', () => {
     expect(createPersistentHeadlessNodeOwnership(ledgerFile).ownerOf('term-owned')).toMatchObject({
       sourceNodeId: 'term-source',
       projectId: 'project-1'
+    })
+  })
+
+  describe('spawn defaults: role, generated names and the tray frame', () => {
+    const idOf = (reply: { result?: unknown }): string => (reply.result as { id: string }).id
+    const load = async (): Promise<CanvasNodeState[]> =>
+      (await store.load({ sideline: false })).projects[0].nodes
+    const nodeById = (nodes: CanvasNodeState[], id: string): CanvasNodeState =>
+      nodes.find((node) => node.id === id)!
+
+    it('marks a control-spawned node a worker and names it after its owner and what it runs', async () => {
+      const reply = await factory.openAgent('term-source', { agent: 'claude', prompt: 'ship  it' }, true)
+      const node = nodeById(await load(), idOf(reply))
+      expect(node).toMatchObject({
+        role: 'worker',
+        title: 'Director · Claude Code',
+        taskSummary: 'Opened by Director — ship it',
+        titleAuto: true
+      })
+    })
+
+    it('leaves the operator’s own nodes as primary — an untouched canvas keeps its shape', async () => {
+      await factory.openAgent('term-source', { agent: 'claude' }, true)
+      const nodes = await load()
+      for (const id of ['term-source', 'term-upstream', 'term-owned']) {
+        expect(nodeById(nodes, id).role).toBeUndefined()
+        expect(nodeById(nodes, id).parentId).toBeUndefined()
+      }
+    })
+
+    it('does not build a frame around a single worker', async () => {
+      const id = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const nodes = await load()
+      expect(nodes.filter((node) => node.kind === 'group')).toEqual([])
+      expect(nodeById(nodes, id).parentId).toBeUndefined()
+    })
+
+    it('builds the tray when the SECOND worker arrives, taking the first in with it', async () => {
+      const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const second = idOf(await factory.openAgent('term-source', { agent: 'codex' }, true))
+
+      const nodes = await load()
+      const frames = nodes.filter((node) => node.kind === 'group')
+      expect(frames).toHaveLength(1)
+      // Collapsed on creation: "put away" is half of what the tray is for, and a tray that opens
+      // expanded has put nothing away.
+      expect(frames[0]).toMatchObject({
+        title: 'Director workers',
+        taskFrame: true,
+        collapsed: true
+      })
+      expect(nodeById(nodes, first).parentId).toBe(frames[0].id)
+      expect(nodeById(nodes, second).parentId).toBe(frames[0].id)
+      // The frame is a creation of this caller, so it can be renamed/colored/closed like any other.
+      expect(factory.ownsSpawn('term-source', frames[0].id)).toBe(true)
+      // Parent before child: React Flow hydrates in array order.
+      expect(nodes.findIndex((node) => node.id === frames[0].id)).toBeLessThan(
+        nodes.findIndex((node) => node.id === first)
+      )
+      const trayIndex = published.findIndex((node) => node.id === frames[0].id)
+      expect(trayIndex).toBeGreaterThanOrEqual(0)
+      expect(trayIndex).toBeLessThan(published.findIndex((node) => node.id === second))
+    })
+
+    it('puts a later worker into the tray that already exists', async () => {
+      await factory.openAgent('term-source', { agent: 'claude' }, true)
+      await factory.openAgent('term-source', { agent: 'codex' }, true)
+      const third = idOf(await factory.openAgent('term-source', { agent: 'gemini' }, true))
+
+      const nodes = await load()
+      const frames = nodes.filter((node) => node.kind === 'group')
+      expect(frames).toHaveLength(1)
+      expect(nodeById(nodes, third).parentId).toBe(frames[0].id)
+    })
+
+    it('numbers the fan-out across separate commands, not per command', async () => {
+      const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const second = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const nodes = await load()
+      expect(nodeById(nodes, first).title).toBe('Director · Claude Code')
+      expect(nodeById(nodes, second).title).toBe('Director · Claude Code 2')
+    })
+
+    it('builds the tray from one command that opens two workers', async () => {
+      const reply = await factory.openAgent('term-source', { agent: 'claude', count: '2' }, true)
+      const ids = (reply.result as { ids: string[] }).ids
+      const nodes = await load()
+      const frames = nodes.filter((node) => node.kind === 'group')
+      expect(frames).toHaveLength(1)
+      expect(ids.map((id) => nodeById(nodes, id).parentId)).toEqual([frames[0].id, frames[0].id])
+    })
+
+    it('joins the spawner’s OWN frame on the first worker, moving nothing that is already there', async () => {
+      const workspace = await store.load({ sideline: false })
+      const project = workspace.projects[0]
+      project.nodes.unshift({
+        id: 'group-existing',
+        kind: 'group',
+        position: { x: 0, y: 0 },
+        size: { width: 900, height: 700 },
+        title: 'Lane',
+        color: '#0a84ff',
+        group: null
+      })
+      project.nodes = project.nodes.map((node) =>
+        node.id === 'term-source' ? { ...node, parentId: 'group-existing' } : node
+      )
+      await store.save(workspace)
+
+      const id = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const nodes = await load()
+      expect(nodeById(nodes, id).parentId).toBe('group-existing')
+      expect(nodes.filter((node) => node.kind === 'group')).toHaveLength(1)
+      expect(nodeById(nodes, 'term-source').parentId).toBe('group-existing')
+    })
+
+    it('never pulls a worker the operator has placed by hand into a new tray', async () => {
+      const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const workspace = await store.load({ sideline: false })
+      workspace.projects[0].nodes = workspace.projects[0].nodes.map((node) =>
+        node.id === first ? { ...node, manualPlacement: true } : node
+      )
+      await store.save(workspace)
+
+      const second = idOf(await factory.openAgent('term-source', { agent: 'codex' }, true))
+      const nodes = await load()
+      expect(nodes.filter((node) => node.kind === 'group')).toEqual([])
+      expect(nodeById(nodes, first).parentId).toBeUndefined()
+      expect(nodeById(nodes, second).parentId).toBeUndefined()
+    })
+
+    it('never pulls a worker this caller does not own into a new tray', async () => {
+      const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      ownership.forget(first)
+      const second = idOf(await factory.openAgent('term-source', { agent: 'codex' }, true))
+      const nodes = await load()
+      expect(nodes.filter((node) => node.kind === 'group')).toEqual([])
+      expect(nodeById(nodes, first).parentId).toBeUndefined()
+      expect(nodeById(nodes, second).parentId).toBeUndefined()
+    })
+
+    it('starts no session and types nothing for the frame itself', async () => {
+      await factory.openAgent('term-source', { agent: 'claude' }, true)
+      await factory.openAgent('term-source', { agent: 'codex' }, true)
+      const frames = (await load()).filter((node) => node.kind === 'group')
+      expect(frames).toHaveLength(1)
+      expect(pty.creates.map((options) => options.persistKey)).not.toContain(frames[0].id)
+      expect(pty.sends.map((send) => send.nodeId)).not.toContain(frames[0].id)
+      expect(pty.destroys).toEqual([])
     })
   })
 

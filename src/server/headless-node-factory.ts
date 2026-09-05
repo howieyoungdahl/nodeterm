@@ -15,6 +15,12 @@ import {
   resolveControlNodeSize,
   resolveControlNodeSizeName
 } from '../shared/control-node-size'
+import {
+  planWorkerFrame,
+  workerFrameLabel,
+  workerNodeTitle,
+  workerTaskSummary
+} from '../shared/worker-frame'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../shared/sticky-write'
 import type { WorkspaceStore } from '../core/workspace-store'
 import {
@@ -535,6 +541,38 @@ function ungroupPersistedNodes(
     nodes: groupsFirst(moved.filter((node) => node.id !== groupId)),
     promoted
   }
+}
+
+/**
+ * Move `ids` INTO an existing frame, keeping every root-space position exactly where it is and
+ * growing the frame (and its own ancestors) around them. The mirror of `groupPersistedNodes` for
+ * the case where the container already exists; a node that is an ancestor of the frame is skipped
+ * rather than creating a cycle.
+ */
+function reparentPersistedInto(
+  nodes: CanvasNodeState[],
+  ids: readonly string[],
+  groupId: string
+): { nodes: CanvasNodeState[]; changed: CanvasNodeState[] } {
+  const frame = nodes.find((node) => node.id === groupId)
+  if (!frame || frame.kind !== 'group') return { nodes, changed: [] }
+  const frameRoot = rootPosition(nodes, frame)
+  const movable = new Set(
+    ids.filter((id) => id !== groupId && !isDescendant(nodes, groupId, id))
+  )
+  if (!movable.size) return { nodes, changed: [] }
+  const before = new Map(nodes.map((node) => [node.id, node]))
+  const moved = nodes.map((node) => {
+    if (!movable.has(node.id)) return node
+    const root = rootPosition(nodes, node)
+    return {
+      ...node,
+      parentId: groupId,
+      position: { x: root.x - frameRoot.x, y: root.y - frameRoot.y }
+    }
+  })
+  const next = groupsFirst(fitAncestorChain(moved, groupId))
+  return { nodes: next, changed: next.filter((node) => before.get(node.id) !== node) }
 }
 
 function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
@@ -1284,6 +1322,57 @@ export class HeadlessNodeFactory {
     })
   }
 
+  /**
+   * Put the workers this spawn just created under the spawner's tray frame (@shared/worker-frame).
+   * Mutates `project.nodes` in place — the caller is inside the workspace transaction and saves
+   * once, so a burst of spawns is a burst of single writes, not a write per node per frame.
+   *
+   * Presentation only: it creates no session, attaches to nothing, kills nothing and types
+   * nothing. Ownership is asked before any EXISTING node is re-parented, because re-parenting is
+   * a mutation and creator ownership is the boundary for those; the plan additionally refuses to
+   * move anything the operator pinned or placed by hand.
+   */
+  private applyWorkerFrame(
+    project: Project,
+    spawner: CanvasNodeState,
+    created: readonly CanvasNodeState[],
+    sourceNodeId: string
+  ): { groupId?: string; changed: CanvasNodeState[] } {
+    const plan = planWorkerFrame({
+      nodes: project.nodes,
+      spawnerId: spawner.id,
+      newWorkerIds: created.map((node) => node.id),
+      ropes: project.ropes ?? [],
+      owns: (id) => this.ownsSpawn(sourceNodeId, id)
+    })
+    if (plan.kind === 'none') return { changed: [] }
+    if (plan.kind === 'join') {
+      const joined = reparentPersistedInto(project.nodes, plan.memberIds, plan.groupId)
+      project.nodes = joined.nodes
+      return { changed: joined.changed }
+    }
+    const grouped = groupPersistedNodes(
+      project.nodes,
+      plan.memberIds,
+      project.nodes.filter((node) => node.kind === 'group').length,
+      workerFrameLabel(spawner.title),
+      isNodeColor(spawner.color) ? spawner.color : undefined
+    )
+    if (!grouped) return { changed: [] }
+    // The tray marker is how the NEXT spawn finds this frame — by fact, not by name, so a frame
+    // the operator renamed is still the same tray. And it ships COLLAPSED: "put away" is half of
+    // what a tray is for, and a tray that opens expanded leaves the operator looking at every
+    // worker anyway, which is the state the feature exists to end. One click opens it.
+    project.nodes = grouped.nodes.map((node) =>
+      node.id === grouped.groupId ? { ...node, taskFrame: true, collapsed: true } : node
+    )
+    const byId = new Map(project.nodes.map((node) => [node.id, node]))
+    return {
+      groupId: grouped.groupId,
+      changed: grouped.changed.map((node) => byId.get(node.id) ?? node)
+    }
+  }
+
   private async open(
     sourceNodeId: string,
     verb: 'open-terminal' | 'open-agent',
@@ -1399,6 +1488,15 @@ export class HeadlessNodeFactory {
         if (state === 'working') this.awaitingFirstWorking.delete(depId)
       }
       const mustWait = after.some((depId) => afterStates.get(depId) !== 'done')
+      // Where this fan-out's numbering continues from: how many nodes this spawner has already
+      // opened in this project, read off the lineage ropes the control plane already writes. Two
+      // separate `open-agent` calls therefore do not both produce a "Claude 1".
+      const priorOpenedCount = ropes.filter(
+        (rope) =>
+          rope.source === source.node.id &&
+          target.nodes.some((node) => node.id === rope.target)
+      ).length
+      const ownerTitle = source.node.title
       const awaitWorking = after.filter((depId) =>
         afterStates.get(depId) !== 'done' &&
         afterStates.get(depId) !== 'working' &&
@@ -1407,13 +1505,17 @@ export class HeadlessNodeFactory {
 
       for (let i = 0; i < count; i++) {
         let command = args.cmd
-        let title = `Terminal ${startIndex + i + 1}`
+        // Generated cards say who opened them and what they run — "Terminal 13" and a bare
+        // "Claude" named neither. `titleAuto` still lets the agent's own session name replace
+        // this the moment there is one; the owner+task line lives in `taskSummary`, which that
+        // retitle does not touch.
+        let title = workerNodeTitle(ownerTitle, 'Terminal', priorOpenedCount + i + 1)
         let color: string = NODE_COLORS[(startIndex + i) % NODE_COLORS.length]
         let mintedSessionId: string | undefined
         let permissionMode
         if (verb === 'open-agent') {
           const config = AGENT_CONFIG[agentId as BuiltinAgentId]
-          title = config.label
+          title = workerNodeTitle(ownerTitle, config.label, priorOpenedCount + i + 1)
           color = config.color
           const resolvedMode = resolvePermissionMode(target, settings)
           permissionMode = agentId === 'claude'
@@ -1459,6 +1561,10 @@ export class HeadlessNodeFactory {
           ...(nodeSizeName ? { controlSize: nodeSizeName } : {}),
           title,
           ...(verb === 'open-agent' ? { titleAuto: true } : {}),
+          // Every node the control plane opens is a delegated WORKER: the only kind automatic
+          // placement is allowed to arrange. Manual UI opens carry no role and read as `primary`.
+          role: 'worker' as const,
+          taskSummary: workerTaskSummary(ownerTitle, verb === 'open-agent' ? args.prompt : args.cmd),
           color,
           group: null,
           tags: [],
@@ -1493,13 +1599,36 @@ export class HeadlessNodeFactory {
       target.nodes.push(...created)
       target.ropes = ropes
       target.bridges = bridges
+      // The tray: collect this spawner's workers under one frame (see @shared/worker-frame).
+      // Runs INSIDE the same transaction as the append, so the frame and its members are one
+      // save and one publish — a burst of spawns must not become a burst of merges.
+      const framed = this.applyWorkerFrame(target, source.node, created, sourceNodeId)
       await this.deps.workspaceStore.save(workspace)
       for (const node of created) {
         this.ownership.record(node.id, { sourceNodeId, projectId: target.id })
         this.launchesInFlight.add(node.id)
       }
-      this.publish(target, created)
-      return { project: target, created, commands, after, verb, agentId }
+      if (framed.groupId) {
+        this.ownership.record(framed.groupId, { sourceNodeId, projectId: target.id })
+      }
+      // Publish in the project's own order, which `groupsFirst` has already made parent-first:
+      // React Flow requires a frame to arrive before the children parented to it.
+      const touched = new Set([
+        ...created.map((node) => node.id),
+        ...framed.changed.map((node) => node.id)
+      ])
+      this.publish(target, target.nodes.filter((node) => touched.has(node.id)))
+      // The launch reads cwd/agent/account off these, never geometry — but returning the FINAL
+      // objects keeps "what we persisted" and "what we launch" one thing.
+      const finalById = new Map(target.nodes.map((node) => [node.id, node]))
+      return {
+        project: target,
+        created: created.map((node) => finalById.get(node.id) ?? node),
+        commands,
+        after,
+        verb,
+        agentId
+      }
     }
     const prepared = await this.runExclusive(verb, prepare)
 
