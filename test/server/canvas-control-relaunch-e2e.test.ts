@@ -7,6 +7,7 @@ import WebSocket from 'ws'
 
 import { sessionName, TMUX_SOCKET } from '../../src/core/tmux-naming'
 import { startServer } from '../../src/server/index'
+import { WorkspaceStore } from '../../src/core/workspace-store'
 import { IPC } from '../../src/shared/ipc'
 import { decodePtyData } from '../../src/shared/rpc'
 import type { CanvasNodeState, Workspace } from '../../src/shared/types'
@@ -58,6 +59,7 @@ describe.skipIf(!hasTmux)('disposable Server hand-relaunch canvas control', () =
     { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
   >()
   const oldEnv = {
+    CODEX_THREAD_ID: process.env.CODEX_THREAD_ID,
     HOME: process.env.HOME,
     TMUX_TMPDIR: process.env.TMUX_TMPDIR,
     NODETERM_SERVER_CANVAS_CONTROL: process.env.NODETERM_SERVER_CANVAS_CONTROL
@@ -109,6 +111,8 @@ describe.skipIf(!hasTmux)('disposable Server hand-relaunch canvas control', () =
     process.env.HOME = disposableHome
     process.env.TMUX_TMPDIR = tmuxTmpDir
     process.env.NODETERM_SERVER_CANVAS_CONTROL = '1'
+    // The fixture hand-launches a fake Claude process, not the Codex session running this test.
+    delete process.env.CODEX_THREAD_ID
 
     const initial: Workspace = {
       version: 2,
@@ -240,8 +244,8 @@ printf 'FAKE_AGENT_REGISTERED_%s\\n' "$nt_code"
   })
 
   it('promotes a fake hand launch, preserves ownership, and recovers a stale-save card', async () => {
-    // Capture the browser's pre-create snapshot: replaying this after the pane exists is the exact
-    // stale whole-workspace-save race that used to leave a live tmux session with no canvas card.
+    // Capture the pre-create snapshot. The current Server protects its own save path; an older
+    // external writer without backend guards can still publish this stale snapshot to disk.
     const staleBeforeSource = structuredClone(await loadWorkspace())
     const withSource = structuredClone(staleBeforeSource)
     withSource.projects[0].nodes.push(terminal(SOURCE_ID, 'Plain terminal', 0))
@@ -292,6 +296,9 @@ printf 'FAKE_AGENT_REGISTERED_%s\\n' "$nt_code"
     expect(refused).toMatch(/ownership/i)
 
     await rpc(IPC.workspaceSave, [staleBeforeSource])
+    expect((await loadWorkspace()).projects[0].nodes.some((node) => node.id === SOURCE_ID)).toBe(true)
+    // Exercise recovery after a real external store write, without disabling the Server's rescue.
+    await new WorkspaceStore().save(staleBeforeSource)
     await until(async () => {
       const workspace = await loadWorkspace()
       return !workspace.projects[0].nodes.some((node) => node.id === SOURCE_ID)

@@ -964,9 +964,10 @@ export class HeadlessNodeFactory {
     const flagError = unsupportedFlags(args, new Set())
     if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
     const workspace = await this.deps.workspaceStore.load({ sideline: false })
-    const source = sourceProject(workspace, sourceNodeId)
-    if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
-    if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+    const matches = sourceProjects(workspace, sourceNodeId)
+    if (matches.length !== 1) return this.sourceProjectError(sourceNodeId, matches.length > 1)
+    const source = matches[0]
+    if (!sourceCanControl(source.node, this.runtimeAgentId)) {
       return { ok: false, error: 'source node is not a control-capable agent' }
     }
     return source
@@ -985,7 +986,7 @@ export class HeadlessNodeFactory {
     if ('ok' in source) return source
     const entries = inventoryEntries(source.project, {
       stateOf: (nodeId) => this.deps.stateOf(nodeId),
-      agentIdOf: this.deps.agentIdOf,
+      agentIdOf: this.runtimeAgentId,
       openedByCaller: (nodeId) => this.ownsSpawn(sourceNodeId, nodeId)
     })
     return {

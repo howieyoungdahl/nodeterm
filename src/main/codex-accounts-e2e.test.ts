@@ -294,13 +294,18 @@ describe('S6 acceptance gate — the merged machine-scoped-Codex-account chain c
     expect(proxy.resolveCodexThreadNodeIdentity(THREAD, recordRoot, LOCAL)).toBe('node-mgd')
     expect(proxy.resolveCodexThreadNodeIdentity(THREAD, recordRoot, undefined /* n/a */)).toBeUndefined()
 
-    // (b) the real POSIX-sh resolver with an EMPTY scope scans every account and binds nothing when
-    // the match count is not exactly one (M5 reds this).
-    const boundAmbiguous = runResolver(shMod.codexThreadIdentityResolverSh(recordRoot), {
+    // (b) UNSET scope scans every account and refuses ambiguous ownership before the command runs.
+    // Explicit EMPTY scope is the system launch contract, not an unknown account.
+    const resolver = shMod.codexThreadIdentityResolverSh(recordRoot)
+    expect(() => runResolver(resolver, { CODEX_THREAD_ID: THREAD })).toThrow(/ambiguous-binding/)
+    expect(runResolver(resolver, {
       CODEX_THREAD_ID: THREAD,
       NODETERM_CODEX_ACCOUNT_ID: ''
-    })
-    expect(boundAmbiguous).toBe('')
+    })).toBe('node-sys')
+    expect(runResolver(resolver, {
+      CODEX_THREAD_ID: THREAD,
+      NODETERM_CODEX_ACCOUNT_ID: LOCAL
+    })).toBe('node-mgd')
 
     // (c) the relay catalog — two foreign accounts advertising the same id with different (unreadable)
     // inodes stay ambiguous; the id is dropped rather than resumed under a guessed owner.

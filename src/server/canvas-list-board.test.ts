@@ -337,7 +337,8 @@ describe('Server Edition read-only canvas control', () => {
       })
       expect(await factory[verb]('term-missing', {})).toEqual({
         ok: false,
-        error: 'source node is not in exactly one saved project'
+        error: 'source-node-project-unavailable: term-missing has no saved project; ' +
+          'open the terminal from the canvas inside the target project'
       })
     }
   })

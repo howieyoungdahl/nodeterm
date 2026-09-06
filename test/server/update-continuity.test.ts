@@ -7,6 +7,7 @@ import { startServer } from '../../src/server/index'
 import { WorkspaceStore } from '../../src/core/workspace-store'
 import { fakePlatform } from '../../src/core/platform-fake'
 import { initPlatform, resetPlatformForTests } from '../../src/core/platform'
+import { TMUX_SOCKET } from '../../src/core/tmux-naming'
 
 it.skipIf(process.platform !== 'linux' || !existsSync('/usr/bin/tmux'))('a disposable server restart preserves the original tmux process, screen and saved cards', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'nt-upgrade-'))
@@ -14,10 +15,10 @@ it.skipIf(process.platform !== 'linux' || !existsSync('/usr/bin/tmux'))('a dispo
   const dataDir = path.join(root, 'data')
   const projectDir = path.join(root, 'project')
   for (const dir of [socketDir, dataDir, projectDir]) await fs.mkdir(dir, { mode: 0o700 })
-  // Same socket NAME as production, but a private socket directory. No real tmux is reachable.
+  // Match the server's load-time test socket inside a second, private socket directory.
   vi.stubEnv('TMUX_TMPDIR', socketDir)
   vi.stubEnv('NODETERM_SESSION_REAP_DISABLED', '1')
-  const tmux = (...args: string[]) => execFileSync('/usr/bin/tmux', ['-L', 'node-terminal', ...args], {
+  const tmux = (...args: string[]) => execFileSync('/usr/bin/tmux', ['-L', TMUX_SOCKET, ...args], {
     encoding: 'utf8', env: { ...process.env, TMUX_TMPDIR: socketDir }, timeout: 10_000
   }).trim()
   let server: Awaited<ReturnType<typeof startServer>> | undefined
@@ -55,6 +56,6 @@ it.skipIf(process.platform !== 'linux' || !existsSync('/usr/bin/tmux'))('a dispo
     try { tmux('kill-server') } catch { /* only this fixture's private socket */ }
     vi.unstubAllEnvs()
     resetPlatformForTests()
-    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   }
 }, 30_000)
