@@ -19,7 +19,7 @@
 import type { CanvasNodeState, Project } from '@shared/types'
 
 export type ExternalChangeDecision =
-  /** No unsaved local edits: take the disk version wholesale (the pre-existing behavior). */
+  /** No unsaved local edits: load disk edits, retaining open cards missing from that snapshot. */
   | { kind: 'reload'; added: CanvasNodeState[] }
   /** Dirty, and the file differs from our last-known disk state ONLY by added nodes. */
   | { kind: 'merge'; added: CanvasNodeState[] }
@@ -103,6 +103,58 @@ export function mergeIncomingNodes<T extends { id: string }>(current: T[], incom
   return fresh.length ? [...current, ...fresh] : current
 }
 
+/** Loading a saved layout must not erase cards created while autosave was paused. Keep their
+ * original ids, geometry and containers so existing terminals stay addressable in the same place.
+ * Disk still wins edits to shared ids. Explicitly closing a card remains the removal path.
+ */
+export function reloadKeepingOpenNodes(current: Project, incoming: Project): {
+  project: Project
+  retained: number
+} {
+  if (current.id !== incoming.id) return { project: incoming, retained: 0 }
+  const savedIds = new Set(incoming.nodes.map((node) => node.id))
+  const retained = current.nodes.filter((node) => !savedIds.has(node.id))
+  if (!retained.length) return { project: incoming, retained: 0 }
+  const retainedIds = new Set(retained.map((node) => node.id))
+  const currentNodes = new Map(current.nodes.map((node) => [node.id, node]))
+  const incomingNodes = new Map(incoming.nodes.map((node) => [node.id, node]))
+  const rootPosition = (id: string, byId: Map<string, CanvasNodeState>) => {
+    const position = { x: 0, y: 0 }
+    const seen = new Set<string>()
+    let node = byId.get(id)
+    while (node && !seen.has(node.id)) {
+      seen.add(node.id)
+      position.x += node.position.x
+      position.y += node.position.y
+      node = node.parentId ? byId.get(node.parentId) : undefined
+    }
+    return position
+  }
+  const nodes = [...incoming.nodes, ...retained.map((node) => {
+    if (!node.parentId || !savedIds.has(node.parentId)) return node
+    // A shared group may have moved on disk. Preserve the retained card's screen-space location
+    // while accepting that group edit; descendants of a retained group keep their local offsets.
+    const before = rootPosition(node.parentId, currentNodes)
+    const after = rootPosition(node.parentId, incomingNodes)
+    return { ...node, position: {
+      x: node.position.x + before.x - after.x,
+      y: node.position.y + before.y - after.y
+    } }
+  })]
+  const ids = new Set(nodes.map((node) => node.id))
+  const keepLinks = (key: 'bridges' | 'ropes') => mergeIncomingNodes(
+    incoming[key] ?? [],
+    (current[key] ?? []).filter((link) =>
+      ids.has(link.source) && ids.has(link.target) &&
+      (retainedIds.has(link.source) || retainedIds.has(link.target))
+    )
+  )
+  return {
+    project: { ...incoming, nodes, bridges: keepLinks('bridges'), ropes: keepLinks('ropes') },
+    retained: retained.length
+  }
+}
+
 /** The conflict strip's sentence. Derived from what actually arrived so the bar cannot claim
  *  something vague while a real session sits on the canvas behind it. */
 export function conflictBarMessage(addedCount: number): string {
@@ -111,7 +163,7 @@ export function conflictBarMessage(addedCount: number): string {
   // pressed, and stays suspended for as long as the bar is ignored. A user who read this strip as
   // an FYI about someone else's git pull had no way to know their own canvas had stopped being
   // written (the 2026-09-02 silent freeze: two and a half hours, eight unsaved cards).
-  const paused = ' Your canvas is not being saved until you choose.'
+  const paused = ' Your canvas is not being saved until you choose. Reload keeps open cards.'
   if (addedCount <= 0)
     return 'Project file changed on disk (git pull or another machine).' + paused
   const s = addedCount === 1 ? '' : 's'

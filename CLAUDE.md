@@ -161,6 +161,15 @@ button; an unresolved external-change conflict pauses saving. Regression tests m
 exercise real timers under fake time, and drive failed project writes through the store IPC handler.
 This protects both desktop and Server Edition; it does not create or restart terminal backends.
 
+**Reload preserves open cards.** Both the conflict button and a clean external-change reload use
+`reloadKeepingOpenNodes` against the current React Flow snapshot. Disk wins edits to shared node
+ids, but cards absent from disk remain with their original ids, positions, containers and
+incident links. This includes nodes opened after the banner appeared while autosave was suspended.
+The merged store is saved directly, with ordinary save-failure handling; do not serialize the old
+Flow array back over it before the reload effect lands. Closing a node is the explicit removal
+path. The same behavior applies to desktop and Server Edition; the separate native mobile client
+needs equivalent handling for any future disk-reload control.
+
 The optional browser-server updater (`core/server-updater.ts`, `server/update-main.ts`) builds
 one configured integration ref in detached release worktrees. It uses an updater-private fetched
 ref because FETCH_HEAD is shared with concurrent worktrees. Activation checks browser/spawn/message

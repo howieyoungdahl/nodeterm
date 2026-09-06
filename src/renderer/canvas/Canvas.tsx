@@ -146,7 +146,8 @@ import { SaveFailureBar } from '../components/SaveFailureBar'
 import {
   adoptedNodesNotice,
   decideExternalChange,
-  mergeIncomingNodes
+  mergeIncomingNodes,
+  reloadKeepingOpenNodes
 } from '../lib/externalChange'
 import { planServerChange } from '../lib/serverChange'
 import {
@@ -2434,6 +2435,33 @@ export function Canvas() {
     useProjects.getState().requestReload()
   }, [])
 
+  const reloadDiskProject = useCallback((incoming: Project) => {
+    const store = useProjects.getState()
+    const active = store.activeProjectId === incoming.id
+    // Read React Flow NOW, not the snapshot from when the conflict banner first appeared.
+    // Autosave may have been paused for hours, with new cards and groups created in that time.
+    commitActiveToStore()
+    const current = useProjects.getState().getProject(incoming.id)
+    const result = current
+      ? reloadKeepingOpenNodes(current, incoming)
+      : { project: incoming, retained: 0 }
+    useProjects.getState().replaceProject(result.project)
+    if (active) setConflict(null)
+    if (active || result.retained) {
+      bumpDirty()
+      // Save the merged STORE immediately. persist() would reserialize the old Flow array before
+      // the reload effect has landed and overwrite the disk edits the user just chose.
+      // A background reload must wait for normal autosave: another project's conflict may still
+      // be unresolved, and a whole-workspace write would silently choose "Keep mine" for it.
+      if (active) void writeDisk()
+      if (active && result.retained) setNotice({
+        kind: 'info',
+        text: `Saved layout loaded; kept ${result.retained} open card${result.retained === 1 ? '' : 's'}.`
+      })
+    }
+    if (active) reloadActiveProject()
+  }, [commitActiveToStore, bumpDirty, writeDisk, reloadActiveProject])
+
   /** Land incoming nodes on the live canvas, and say nothing about it. Returns whether anything
    *  actually landed (so the caller can decide about dirty).
    *
@@ -2482,7 +2510,7 @@ export function Canvas() {
       const { activeProjectId: current } = useProjects.getState()
       if (project.id !== current) {
         // Background project: adopt silently — it reloads into React Flow on next switch.
-        useProjects.getState().replaceProject(project)
+        reloadDiskProject(project)
         return
       }
       // `base` is our last-known DISK state (the store copy is written by a load or a commit+save);
@@ -2497,8 +2525,7 @@ export function Canvas() {
       if (decision.kind === 'reload') {
         // Active but no unsaved local edits: reload in place (the incoming file already carries any
         // added nodes, so nothing extra to adopt).
-        useProjects.getState().replaceProject(project)
-        reloadActiveProject()
+        reloadDiskProject(project)
         return
       }
       // Dirty. Whatever happens to the overlapping half, the sessions registered elsewhere are ours
@@ -2519,7 +2546,7 @@ export function Canvas() {
       }
       // 'ignore': a self-write echo / a change we already hold. Nothing to do, and above all no bar.
     })
-  }, [reloadActiveProject, adoptIncomingNodes])
+  }, [reloadDiskProject, adoptIncomingNodes])
 
   // Writes this core made ITSELF: Server Edition headless canvas control (an agent ran
   // `nodeterm open-agent`, `rename`, `close`…). Never a bar and never a reload — see
@@ -12034,15 +12061,7 @@ export function Canvas() {
         {conflict && (
           <ConflictBar
             addedCount={conflict.added}
-            onReload={() => {
-              useProjects.getState().replaceProject(conflict.project)
-              // The canvas now matches disk exactly → no local unsaved edits. Clear dirty so the
-              // re-armed autosave (conflict just went null) can't turn around and overwrite the
-              // just-reloaded disk version.
-              setDirty(false)
-              setConflict(null)
-              reloadActiveProject()
-            }}
+            onReload={() => reloadDiskProject(conflict.project)}
             onKeepMine={() => {
               setConflict(null)
               void persist() // our in-memory canvas wins; the save overwrites the disk file
