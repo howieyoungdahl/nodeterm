@@ -134,6 +134,25 @@ export const IPC = {
    *  Edition's browser tab has no raw input stream and keeps the heuristics. */
   canvasTrackpadGesture: 'canvas:trackpad-gesture',
   agentStatus: 'agent:status',
+  agentStatusSnapshot: 'agent-status:snapshot',
+  /** Renderer → main/server: prove whether the tmux/session-host backend behind each of these node
+   *  ids is still there. Payload: `string[]` of node ids; resolves `Record<string, PaneEvidence>`.
+   *  The ONLY input to the `failed` status (shared/node-status.ts) — a shell with no prober answers
+   *  `unknown` for every id, never `dead`. Registered in both shells from one core body
+   *  (`core/node-status-service.ts`). */
+  nodeStatusPanes: 'node-status:panes',
+  taskContextRead: 'task-context:read',
+  taskContextFocus: 'task-context:focus',
+  /** Renderer → main/server: build a layout plan for one project (`core/canvas-layout/`). Payload:
+   *  `LayoutPlanRequest`; resolves a `LayoutPlan` whose `stoodDown` says why it is empty when it
+   *  is. The canvas travels in the request because the renderer's React Flow array is the live
+   *  truth for the active project. Registered in both shells from one core body. */
+  canvasLayoutPlan: 'canvas-layout:plan',
+  canvasLayoutApply: 'canvas-layout:apply',
+  canvasLayoutInverse: 'canvas-layout:inverse',
+  /** Renderer → main/server: give back this project's layout lease. Payload:
+   *  `{ projectId, holder }`; resolves boolean. Releasing someone else's lease is a no-op. */
+  canvasLayoutRelease: 'canvas-layout:release',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
    *  docs/hook-reply-approvals.md. */
@@ -318,6 +337,7 @@ export const IPC = {
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',
+  projectSettingsUpdateLocalReconciled: 'project-settings:update-local-reconciled',
   /** Resolved settings + per-family trust verdict for one project (`ProjectLaunchInfo`), the single
    *  read a launcher warms before it may consume a shared-sourced value — answers `null` for an
    *  unknown project id, same as projectSettingsRead. */
@@ -365,6 +385,12 @@ export const IPC = {
   /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */
   workspaceCorruptRecovered: 'workspace:corrupt-recovered',
   workspaceExternalChange: 'workspace:external-change',
+  workspaceLoadReconciled: 'workspace:load-reconciled',
+  workspaceSaveReconciled: 'workspace:save-reconciled',
+  /** Server-originated project writes (Server Edition headless canvas control: an agent opened,
+   *  renamed, moved or closed a node and this core saved the file itself). NOT an outside edit —
+   *  the renderer three-way merges it instead of raising the conflict bar. */
+  workspaceServerChange: 'workspace:server-change',
   githubIssuesSubscribe: 'githubIssues:subscribe',
   githubIssuesUnsubscribe: 'githubIssues:unsubscribe',
   githubIssuesQuery: 'githubIssues:query',

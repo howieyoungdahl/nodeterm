@@ -1,5 +1,10 @@
 # Contributing to nodeterm
 
+The Sessions sidebar's Tasks tab reads a bounded canonical D15 publication from
+host startup configuration. It never grants session control; exact focus remains
+unavailable without a trusted shell identity/authority adapter. See
+`docs/remote-task-context.md` for configuration and acceptance limits.
+
 Thanks for looking. This file is the short door: enough to get running, plus the house rules that
 actually get a pull request sent back. The long version — every subsystem and the reasoning behind
 its invariants — lives in `CLAUDE.md` at the repo root, which is also loaded automatically if you
@@ -152,18 +157,69 @@ bug.
 different facts and must stay distinguishable at every layer. Collapsing them is how a panel ends up
 reporting "no sessions" on a host running thirty.
 
+Workspace readers check the existing publication lock before/after reading; a displaced managed
+file is retryable unavailable, never a successful empty workspace. Reconciled loads bind the typed
+index view to the exact observed raw index. Do not clear abandoned locks or bypass caller enrollment
+to make a load/save succeed. See `docs/project-reconciliation.md` for bounded read/retry behavior.
+
+**A workspace save must reject if any local project write fails.** The renderer uses that result
+to keep changes unsaved, show a warning, and retry on a bounded schedule. Swallowing a per-project
+error can leave new terminal cards only in browser memory until a refresh removes them. Keep
+initial saves on the same failure path, and never let retries override an unresolved conflict.
+Browser-server updates must build in isolated release worktrees and preserve tmux. The optional
+updater waits for all browser clients to disconnect, verifies exact pane ids/PIDs and saved cards,
+and rolls back failed activation. Never replace those checks with an HTTP-only health check.
+See `docs/server-auto-updates.md` for the deployment contract and its remaining connection race.
+
 **Degrade to nothing, never to something wrong.** A probe that fails means the bare, safe command —
 never a substituted nearest match. A hand-editable value that is unrecognised must yield the safe
 default, never something more destructive than the default.
 
-**A Server Edition agent owns only nodes it freshly opened in this server run.** The
-creator ledger is process-local and must never be rebuilt from `.nodeterm/project.json`, titles,
-hook history, or a surviving tmux name: all are writable or stale. A restart therefore clears
-ownership, performs no node/session adoption, and leaves durable queued launches dormant. Metadata
+**A Server Edition agent owns only nodes it opened through this Server.** The creator ledger must
+never be rebuilt from `.nodeterm/project.json`, titles, hook history, or a surviving tmux name: all
+are writable or stale. The server does, however, write it DOWN itself — a 0600
+`<dataDir>/node-ownership.json` (`src/server/node-ownership-store.ts`), the same trust class as the
+`node-tokens/` beside it — so a restart no longer revokes an orchestrator's grants over the children
+it spawned. A missing, unreadable or wrong-shaped ledger loads EMPTY: unknown ownership still fails
+closed, and every id is re-validated with `isSafeNodeId` on the way in. Durable ownership grants no
+extra SPAWN authority: whether a persisted node may fresh-spawn remains the boot classification's
+decision, below, and the delivery queue is memory-only, so a restart still sends no queued command.
+Before listening, Server boot classifies
+every saved local terminal id. A definitively absent backend becomes an inert dead card; a live or
+unreadable backend may be reached only through an attach-only primitive. Neither branch may
+attach-or-create, and only node ids created during the current Server run may fresh-spawn. Metadata
 mutations and message delivery validate every target before writing anything; missing proof is a
-named refusal. Validate Server upgrades against a disposable data directory and port. Restarting a
-shared live service is
-an explicit operator action, never a test or an automatic repair step.
+ named refusal. There is no agent ownership exception for global dead-card cleanup. The separately
+authenticated operator API and its periodic reaper share one engine; it skips SSH projects and
+removes a local terminal card only after two definitive absent-session probes. Failed or unreadable
+probes preserve it. The same engine runs that rule BACKWARDS at boot and on `POST
+/opsapi/adopt-orphans`: a live `nt-<id>` session no project still lists gets a card again, in the
+project whose folder is its pane's nearest ancestor. That is not an inert-boot exception — it adds a
+card for a backend it just proved exists, creates and attaches and types nothing, and puts the
+adopted id through the very same boot classification, so it stays attach-only. It exists because
+`workspace:save` is a whole-workspace last-writer-wins write with NO conflict machinery for local
+projects: a client holding a stale node list deletes every card created since its snapshot, for
+everyone, with all the panes still running. `WorkspaceStore` now keeps an omitted node whose backend
+is live and that was not deleted here, and names the client that dropped it. Validate Server upgrades against a disposable data directory and port.
+Restarting a shared live service is an explicit operator action, never a test or an automatic
+repair step.
+
+**The Server operator API is a different principal, not an agent escape hatch.** `/opsapi/*` is
+TCP-loopback-only and authenticates only the `0600` `ops-token` bearer; browser cookies, the
+operator password, proxy headers, and node tokens never substitute for it. Keep agent
+canvas-control creator ownership strict. A dead-card sweep requires two definitive absent-pane
+probes, preserves `unknown` on every read failure, and shares one mutation engine with the periodic
+reaper. Server-owned operator and agent workspace transactions also share one FIFO; separate
+load/save queues can overwrite each other with stale snapshots. `/opsapi/health` must snapshot
+spawn-handler state without awaiting the preparation or parallel external launches it diagnoses;
+timed-out non-cancellable launches remain visible until they actually settle. Credentials still
+never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
+
+**A Server Edition message is not submitted just because tmux accepted Enter.** A fresh agent
+composer can render a pasted envelope before it is ready to consume the submit key. Capture the
+composed pane after Enter; if it did not advance, send one bounded retry and capture again. The
+target's verified next-turn hook remains the delivery receipt. Never report the paste as delivered
+ from a successful tmux command alone, and never loop Enter against somebody else's composer.
 
 **A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
 a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
@@ -175,6 +231,14 @@ come from git-shared JSON and can end up interpolated into a shell command line.
 **Test generated shell for real.** If you generate a shell command, run it under an actual
 `/bin/sh` against a fixture tree. A composed fixture will not tell you that `echo ##MEM` prints an
 empty line because `#` starts a comment.
+
+**A shared agent daemon is live-session infrastructure.** Codex's app-server control socket is
+shared by every `--remote` TUI in an account scope, so stopping or replacing one daemon disconnects
+every attached canvas node. A managed launcher must keep the already-bound thread under a bounded
+supervisor: resume only when protocol health failed or the known socket generation changed, never
+loop an unrelated client error, and never replay the original prompt after reconnect. Probe a
+responsive daemon before invoking lifecycle repair; stale PID bookkeeping is not permission to kill
+working sessions. See `docs/shared-codex-node-identity.md`.
 
 **Credentials never ride argv — local or SSH.** Not a tmux `-e` pair, not `curl -H`, not a remote
 command string. `/proc/<pid>/cmdline` is mode 444 on a stock Linux, and a remote command line is argv
@@ -201,6 +265,11 @@ condition per caller.
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.
 
+**Keep renderer terminal memory separate from tmux history.** tmux may retain 50,000 operator-
+scrollable lines outside the browser process; each mounted xterm is capped at 2,000 lines and an
+offscreen xterm is released after one minute by default. Raising the renderer cap multiplies across
+every terminal card on the active canvas; do not couple it back to tmux's retention setting.
+
 **A spawn-env write does not reach a tmux session on its own.** The shared tmux server takes each
 new session's env from its own GLOBAL env (inherited from whichever client *started* the server) —
 the creating client's process env only matters for names listed in `update-environment` (or passed
@@ -210,6 +279,15 @@ worse, leaks the server-starter's value into everyone else) after that. That is 
 shipped: managed-account `CLAUDE_CONFIG_DIR` leaked into system-account sessions. New per-session
 env either joins `ACCOUNT_SCOPE_UPDATE_ENV` / the gateway list, or rides `-e` — and gets a
 real-tmux test (`account-env.realtmux.test.ts` is the pattern).
+
+**Do not hold a workspace transaction lock across PTY or subprocess work.** Save and publish the
+durable node while serialized, release the lock, then start external work behind a bounded deadline.
+PTY creation is not cancellable: a timeout must preserve the card, report that the operation may
+finish late, and tell the caller not to repeat. Any capability promise used on this path needs its
+own bounded fail-safe; an edition-specific `false` answer must not be replaced with a getter whose
+initializer that edition never runs. When close can race the unlocked external phase, retain a
+per-node cancellation until the late operation settles and destroy its exact backend again; the
+first destroy may have run before anything existed.
 
 **A new keyboard chord has to survive the shells, not just the renderer.** The application menu is
 ours (`buildAppMenu` in `main/index.ts`), but its command-style accelerators — ⌘Q, ⌘M, ⌘W, ⌘0, ⌘⇧B,
@@ -242,6 +320,18 @@ that file advertises presents nothing forever when the file is old or unreadable
 hook script alone could heal itself, the same node proved itself through one client and was refused
 through another for the life of the session.
 
+**Local generated sh clients resolve shared-Codex identity before their env gate.** A reused
+account-scoped app-server can give a tool shell absent, incomplete, or complete foreign
+`NODETERM_*`. Always look up its exact thread/account binding: recover incomplete context, accept
+matching complete context, preserve complete direct launches only when records are absent, and
+refuse conflicts or existing invalid/unreadable/ambiguous evidence by name before transport.
+Complete means a valid node and endpoint plus any nonempty client `NODETERM_CANVAS_CONTROL`;
+agent-role metadata and `NODETERM_SERVER_CANVAS_CONTROL` are not substitutes. Recovery clears
+inherited transport/credential fields before loading the bound endpoint. Managed hooks must pass
+`'hook'` to `codexThreadIdentityResolverSh` so refusal drains stdin and exits 0 with empty stdout;
+commands exit 1. The shell checks protected-record shape/scope, not HMAC signatures. See
+`docs/shared-codex-node-identity.md` for account semantics and exact comparisons. Keep the SSH shim
+constants machine-neutral: a local record root must never be baked into a remote host's copy.
 **Local generated sh clients recover shared-Codex identity before their env gate.** A Codex tool
 shell is forked by the account-scoped app-server, so it has `CODEX_THREAD_ID` but not the pane's
 `NODETERM_*`. Managed hooks, local `nodeterm.sh`, and local `context.sh` must prepend
@@ -375,8 +465,72 @@ everything, because a client silently starved of `agent:status` shows dead badge
 anywhere — and if you tighten a filter, do not describe the result as a permission. A reviewer who
 believes a filter is the boundary stops looking for the real one. `docs/remote-session-scoping.md`
 has the four-way table and the measurements.
+**Never guess a local CLI launch flag from its version.** Probe the installed CLI's help once,
+carry the answer through the shared capability bag, and refuse before node creation when a requested
+option is absent. Keep the command assembler, both generated canvas-control instruction bodies, and
+the operator-facing edition docs in the same PR. Capability tests must inspect help and command
+assembly without starting an externally visible provider session.
+
+**A node's status is read, never inferred from what its terminal looks like.** The six states
+(`shared/node-status.ts`) have exactly two sources: the hook-fed agent-status mirror for
+`working / waiting / blocked / completed`, and a PROVEN session fact — the last hook state was one
+of those three live ones and `PtyManager.sessionPresence` says the pane is gone, double-checked —
+for `failed`. A finished (`done`) session whose terminal was then closed stays `completed`; that is
+the only state a dead pane does not change.
+Everything else is `unknown`, and `unknown` is a word on the badge, never an empty header: a state
+you cannot establish must say so rather than read as idle. Three consequences worth knowing before
+you touch it: nothing status-derived is written to disk (that is what keeps status churn from
+re-raising the Reload/Keep-mine bar), every state carries a distinct glyph *and* word so colour is
+redundant encoding only, and a shell that forgets to register the pane-evidence channel boots fine
+and simply never reports a failure — which is why `core/node-status-parity.test.ts` greps for both
+registrations.
+
+**Automatic layout only moves what it can prove is safe to move, and it says what it did not
+touch.** The engine (`src/core/canvas-layout/`) is opt-in, default off, and machine-local — the
+shared project file carries WHAT the rules are and never WHETHER they run, so cloning a repo can
+never start rearranging someone's canvas. `plan()` is pure and returns `{ops, skipped}`; a node is
+refused, with a reason, when it is pinned, hand-placed, in use right now, inside a loop-owned
+frame, created by another authority, or simply not a delegated worker (an absent `role` reads as
+`primary`, so every pre-existing canvas is untouchable by construction). **Report every refusal —
+a silent skip and a bug look identical from outside.** Two rules a refactor keeps wanting to undo:
+all refusal rules are re-asked at APPLY time rather than trusted from the plan (the operator may
+pin, move, or start using a card while its preview is open), and the engine has no op that creates a frame, so
+it can never become a second frame-creator racing the spawn path. Nothing runs on a timer, and
+nothing on this path may reach a PTY.
+
+Organizer lease acquisition serializes and refuses unverifiable persistence. Grants carry tokens;
+plan-time permission is not apply-time permission. `core/canvas-layout/transaction.ts` supplies a
+synchronous apply gate for the project coordinator, including revisions, ownership epochs and
+complete activity evidence. Its Canvas/store/IPC integration remains required; see
+`docs/organizer-transactions.md`. A leftover lease-store lock is never stolen automatically.
+Clearing a border edits only that appearance subtree, preserving unrelated and unknown layout rules.
+
+Layout events received during an asynchronous plan must be coalesced and drained, not discarded.
+Capture their project identity, reject application after a project switch, and release the actual
+held lease on unmount. Messaging likewise serializes admission and delivery per target; a queued
+rate limit retries once its advertised delay passes, with every authorization gate rechecked and
+the original expiry unchanged. Server session presence must include detached tmux sessions, and
+that probe runs only after the free permission/status checks. Test fixtures disable agent-hook
+and instruction installation; temporary test paths must never reach live provider homes.
 
 ## Testing
+
+Local project overlays use caller-enrolled, index-only leaf deltas and durable receipts.
+Never turn a failed local edit into a new operation or a speculative host-map update.
+The old boolean IPC route returns literal false; the typed route is distinct so stale clients
+cannot mistake a refusal object for success. Preserve unknown fields and retained target history;
+see `docs/project-reconciliation.md` for metadata read, retry and compatibility boundaries.
+
+Project reconciliation must retain a committed raw common base independently of pending renderer
+edits. Unknown fields need a raw-base overlay before typed serialization; a conflict preview is not
+a writable resolution. The revision-bound adapters and their explicit rollout limits are documented in
+`docs/project-reconciliation.md`. A successful atomic rename is not a compare-and-swap against an
+external editor, and only a durable operation receipt establishes a recovered save acknowledgment.
+Messaging queue changes must preserve deadlines at the actual send boundary and keep transport delivery separate from recipient work acceptance. The opt-in assignment adapter, receipt bounds, and remaining legacy integration are documented in `docs/message-delivery-integrity.md`.
+Remote task context is read-only metadata. Preserve absolute observation times,
+source generations and failures, and never use a filtered view as a control grant.
+Browser integration must revalidate exact host, project, account and session at
+focus. See `docs/remote-task-context.md` for the bounded adapter and client preferences.
 
 `npm test` must pass, and `npm run typecheck` is the fastest gate.
 
@@ -440,3 +594,34 @@ Two files, two audiences:
 **If you change or discover something other contributors must know, update this file too.** An
 invariant that only lives in a commit message is one refactor away from being violated by someone
 who never saw it.
+
+The 2026-09-05 combined fork recovery source is a local prototype, not rollout acceptance.
+Exactly one explicit new inline project can be created in an already enrolled local v3 index,
+with exclusive virgin-file publication and separate file/index receipts. Keep partial intents
+and retained index history; never infer creation from a missing base. Browser-termination
+recovery and folder creation remain unsupported. Genuinely fresh userData can enroll typed
+absence on read and bootstrap empty v3 only on an explicit one-inline save; reads never
+publish defaults. Retained workspace evidence or unresolved publication still refuses.
+See `docs/project-reconciliation.md` for the first-run proof and migration/SSH refusal boundaries
+and the still-unavailable qualified message and trusted organizer-runtime integrations.
+Do not restore legacy save fallback to make a fixture pass. Public organizer lease release
+must carry the exact acquisition token; holder identity alone is insufficient.
+
+Browser startup must treat unsupported license and saved-SSH reads as unavailable, not as
+verified free entitlement or an empty saved-server list. The stores retain read-error state,
+Canvas exposes it, and their management panels withhold unavailable actions. Bridge calls
+still reject; startup hydration merely completes with an explicit unavailable result in state.
+The first-run mobile announcement is valid UI: browser smoke tests dismiss its Close button.
+
+Organizer Canvas apply/undo now uses retained operation IDs and the existing revision coordinator;
+never restore direct preview application or whole-array organizer undo. Both actual shells still
+lack the trusted complete activity/assignment/host-presentation adapter and visibly refuse as
+`activity-and-assignment-adapter-unavailable`. Fixture success is not runtime acceptance. See
+`docs/organizer-transactions.md`; post-publication uncertainty permits receipt reads, not replay.
+
+Identified message host routes now consume explicitly pinned canonical assignment validation,
+but both real shells refuse without a qualified principal/issuer/durable-intent adapter. Do not
+substitute operator/browser read rights or node-token identity. ACK must match every recipient
+actor field immediately around the canonical read; observed turns are not receipts. Keep message
+credentials out of renderer forwarding and subprocess environments. Legacy identity claims are
+rejected, not upgraded. Details and remaining client/restart gaps: `docs/message-delivery-integrity.md`.

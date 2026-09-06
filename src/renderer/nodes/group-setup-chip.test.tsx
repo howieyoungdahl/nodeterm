@@ -16,7 +16,11 @@ import { useWorktrees } from '../state/worktrees'
 // React Flow instantiates custom nodes itself; the chip needs none of that machinery.
 vi.mock('@xyflow/react', () => ({
   NodeResizer: () => null,
-  useReactFlow: () => ({ updateNodeData: vi.fn(), setNodes: vi.fn() })
+  useReactFlow: () => ({ updateNodeData: vi.fn(), setNodes: vi.fn() }),
+  // The frame's status roll-up reads React Flow's own node table to find its members; this test
+  // has no canvas, so the frame simply has none (and renders no status badge).
+  useStore: (selector: (s: { nodeLookup: Map<string, unknown> }) => unknown) =>
+    selector({ nodeLookup: new Map() })
 }))
 
 import { GroupNode, setWorktreeActionHandler, type WorktreeAction } from './GroupNode'

@@ -3,7 +3,10 @@
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
-import type { NormalizedAgentEvent } from './agents/normalize'
+import type { AgentState, NormalizedAgentEvent } from './agents/normalize'
+import type { PaneEvidence } from './node-status'
+import type { CanvasLayoutRules, CanvasLayoutSettings } from './canvas-layout-rules'
+import type { LayoutPlan, LayoutPlanRequest } from './canvas-layout'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
 import type { BrowserLeasePush } from './browser-indicator'
@@ -13,6 +16,7 @@ import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type { CodexAccount } from './codex-account'
 import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
+import type { AppearanceSettings, BorderAppearance, ProjectLayoutRules } from './appearance'
 import type {
   ModelDiscoveryResult,
   ModelGatewayCredentialStatus,
@@ -246,6 +250,14 @@ export interface PtyCreateResult {
    */
   closed?: { by: number | null }
   /**
+   * REFUSED: this card existed when the Server process booted, but its local persistent backend
+   * was definitively absent. Nothing was spawned (`sessionId` is empty). The renderer leaves the
+   * card inert so the dead-card reaper can remove it instead of resurrecting a context-free shell.
+   *
+   * Server-only. New cards created during this process run still use the ordinary fresh-spawn path.
+   */
+  deadCard?: true
+  /**
    * REFUSED: `requireRemote` was set and no remote spawn was possible (no live ControlMaster, or
    * no `ssh` executable), so nothing was spawned (`sessionId` is empty) — see
    * `PtyCreateOptions.requireRemote` for what used to happen instead. The renderer shows the
@@ -326,6 +338,46 @@ export interface CanvasNodeState {
   kind: NodeKind
   position: { x: number; y: number }
   size: { width: number; height: number }
+  /** Agent nodes opened through canvas-control: the named geometry choice persisted at spawn. */
+  controlSize?: 'compact' | 'normal'
+  /**
+   * Who this node belongs to. `worker` = opened by a control-capable agent on the operator's
+   * behalf and therefore the only kind of node automatic placement may arrange; `primary` = the
+   * operator's own workspace, never moved, resized or re-parented by anything automatic.
+   * ABSENT MEANS `primary` — every canvas saved before this field, and every manual UI open.
+   * See @shared/node-role.
+   */
+  role?: 'primary' | 'worker'
+  /**
+   * Generated nodes: one line naming who opened this node and the task it carried. Separate from
+   * `title` on purpose — the title is claimed by the agent's own session name as soon as there is
+   * one, and this is the fact that has to survive that retitle.
+   */
+  taskSummary?: string
+  /**
+   * group-only: this frame is a spawn tray — the control plane created it to collect the workers
+   * one agent node opened. A statement about the canvas, so it is shared; whether the tray is
+   * shown open or closed on a given screen stays machine-local.
+   */
+  taskFrame?: boolean
+  /**
+   * The rect (ROOT-space position + size) to give back when a node expanded out of its compact
+   * footprint is put away again. Absent = the node is at its own size. Same root-space rule, and
+   * the same reason, as `premaxRect`.
+   */
+  compactRect?: { x: number; y: number; width: number; height: number }
+  /**
+   * Operator intent: never move or resize this node automatically. Persisted in the shared file
+   * because it is a statement about this canvas, not about one screen.
+   */
+  pinned?: boolean
+  /**
+   * Set the first time the operator drags or resizes this node BY HAND. It is the durable memory
+   * of "I put it there", which automatic placement reads as a refusal. Programmatic placement
+   * (arrange, tidy, maximize, zone snap, the spawn-time tray) never sets it — those go through
+   * `setNodes` directly and never reach the change handler that writes it.
+   */
+  manualPlacement?: boolean
   title: string
   /**
    * Agent nodes only: while true (the default), the node title auto-tracks the agent's own
@@ -421,6 +473,18 @@ export interface CanvasNodeState {
    * (`core/trigger-arm-store.ts`), bound to the spec's exact content. See @shared/trigger.
    */
   trigger?: import('./trigger').TriggerSpec
+  /**
+   * Explicit visual override for THIS node or frame — the top tier of `resolveNodeAppearance`
+   * (@shared/appearance), above every `layoutRules.appearance` derivation rule.
+   *
+   * Git-shared CONTENT, deliberately: "make the reviewer frame red" is a statement about the
+   * canvas, and the team shares it. Which is exactly why it is treated as hostile input on every
+   * load path (`sanitizeNodeAppearances` in core/workspace-files) — the colour ends up in a CSS
+   * custom property, so it survives only as a literal hex value and anything else degrades to the
+   * built-in look. Nothing status-derived is ever written here: appearance the app computes from
+   * live agent state is rendered, never persisted.
+   */
+  appearance?: BorderAppearance
   /**
    * Set while the node is maximized to fill the viewport (issue #399): the rect to give back on
    * the toggle's second click — the node's ROOT-space (absolute canvas) position plus its size.
@@ -718,6 +782,20 @@ export interface Project {
    *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
   defaultPermissionMode?: AgentPermissionMode
   /**
+   * Shared canvas rules, in two halves that share one block: WHAT the automatic layout engine
+   * should do with this canvas (`spawn` / `tray`, @shared/canvas-layout-rules) and the appearance
+   * derivation table (`appearance`, @shared/appearance). GIT-SHARED and hand-editable, so it is
+   * read as hostile input on every load path, exactly like `nodes[].trigger`. Keys a build does
+   * not recognise are carried through rather than dropped — the two halves write the same block,
+   * and dropping is how one build would silently delete the other's rules on the next save.
+   *
+   * What is deliberately NOT here: WHETHER the engine runs (`Settings.canvasLayout.enabled`,
+   * default off) and the machine-local appearance (window edge, reduced-motion, effects-off, in
+   * `Settings.appearance`). Cloning a repo must never restyle someone's app or start rearranging
+   * their canvas.
+   */
+  layoutRules?: CanvasLayoutRules & ProjectLayoutRules
+  /**
    * Per-project capability switch: agents may drive browser nodes THEY opened in this project.
    * GIT-SHARED (rides .nodeterm/project.json) and therefore hostile input — the raw bit is read
    * ONLY through `projectCapabilityFlagInFile` (@shared/project-capabilities, strict `=== true`,
@@ -947,6 +1025,8 @@ export interface PtyApi {
 export type WorkspaceMigrationKind = 'v2' | 'exec'
 
 export interface WorkspaceApi {
+  loadReconciled?(clientId?: string): Promise<import('./workspace-reconciliation').WorkspaceRevisionView>
+  saveReconciled?(request: import('./workspace-reconciliation').WorkspaceRevisionRequest): Promise<import('./workspace-reconciliation').WorkspaceRevisionOutcome>
   load(): Promise<Workspace>
   save(workspace: Workspace): Promise<void>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
@@ -964,6 +1044,9 @@ export interface WorkspaceApi {
   onCorruptRecovered(cb: (backupFile: string) => void): () => void
   /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
   onExternalChange(cb: (project: Project) => void): () => void
+  /** Fired when THIS core wrote the project itself (Server Edition headless canvas control: an agent
+   *  opened, renamed, moved, closed…). Not an outside edit — the renderer merges it, never asks. */
+  onServerChange(cb: (project: Project) => void): () => void
 }
 
 export interface ProjectSettingsApi {
@@ -972,11 +1055,11 @@ export interface ProjectSettingsApi {
   /** Whole-document write of the git-shared `.nodeterm/settings.json`. See
    *  `WorkspaceStore.writeProjectSettings` for the false-vs-true contract. */
   writeShared(projectId: string, doc: import('./project-settings').ProjectSettingsDoc): Promise<boolean>
-  /** This machine's own overlay; `local: undefined` clears it. */
+  /** Caller-bound known-leaf delta for this host's local overlay. */
   updateLocal(
     projectId: string,
-    local: import('./project-settings').ProjectLocalSettings | undefined
-  ): Promise<boolean>
+    request: import('./local-settings-reconciliation').LocalSettingsRequest
+  ): Promise<import('./local-settings-reconciliation').LocalSettingsOutcome>
   /** Resolved settings + per-family trust verdict for one project — `null` for an unknown id. The
    *  renderer cache (`renderer/state/projectLaunchInfo.ts`) warms this on activate and never awaits
    *  it inline; a caller wanting the raw handshake calls this directly instead. */
@@ -1239,6 +1322,31 @@ export interface ObservedClaudeAccount {
   remote?: boolean
 }
 
+/**
+ * One node's last-known agent status as the shell's status MIRROR holds it (`core/agent-status-mirror`),
+ * served on request so a freshly (re)loaded renderer can paint badges BEFORE the next hook event.
+ * The mirror restores across a Server/app restart; without this the canvas showed every pane idle
+ * until each one happened to post again. A display SEED only: nothing may gate on it (the mirror's
+ * `restored` rule for messaging is unchanged), and the renderer applies its own freshness cut.
+ */
+/** Re-exported so every `NodeTerminalApi` consumer speaks one vocabulary (see ./node-status). */
+export type { PaneEvidence }
+
+export interface AgentStatusSnapshotEntry {
+  state?: AgentState
+  agentId?: AgentId
+  sessionId?: string
+  /** When the mirror last asserted `state` (ms epoch). The renderer drops entries older than its cut. */
+  updatedAt: number
+  /** `state` came off disk at boot and nothing has been heard since (mirror `restored`). */
+  restored?: boolean
+}
+
+export interface AgentStatusSnapshot {
+  takenAt: number
+  nodes: Record<string, AgentStatusSnapshotEntry>
+}
+
 export interface SpeechSettings {
   engine: 'whisper' | 'cloud'
   /** WhisperModelInfo id — meaningful while engine === 'whisper'. */
@@ -1331,6 +1439,16 @@ export interface Settings {
    *  keeps the active project expanded and collapses the others, off leaves everything expanded.
    *  Explicit toggles live in `sidebarCollapsedItems` and always win. */
   sidebarAutoCollapse: boolean
+  /**
+   * Automatic canvas layout (`core/canvas-layout/`) — this machine's switch and its default
+   * rules. **`enabled` lives HERE and nowhere else, and defaults to off.** A shared project file
+   * must not be able to switch on automatic rearrangement for everyone who clones the repo, which
+   * is the same rule the reduced-motion preference follows and for the same reason: what an
+   * application is allowed to do to your screen is not the repository's decision. Absent (or any
+   * shape this build does not recognise) reads as off, so an existing install upgrades to
+   * byte-identical behaviour. See @shared/canvas-layout-rules.
+   */
+  canvasLayout?: CanvasLayoutSettings
   /** Persisted disclosure choices for the sessions tree, keyed `project:<id>` and
    *  `project:<id>:group:<groupId>` (true = collapsed). Pruned on every write against the live
    *  tree, so a deleted frame or project cannot grow settings.json forever. */
@@ -1467,6 +1585,9 @@ export interface Settings {
   /** Minutes a terminal may sit fully offscreen before its xterm+PTY client is torn down in
    *  place (tmux keeps the session; re-approach reattaches and redraws). 0 = never. */
   offscreenTerminalMinutes: number
+  /** One-shot marker for the renderer-memory default change. Absent files that still carry the
+   *  old 10-minute value are moved to the 1-minute default; a custom value is preserved. */
+  rendererMemoryPolicyMigrated: boolean
   /** AI commit message agent: a local coding-agent CLI run read-only. */
   commitAgent: 'claude' | 'codex' | 'custom'
   /** For commitAgent='custom': command template; {prompt} placeholder optional (else stdin). */
@@ -1610,6 +1731,23 @@ export interface Settings {
   notchWidth: number
   /** Expand the notch panel on hover (after a short dwell). Off = click the capsule to expand. */
   notchHoverExpand: boolean
+  /**
+   * MACHINE-LOCAL visual preferences (@shared/appearance): the window/app edge, the global default
+   * for node and group borders, and the two accessibility switches.
+   *
+   * Machine-local on purpose, and the split is load-bearing. The window edge is a statement about
+   * THIS display, so `resolveWindowEdgeAppearance` takes no project rules at all — a git-shared
+   * project.json is structurally incapable of painting someone's window frame. `reducedMotion` and
+   * `effectsOff` live here for the stronger version of the same reason: they are applied LAST and
+   * override every shared rule, because accessibility is never something a repo file can switch
+   * back on. The per-canvas half (derivation rules, per-node overrides) rides
+   * `Project.layoutRules.appearance` instead.
+   *
+   * Optional and absent from DEFAULT_SETTINGS: absent means built-in defaults, i.e. the exact look
+   * of the release before this setting existed. Hand-editable, so it is re-read through
+   * `sanitizeAppearanceSettings` rather than trusted by its type.
+   */
+  appearance?: AppearanceSettings
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
   /** Keyboard-shortcut overrides by command id (see shared/keybindings.ts). Absent id = the
@@ -1635,6 +1773,30 @@ export interface Settings {
    *  strands a live session gets their canvas back without downgrading the app. Neither value ever
    *  admits a forged token. */
   hookIdentityStrict?: boolean
+}
+
+export const OFFSCREEN_TERMINAL_MINUTES_DEFAULT = 1
+export const OFFSCREEN_TERMINAL_MINUTES_LEGACY_DEFAULT = 10
+
+/**
+ * Apply the one-shot renderer-memory default migration to an already-merged settings snapshot.
+ * Returns true when the caller owes a persistence write. Shared by SettingsStore and the renderer:
+ * the latter can be loaded from a newly-built static bundle while the old Server process is still
+ * running, so putting the migration only in the server would postpone the memory fix to restart.
+ */
+export function applyRendererMemoryPolicyMigration(
+  saved: Partial<Settings> | null | undefined,
+  merged: Settings
+): boolean {
+  if (saved?.rendererMemoryPolicyMigrated) return false
+  if (
+    saved?.offscreenTerminalMinutes === undefined ||
+    saved.offscreenTerminalMinutes === OFFSCREEN_TERMINAL_MINUTES_LEGACY_DEFAULT
+  ) {
+    merged.offscreenTerminalMinutes = OFFSCREEN_TERMINAL_MINUTES_DEFAULT
+  }
+  merged.rendererMemoryPolicyMigrated = true
+  return true
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -1667,6 +1829,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
+  canvasLayout: { enabled: false },
   sidebarCollapsedItems: {},
   sidebarGrouping: 'project',
   defaultProjectView: 'canvas',
@@ -1690,7 +1853,8 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
   tmuxLeadPaneWidth: 0,
-  offscreenTerminalMinutes: 10,
+  offscreenTerminalMinutes: OFFSCREEN_TERMINAL_MINUTES_DEFAULT,
+  rendererMemoryPolicyMigrated: true,
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',
@@ -2592,6 +2756,10 @@ export interface ClaudeCliCaps {
    */
   sessionIdFlag: boolean
   /**
+   * Whether the installed CLI supports Remote Control.
+   */
+  remoteControlFlag: boolean
+  /**
    * Whether this CLI accepts `-n, --name <name>` ("Set a display name for this session", measured
    * verbatim on claude 2.1.257), which lets nodeterm NAME the session it launches instead of
    * leaving the CLI to auto-generate one.
@@ -2652,7 +2820,8 @@ export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
   autoPermissionMode: false,
   fullscreenTui: false,
   sessionIdFlag: false,
-  nameFlag: false
+  nameFlag: false,
+  remoteControlFlag: false
 }
 
 /** Whether a Codex node launched on this machine right now would get a managed shared identity.
@@ -3246,6 +3415,36 @@ export interface NodeTerminalApi {
    *  through the same `renameSession` funnel as the node header. Desktop-only signal, like
    *  `onAgentRefreshNode`. */
   onAgentRenameNode(listener: (payload: { nodeId: string; title: string }) => void): () => void
+  /** Last-known status per node from the shell's mirror — a display seed for a fresh renderer
+   *  (see `AgentStatusSnapshot`). Both shells serve it from core. */
+  agentStatusSnapshot(): Promise<AgentStatusSnapshot>
+  /**
+   * Prove whether the terminal backend behind each node id is still there. Answers every id it was
+   * given; `'unknown'` for anything it could not check, including on a shell that wired no prober.
+   * This is the ONLY input to the `failed` status badge (`shared/node-status.ts`) — the renderer
+   * never infers a failure from what a terminal looks like, and a `dead` answer here is
+   * double-checked in core before it is returned. Both shells serve it from
+   * `core/node-status-service.ts`; a relay tab asks the REMOTE core, which is where its nodes live.
+   */
+  nodePaneEvidence(nodeIds: string[]): Promise<Record<string, PaneEvidence>>
+  taskContext: import('./remote-nav/task-context').TaskContextApi
+  /**
+   * Automatic canvas layout (`core/canvas-layout/`). `plan` returns what the engine WOULD do,
+   * never applies it — the renderer previews the answer and applies the ops itself, so the one
+   * place a node is actually moved is the same `setNodes` every manual gesture goes through.
+   *
+   * A plan whose `stoodDown` is set is an empty answer WITH a reason (the feature is off on this
+   * machine, another instance holds the project's lease and is named, or there is no project).
+   * That distinction is the point: an empty `ops` with no reason cannot be told apart from "there
+   * was nothing to do". Both shells serve it from one core body; see `canvas-layout-parity`.
+   */
+  canvasLayout: {
+    plan(request: LayoutPlanRequest): Promise<LayoutPlan>
+    apply(request: import('./canvas-layout').LayoutCommitRequest): Promise<import('./canvas-layout').LayoutCommitOutcome>
+    inverse(request: import('./canvas-layout').LayoutCommitRequest): Promise<import('./canvas-layout').LayoutCommitOutcome>
+    /** Give the lease back — on project switch, or when the renderer goes away. */
+    release(projectId: string, holder: string, leaseToken?: string): Promise<boolean>
+  }
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

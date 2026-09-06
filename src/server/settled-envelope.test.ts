@@ -55,21 +55,27 @@ const request = {
 afterEach(() => vi.useRealTimers())
 
 describe('sendSettledEnvelope', () => {
-  it('submits the first fresh-pane delivery only after its envelope footer is visible', async () => {
+  it('submits only after the footer is visible and verifies the consumed turn by hook receipt', async () => {
     const listeners = new Set<(event: ReceiptEvent) => void>()
     const writes: Array<{ text: string; enter: boolean | undefined }> = []
     let pasted = ''
+    let submitted = false
     const pty: SettledEnvelopePty = {
       captureSession: async () =>
-        pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer',
+        submitted
+          ? 'Claude working'
+          : pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer',
       sendText: async (_nodeId, text, opts) => {
         writes.push({ text, enter: opts?.enter })
         if (text) pasted = text
-        else queueMicrotask(() => {
-          for (const listener of listeners) {
-            listener({ nodeId: 'target', state: 'working', newTurn: true, verified: true })
-          }
-        })
+        else {
+          submitted = true
+          queueMicrotask(() => {
+            for (const listener of listeners) {
+              listener({ nodeId: 'target', state: 'working', newTurn: true, verified: true })
+            }
+          })
+        }
         return true
       }
     }
@@ -82,13 +88,55 @@ describe('sendSettledEnvelope', () => {
     )
 
     expect(outcome.kind).toBe('delivered')
+    expect(outcome).toMatchObject({ signal: 'newTurn' })
     expect(writes).toHaveLength(2)
     expect(writes[0]).toMatchObject({ enter: false })
     expect(writes[0].text).toContain('--- END NODETERM MESSAGE NONCE0123456 ---')
     expect(writes[1]).toEqual({ text: '', enter: true })
   })
 
-  it('keeps a failed post-paste submit on the unchanged stalled outcome path', async () => {
+  it('presses Enter once more when the first submit leaves the envelope composed', async () => {
+    const listeners = new Set<(event: ReceiptEvent) => void>()
+    const writes: Array<{ text: string; enter: boolean | undefined }> = []
+    let pasted = ''
+    let enters = 0
+    const pty: SettledEnvelopePty = {
+      captureSession: async () =>
+        enters >= 2 ? 'Claude working' : `Claude composer\n${pasted.split('\n').at(-1) ?? ''}`,
+      sendText: async (_nodeId, text, opts) => {
+        writes.push({ text, enter: opts?.enter })
+        if (text) pasted = text
+        else {
+          enters += 1
+          if (enters >= 2) {
+            queueMicrotask(() => {
+              for (const listener of listeners) {
+                listener({ nodeId: 'target', state: 'working', newTurn: true, verified: true })
+              }
+            })
+          }
+        }
+        return true
+      }
+    }
+
+    const outcome = await deliverAgentMessage(
+      request,
+      deliveryDeps(pty, (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      })
+    )
+
+    expect(outcome).toMatchObject({ kind: 'delivered', signal: 'newTurn' })
+    expect(writes).toHaveLength(3)
+    expect(writes.slice(1)).toEqual([
+      { text: '', enter: true },
+      { text: '', enter: true }
+    ])
+  })
+
+  it('reports stalled only after both bounded submit attempts leave the composer unchanged', async () => {
     vi.useFakeTimers()
     const writes: Array<{ text: string; enter: boolean | undefined }> = []
     let pasted = ''
@@ -109,6 +157,10 @@ describe('sendSettledEnvelope', () => {
     const outcome = await run
 
     expect(outcome.kind).toBe('stalled')
-    expect(writes.at(-1)).toEqual({ text: '', enter: true })
+    expect(writes).toHaveLength(3)
+    expect(writes.slice(1)).toEqual([
+      { text: '', enter: true },
+      { text: '', enter: true }
+    ])
   })
 })

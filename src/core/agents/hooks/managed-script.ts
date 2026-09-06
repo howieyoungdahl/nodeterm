@@ -131,7 +131,8 @@ export function buildManagedScript(
 ): string {
   return [
     '#!/bin/sh',
-    ...(identityRoot ? [codexThreadIdentityResolverSh(identityRoot)] : []),
+    // Identity refusal precedes the node gate too: drain the writer and keep hook stdout empty.
+    ...(identityRoot ? [codexThreadIdentityResolverSh(identityRoot, 'hook')] : []),
     '# GATE FIRST, and drain stdin before bailing (issues #186/#187). Order is load-bearing twice:',
     '#  - The codex thread-identity prelude above may DERIVE the node id (and endpoint) from its',
     '#    thread id, so the gate cannot move above it — but nothing below needs to run for a',

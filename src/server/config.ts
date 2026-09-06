@@ -1,5 +1,6 @@
 import os from 'os'
 import path from 'path'
+import { assignmentConfig, type CanonicalAssignmentConfig } from '../core/agents/canonical-assignment'
 import { parseTrustedNets, DEFAULT_TRUSTED_NETS_SPEC, type TrustProxyConfig } from './proxy-trust'
 
 /**
@@ -7,6 +8,8 @@ import { parseTrustedNets, DEFAULT_TRUSTED_NETS_SPEC, type TrustProxyConfig } fr
  * process environment + CLI argv, then consumed by `startServer` (src/server/index.ts).
  */
 export type ServerConfig = {
+  /** Explicit operator-pinned canonical read API; not an issuer/recipient authenticator. */
+  assignmentAuthority?: CanonicalAssignmentConfig
   port: number
   host: string
   dataDir: string
@@ -49,6 +52,11 @@ export type ServerConfig = {
    * NODETERM_CANVAS_CONTROL discovery bit injected by HookServer.
    */
   canvasControl?: boolean
+  /**
+   * How often the Server calls the operator plane's conservative dead-card sweep engine.
+   * Default 30 minutes; zero disables only the periodic trigger, not POST /opsapi/sweep.
+   */
+  deadCardReapMinutes?: number
   /**
    * Reverse-proxy SSO trust (issue #29): requests whose TCP peer is inside `nets` and
    * which carry `header` (non-empty) are authenticated without a session cookie.
@@ -123,6 +131,20 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     args['canvas-control'] !== undefined
       ? truthy(args['canvas-control'])
       : truthy(env.NODETERM_SERVER_CANVAS_CONTROL)
+  const rawDeadCardReapMinutes = pick(
+    'dead-card-reap-minutes',
+    'NODETERM_DEAD_CARD_REAP_MINUTES',
+    '30'
+  ).trim()
+  const parsedDeadCardReapMinutes = Number(rawDeadCardReapMinutes)
+  // Hand-edited service env must degrade to the safe documented default, never to a tighter or
+  // disabled cleanup policy by accident. Cap at one week so a typo cannot effectively turn it off.
+  const deadCardReapMinutes =
+    rawDeadCardReapMinutes !== '' &&
+    Number.isFinite(parsedDeadCardReapMinutes) &&
+    parsedDeadCardReapMinutes >= 0
+      ? Math.min(parsedDeadCardReapMinutes, 7 * 24 * 60)
+      : 30
 
   // Headless binds nothing, so the "plain HTTP on a public interface" hazard the loopback refusal
   // guards against does not apply — a stray NODETERM_HOST must not fail a headless boot.
@@ -155,6 +177,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
   }
 
   return {
+    assignmentAuthority: assignmentConfig(env),
     port,
     host,
     dataDir,
@@ -163,6 +186,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     passwordSeed,
     trustProxy,
     headless,
-    canvasControl
+    canvasControl,
+    deadCardReapMinutes
   }
 }

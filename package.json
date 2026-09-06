@@ -24,6 +24,7 @@
     "rebuild": "node scripts/patch-node-pty.mjs && electron-rebuild -f -w node-pty,smart-whisper",
     "server:build": "esbuild src/server/main.ts --bundle --platform=node --format=cjs --outfile=out/server/main.cjs --external:node-pty --external:ws --external:smart-whisper --tsconfig=tsconfig.node.json",
     "host:build": "esbuild src/session-host/host.ts --bundle --platform=node --format=cjs --outfile=out/session-host/host.cjs --external:node-pty --tsconfig=tsconfig.node.json",
+    "updater:build": "esbuild src/server/update-main.ts --bundle --platform=node --format=cjs --outfile=out/server/updater.cjs --tsconfig=tsconfig.node.json && esbuild src/server/update-install.ts --bundle --platform=node --format=cjs --outfile=out/server/update-install.cjs --tsconfig=tsconfig.node.json",
     "server:start": "node out/server/main.cjs",
     "server:dev": "npm run build && npm run server:build && node out/server/main.cjs",
     "make-icon": "node scripts/make-icon.mjs",

@@ -114,7 +114,12 @@ describe('every CSS variable resolves', () => {
     '--cmascot-h',
     '--cmascot-sheet-w',
     '--cmascot-sheet-h', // notch HUD sprite sheets
-    '--swimlane-color' // GlobalKanbanView swimlane left border, per project
+    '--swimlane-color', // GlobalKanbanView swimlane left border, per project
+    // Persistent visual preferences: set per surface by the resolved appearance
+    // (@shared/appearance `appearanceStyleVars`), absent when nothing is configured — which is
+    // exactly why every rule that reads them supplies a fallback.
+    '--nt-appearance-color',
+    '--nt-appearance-thickness'
   ])
 
   it('references no variable that is never defined', () => {

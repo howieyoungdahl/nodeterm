@@ -10,6 +10,17 @@ import {
   NODE_COLORS,
   type NodeColor
 } from '../shared/node-colors'
+import {
+  controlNodeSizeError,
+  resolveControlNodeSize,
+  resolveControlNodeSizeName
+} from '../shared/control-node-size'
+import {
+  planWorkerFrame,
+  workerFrameLabel,
+  workerNodeTitle,
+  workerTaskSummary
+} from '../shared/worker-frame'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../shared/sticky-write'
 import type { WorkspaceStore } from '../core/workspace-store'
 import {
@@ -39,6 +50,14 @@ import type {
   Settings,
   Workspace
 } from '../shared/types'
+import {
+  buildBoardView,
+  formatBoardMessage,
+  formatListMessage,
+  inventoryEntries
+} from './canvas-inventory'
+import { SpawnHandlerState, type SpawnHandlerSnapshot } from './spawn-handler-state'
+import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 export interface ServerControlReply {
   ok: boolean
@@ -89,7 +108,16 @@ export interface HeadlessNodeFactoryDeps {
   publishProject?: (project: Project) => void
   schedule?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearSchedule?: (timer: ReturnType<typeof setTimeout>) => void
-  /** Injectable only so tests can seed creator facts; production uses a fresh process-local ledger. */
+  /** Test seam for the bounded CLI-capability preflight. Production uses 5 seconds. */
+  capabilityTimeoutMs?: number
+  /** Test seam for the bounded PTY + initial-command launch. Production uses 15 seconds. */
+  launchTimeoutMs?: number
+  /** Shared health observer. Omitted in unit tests that do not inspect handler liveness. */
+  spawnHandlerState?: SpawnHandlerState
+  /** Shared with operator mutations so two stale workspace snapshots cannot overwrite each other. */
+  mutationQueue?: WorkspaceMutationQueue
+  /** Injectable so tests can seed creator facts and so the Server shell can supply the DURABLE
+   *  ledger (`createPersistentHeadlessNodeOwnership`); the default is the in-memory one. */
   ownership?: HeadlessNodeOwnership
 }
 
@@ -106,9 +134,21 @@ export interface HeadlessNodeOwnership {
 }
 
 /**
- * Creator proof for Server Edition canvas mutations. Deliberately process-local: after a service
- * restart, a git-shared/hand-editable project file cannot reassert who created a node. Unknown
- * ownership therefore fails closed until this server run records a fresh agent-requested spawn.
+ * Creator proof for Server Edition canvas mutations, held in memory for this process only.
+ *
+ * The rule this encodes is unchanged and still absolute: ownership may never be rebuilt from
+ * CANVAS state — a git-shared/hand-editable project file, a node title, hook history or a
+ * surviving tmux name are all writable or stale, so none of them can reassert who created a node.
+ * Unknown ownership fails closed.
+ *
+ * What that rule never said is that ownership may not be WRITTEN DOWN by the server itself.
+ * `createPersistentHeadlessNodeOwnership` (node-ownership-store.ts) does exactly that, in a 0600
+ * file in the Server's own data dir — the same trust class as `node-tokens/` and
+ * `node-auth-key.bin`, which already carry identity across restarts — and that is what the Server
+ * shell wires up, so a director loop keeps its grants over a restart.
+ *
+ * This in-memory version remains the default for tests and for any desktop-less path with no data
+ * directory to own: same interface, same fail-closed semantics, nothing durable.
  */
 export function createHeadlessNodeOwnership(): HeadlessNodeOwnership {
   const owners = new Map<string, HeadlessNodeOwner>()
@@ -132,7 +172,54 @@ const GROUP_PAD = 28
 const GROUP_HEADER = 34
 const AFTER_RETRY_MS = 500
 const AFTER_RETRY_LIMIT = 5
+export const SERVER_CAPABILITY_TIMEOUT_MS = 5_000
+export const SERVER_LAUNCH_TIMEOUT_MS = 15_000
 const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini'])
+
+type DeadlineResult<T> =
+  | { kind: 'settled'; value: T }
+  | { kind: 'rejected' }
+  | { kind: 'timeout' }
+
+interface PreparedNodeLaunch {
+  project: Project
+  created: CanvasNodeState[]
+  commands: Map<string, string>
+  after: string[]
+  verb: 'open-terminal' | 'open-agent'
+  agentId?: BuiltinAgentId
+}
+
+/**
+ * Observe a promise behind a bounded deadline without abandoning its rejection handler. The
+ * underlying PTY operation is not cancellable, so a timeout reports uncertainty while this
+ * observer keeps consuming a late resolve/reject; otherwise a late rejection would become an
+ * unhandled process error after the control request had already answered.
+ */
+function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<DeadlineResult<T>> {
+  return new Promise((resolve) => {
+    let answered = false
+    const timer = setTimeout(() => {
+      if (answered) return
+      answered = true
+      resolve({ kind: 'timeout' })
+    }, Math.max(1, timeoutMs))
+    void promise.then(
+      (value) => {
+        if (answered) return
+        answered = true
+        clearTimeout(timer)
+        resolve({ kind: 'settled', value })
+      },
+      () => {
+        if (answered) return
+        answered = true
+        clearTimeout(timer)
+        resolve({ kind: 'rejected' })
+      }
+    )
+  })
+}
 
 function token(): string {
   return randomBytes(4).toString('hex')
@@ -468,6 +555,38 @@ function ungroupPersistedNodes(
   }
 }
 
+/**
+ * Move `ids` INTO an existing frame, keeping every root-space position exactly where it is and
+ * growing the frame (and its own ancestors) around them. The mirror of `groupPersistedNodes` for
+ * the case where the container already exists; a node that is an ancestor of the frame is skipped
+ * rather than creating a cycle.
+ */
+function reparentPersistedInto(
+  nodes: CanvasNodeState[],
+  ids: readonly string[],
+  groupId: string
+): { nodes: CanvasNodeState[]; changed: CanvasNodeState[] } {
+  const frame = nodes.find((node) => node.id === groupId)
+  if (!frame || frame.kind !== 'group') return { nodes, changed: [] }
+  const frameRoot = rootPosition(nodes, frame)
+  const movable = new Set(
+    ids.filter((id) => id !== groupId && !isDescendant(nodes, groupId, id))
+  )
+  if (!movable.size) return { nodes, changed: [] }
+  const before = new Map(nodes.map((node) => [node.id, node]))
+  const moved = nodes.map((node) => {
+    if (!movable.has(node.id)) return node
+    const root = rootPosition(nodes, node)
+    return {
+      ...node,
+      parentId: groupId,
+      position: { x: root.x - frameRoot.x, y: root.y - frameRoot.y }
+    }
+  })
+  const next = groupsFirst(fitAncestorChain(moved, groupId))
+  return { nodes: next, changed: next.filter((node) => before.get(node.id) !== node) }
+}
+
 function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
   return {
     cwd: node.cwd || project.cwd,
@@ -487,17 +606,26 @@ function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
  * Every workspace read/modify/save transaction is serialized. That is important even on one
  * Node event loop: WorkspaceStore.load/save both await filesystem operations, so two simultaneous
  * `/control/open-agent` calls would otherwise read the same snapshot and the later save would
- * erase the earlier node. PTY creation happens after the node is durable, matching the renderer's
- * recoverable failure direction: a spawn error leaves a visible, reopenable node instead of an
- * invisible tmux session.
+ * erase the earlier node. PTY creation happens after the node is durable AND outside that
+ * transaction queue, matching the renderer's recoverable failure direction: a spawn error leaves
+ * a visible, reopenable node instead of an invisible tmux session, while a stalled backend cannot
+ * prevent an unrelated workspace transaction from starting.
  */
 export class HeadlessNodeFactory {
-  private serial: Promise<unknown> = Promise.resolve()
+  private readonly spawnHandlerState: SpawnHandlerState
+  private readonly mutationQueue: WorkspaceMutationQueue
   private attached = new Set<string>()
   /** Process-local proof that a caller created a node during THIS Server Edition run. */
   private ownership: HeadlessNodeOwnership
   /** Fresh server-spawned agents that have not emitted their first real working turn yet. */
   private awaitingFirstWorking = new Set<string>()
+  /** Agent launches now outside the workspace lock; remember a working hook that wins that race. */
+  private launchingAgents = new Set<string>()
+  private workingSeenDuringLaunch = new Set<string>()
+  /** Durable cards whose external PTY/command phase has not conclusively ended. */
+  private launchesInFlight = new Set<string>()
+  /** A close/stop that wins the race: a late backend must be killed, never orphaned. */
+  private cancelledLaunches = new Set<string>()
   /**
    * Server-local `open-project` grants. The browser shell's grant ledger is process-local too,
    * but Server Edition has its own process and handler. A service restart deliberately clears
@@ -511,15 +639,46 @@ export class HeadlessNodeFactory {
 
   constructor(private readonly deps: HeadlessNodeFactoryDeps) {
     this.ownership = deps.ownership ?? createHeadlessNodeOwnership()
+    this.spawnHandlerState = deps.spawnHandlerState ?? new SpawnHandlerState({ now: deps.now })
+    this.mutationQueue = deps.mutationQueue ?? new WorkspaceMutationQueue()
   }
 
-  private runExclusive<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.serial.then(work, work)
-    this.serial = run.then(
-      () => undefined,
-      () => undefined
-    )
-    return run
+  private runExclusive<T>(operation: string, work: () => Promise<T>): Promise<T> {
+    const ticket = this.spawnHandlerState.enqueue(operation)
+    const tracked = async (): Promise<T> => {
+      ticket.start()
+      try {
+        const value = await work()
+        ticket.finish()
+        return value
+      } catch (error) {
+        ticket.finish(error)
+        throw error
+      }
+    }
+    return this.mutationQueue.run(tracked)
+  }
+
+  /** Synchronous, non-blocking snapshot used by `/opsapi/health`. */
+  spawnHandlerSnapshot(): SpawnHandlerSnapshot {
+    return this.spawnHandlerState.snapshot()
+  }
+
+  /** Clear process-local state for cards the operator management plane removed. */
+  forgetNodes(nodeIds: readonly string[]): void {
+    for (const id of nodeIds) {
+      // Operator removal can win the same race as agent close: its pre-persist destroy may observe
+      // no backend while a non-cancellable create is still in flight. Preserve the cancellation
+      // marker until launch cleanup can destroy any backend that appears late.
+      if (this.launchesInFlight.has(id)) this.cancelledLaunches.add(id)
+      this.ownership.forget(id)
+      this.attached.delete(id)
+      this.awaitingFirstWorking.delete(id)
+      this.retryCount.delete(id)
+      const timer = this.retryTimers.get(id)
+      if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
+      this.retryTimers.delete(id)
+    }
   }
 
   private publishChangeSet(
@@ -636,6 +795,80 @@ export class HeadlessNodeFactory {
     return ids
   }
 
+  /**
+   * Resolve the read-only verbs' one subject: the project that owns the CALLING node.
+   *
+   * Deliberately NOT inside `runExclusive`. Every other verb takes the workspace mutation lock
+   * because it writes; a read that queued behind a 15-second agent launch would make the cheapest
+   * verb in the surface the slowest one, and `list` is what an agent runs to orient itself when it
+   * suspects something is stuck. `WorkspaceStore.load` returns a fresh snapshot, so a read
+   * concurrent with a write sees either the before or the after state — never a torn one.
+   */
+  private async readOnlySource(
+    verb: string,
+    sourceNodeId: string,
+    args: Record<string, string>
+  ): Promise<{ project: Project; node: CanvasNodeState } | ServerControlReply> {
+    const flagError = unsupportedFlags(args, new Set())
+    if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
+    const workspace = await this.deps.workspaceStore.load({ sideline: false })
+    const source = sourceProject(workspace, sourceNodeId)
+    if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
+    if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+      return { ok: false, error: 'source node is not a control-capable agent' }
+    }
+    return source
+  }
+
+  /**
+   * Every node of the caller's project. READ-ONLY, so the creator ledger is REPORTED
+   * (`opened-by-you`) rather than enforced: refusing to show a caller the nodes it did not open
+   * would leave an orchestrator that restarted unable to see the canvas it is standing on, for a
+   * disclosure the same caller could already get from `--after` refusals and its own project file.
+   * Verified node identity is still required — that gate is at the control-handler boundary and
+   * this verb takes it like every other one.
+   */
+  async list(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
+    const source = await this.readOnlySource('list', sourceNodeId, args)
+    if ('ok' in source) return source
+    const entries = inventoryEntries(source.project, {
+      stateOf: (nodeId) => this.deps.stateOf(nodeId),
+      agentIdOf: this.deps.agentIdOf,
+      openedByCaller: (nodeId) => this.ownsSpawn(sourceNodeId, nodeId)
+    })
+    return {
+      ok: true,
+      message: formatListMessage(source.project, sourceNodeId, entries),
+      result: {
+        project: { id: source.project.id, name: source.project.name },
+        caller: sourceNodeId,
+        nodes: entries
+      }
+    }
+  }
+
+  /**
+   * The caller's project as a kanban board. The board file stores only column ASSIGNMENTS — the
+   * cards are the canvas session nodes, derived live — so this reads `project.kanban` (which the
+   * Server's own workspace files already round-trip) and never writes it. `assign` is not
+   * implemented on this edition, so a project with no board on disk gets the virtual Ungrouped
+   * column and a line saying so, rather than the renderer's lazy default columns.
+   */
+  async board(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
+    const source = await this.readOnlySource('board', sourceNodeId, args)
+    if ('ok' in source) return source
+    const view = buildBoardView(source.project)
+    return {
+      ok: true,
+      message: formatBoardMessage(source.project, sourceNodeId, view),
+      result: {
+        project: { id: source.project.id, name: source.project.name },
+        columns: view.columns,
+        ungrouped: view.ungrouped
+      }
+    }
+  }
+
   async openTerminal(
     sourceNodeId: string,
     args: Record<string, string>,
@@ -656,7 +889,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('open-project', async () => {
       const flagError = unsupportedFlags(args, new Set(['cwd']))
       if (flagError) return { ok: false, error: `open-project: ${flagError}` }
       if (!verified) {
@@ -732,7 +965,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('close', async () => {
       const flagError = unsupportedFlags(args, new Set(['node']))
       if (flagError) return { ok: false, error: `close: ${flagError}` }
       if (!verified) {
@@ -778,6 +1011,9 @@ export class HeadlessNodeFactory {
       // Kill terminal panes first: the durable canvas must never lose a session whose outcome is
       // unknown. Frames have no PTY; closing one is the desktop `ungroup` transform followed by
       // removal of the frame alone, regardless of who owns its members.
+      for (const id of ids) {
+        if (!frameIds.has(id) && this.launchesInFlight.has(id)) this.cancelledLaunches.add(id)
+      }
       await Promise.all(
         ids
           .filter((id) => !frameIds.has(id))
@@ -822,15 +1058,7 @@ export class HeadlessNodeFactory {
         }
       }
 
-      for (const id of ids) {
-        this.ownership.forget(id)
-        this.attached.delete(id)
-        this.awaitingFirstWorking.delete(id)
-        this.retryCount.delete(id)
-        const timer = this.retryTimers.get(id)
-        if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
-        this.retryTimers.delete(id)
-      }
+      this.forgetNodes(ids)
       return {
         ok: true,
         message: `closed ${ids.length} owned node(s): ${ids.join(', ')}`,
@@ -844,7 +1072,7 @@ export class HeadlessNodeFactory {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('link', async () => {
       const flagError = unsupportedFlags(args, new Set(['from', 'to']))
       if (flagError) return { ok: false, error: `link: ${flagError}` }
       if (!verified) {
@@ -919,7 +1147,7 @@ export class HeadlessNodeFactory {
   }
 
   group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('group', async () => {
       const flagError = unsupportedFlags(args, new Set(['nodes', 'label', 'color']))
       if (flagError) return { ok: false, error: `group: ${flagError}` }
       let color: NodeColor | undefined
@@ -974,7 +1202,7 @@ export class HeadlessNodeFactory {
   }
 
   rename(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('rename', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'title']))
       if (flagError) return { ok: false, error: `rename: ${flagError}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -1010,8 +1238,67 @@ export class HeadlessNodeFactory {
     })
   }
 
+  resize(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply> {
+    return this.runExclusive('resize', async () => {
+      const flagError = unsupportedFlags(args, new Set(['node', 'size']))
+      if (flagError) return { ok: false, error: `resize: ${flagError}` }
+      if (!verified) {
+        return {
+          ok: false,
+          error: 'resize-identity-refused: Server Edition resize requires verified node identity'
+        }
+      }
+      if (args.size === undefined) {
+        return { ok: false, error: 'resize requires --size compact|normal' }
+      }
+      const sizeName = resolveControlNodeSizeName(args.size)
+      const size = resolveControlNodeSize(args.size, terminalSize(this.deps.settings()))
+      if (!sizeName || !size) return { ok: false, error: controlNodeSizeError('resize') }
+
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const source = sourceProject(workspace, sourceNodeId)
+      if (!source) return { ok: false, error: 'source node is not in exactly one saved project' }
+      if (!sourceCanControl(source.node, this.deps.agentIdOf)) {
+        return { ok: false, error: 'source node is not a control-capable agent' }
+      }
+
+      const id = (args.node ?? '').trim()
+      const projects = nodeProjects(workspace, id)
+      if (projects.length && (projects.length !== 1 || projects[0].id !== source.project.id)) {
+        return {
+          ok: false,
+          error: `resize-project-refused: ${id} is not exclusively in the caller's project`
+        }
+      }
+      const target = source.project.nodes.find((node) => node.id === id)
+      if (!target) return { ok: false, error: `resize: no node with id ${id}` }
+      if (!this.ownsMutation(sourceNodeId, id)) {
+        return this.ownershipRefusal('resize', sourceNodeId, id)
+      }
+      if (target.kind !== 'terminal') {
+        return { ok: false, error: 'resize: target must be a terminal node' }
+      }
+
+      const resized = { ...target, size, controlSize: sizeName }
+      source.project.nodes = source.project.nodes.map((node) =>
+        node.id === id ? resized : node
+      )
+      await this.deps.workspaceStore.save(workspace)
+      this.publish(source.project, [resized])
+      return {
+        ok: true,
+        message: `resized ${id} to ${sizeName} (${size.width}×${size.height})`,
+        result: { id, size }
+      }
+    })
+  }
+
   color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('color', async () => {
       const flagError = unsupportedFlags(args, new Set(['node', 'color']))
       if (flagError) return { ok: false, error: `color: ${flagError}` }
       if (!isNodeColor(args.color)) return { ok: false, error: invalidNodeColorMessage() }
@@ -1047,18 +1334,79 @@ export class HeadlessNodeFactory {
     })
   }
 
-  private open(
+  /**
+   * Put the workers this spawn just created under the spawner's tray frame (@shared/worker-frame).
+   * Mutates `project.nodes` in place — the caller is inside the workspace transaction and saves
+   * once, so a burst of spawns is a burst of single writes, not a write per node per frame.
+   *
+   * Presentation only: it creates no session, attaches to nothing, kills nothing and types
+   * nothing. Ownership is asked before any EXISTING node is re-parented, because re-parenting is
+   * a mutation and creator ownership is the boundary for those; the plan additionally refuses to
+   * move anything the operator pinned or placed by hand.
+   */
+  private applyWorkerFrame(
+    project: Project,
+    spawner: CanvasNodeState,
+    created: readonly CanvasNodeState[],
+    sourceNodeId: string
+  ): { groupId?: string; changed: CanvasNodeState[] } {
+    const plan = planWorkerFrame({
+      nodes: project.nodes,
+      spawnerId: spawner.id,
+      newWorkerIds: created.map((node) => node.id),
+      ropes: project.ropes ?? [],
+      owns: (id) => this.ownsSpawn(sourceNodeId, id)
+    })
+    if (plan.kind === 'none') return { changed: [] }
+    if (plan.kind === 'join') {
+      const joined = reparentPersistedInto(project.nodes, plan.memberIds, plan.groupId)
+      project.nodes = joined.nodes
+      return { changed: joined.changed }
+    }
+    const grouped = groupPersistedNodes(
+      project.nodes,
+      plan.memberIds,
+      project.nodes.filter((node) => node.kind === 'group').length,
+      workerFrameLabel(spawner.title),
+      isNodeColor(spawner.color) ? spawner.color : undefined
+    )
+    if (!grouped) return { changed: [] }
+    // The tray marker is how the NEXT spawn finds this frame — by fact, not by name, so a frame
+    // the operator renamed is still the same tray. And it ships COLLAPSED: "put away" is half of
+    // what a tray is for, and a tray that opens expanded leaves the operator looking at every
+    // worker anyway, which is the state the feature exists to end. One click opens it.
+    project.nodes = grouped.nodes.map((node) =>
+      node.id === grouped.groupId ? { ...node, taskFrame: true, collapsed: true } : node
+    )
+    const byId = new Map(project.nodes.map((node) => [node.id, node]))
+    return {
+      groupId: grouped.groupId,
+      changed: grouped.changed.map((node) => byId.get(node.id) ?? node)
+    }
+  }
+
+  private async open(
     sourceNodeId: string,
     verb: 'open-terminal' | 'open-agent',
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    const prepare = async (): Promise<ServerControlReply | PreparedNodeLaunch> => {
       const flagError = unsupportedFlags(
         args,
         verb === 'open-terminal'
           ? new Set(['count', 'cwd', 'cmd', 'after', 'project'])
-          : new Set(['agent', 'count', 'cwd', 'prompt', 'after', 'project', 'model'])
+          : new Set([
+              'agent',
+              'count',
+              'cwd',
+              'prompt',
+              'after',
+              'project',
+              'model',
+              'remote-control',
+              'size'
+            ])
       )
       if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
       if (!verified) {
@@ -1082,9 +1430,30 @@ export class HeadlessNodeFactory {
       if (unownedAfter) return this.ownershipRefusal(verb, sourceNodeId, unownedAfter)
 
       const settings = this.deps.settings()
-      const nodeSize = terminalSize(settings)
-      const caps = verb === 'open-agent' ? await this.deps.cliCaps() : null
-      const grokCaps = verb === 'open-agent' ? await this.deps.grokCaps() : null
+      const normalNodeSize = terminalSize(settings)
+      const nodeSizeName = verb === 'open-agent'
+        ? resolveControlNodeSizeName(args.size)
+        : undefined
+      const nodeSize = verb === 'open-agent'
+        ? resolveControlNodeSize(args.size, normalNodeSize)
+        : normalNodeSize
+      if (!nodeSize || (verb === 'open-agent' && !nodeSizeName)) {
+        return { ok: false, error: controlNodeSizeError(verb) }
+      }
+      const capabilityTimeout =
+        this.deps.capabilityTimeoutMs ?? SERVER_CAPABILITY_TIMEOUT_MS
+      const capsAttempt =
+        verb === 'open-agent'
+          ? await settleWithin(
+              Promise.resolve().then(() => this.deps.cliCaps()),
+              capabilityTimeout
+            )
+          : null
+      // Optional flags always degrade to absent. A stalled CLI probe may cost this bounded wait,
+      // but can neither kill the launch with a guessed flag nor monopolize the transaction queue.
+      const caps = capsAttempt?.kind === 'settled' ? capsAttempt.value : null
+      const grokAttempt = verb === 'open-agent' ? await settleWithin(Promise.resolve().then(() => this.deps.grokCaps()), capabilityTimeout) : null
+      const grokCaps = grokAttempt?.kind === 'settled' ? grokAttempt.value : null
       const agentId = args.agent as BuiltinAgentId | undefined
       if (verb === 'open-agent' && (!agentId || !SERVER_AGENTS.has(agentId))) {
         return {
@@ -1092,12 +1461,30 @@ export class HeadlessNodeFactory {
           error: 'open-agent: Server Edition v1 supports --agent claude|codex|gemini'
         }
       }
+      const remoteControl = args['remote-control']
+      if (remoteControl !== undefined && agentId !== 'claude') {
+        return {
+          ok: false,
+          error: 'remote-control-agent-refused: --remote-control requires --agent claude'
+        }
+      }
+      if (remoteControl !== undefined && caps?.remoteControlFlag !== true) {
+        return {
+          ok: false,
+          error:
+            'remote-control-unsupported: the installed Claude CLI does not advertise ' +
+            '`--remote-control`; open Claude normally and run `/rc [name]` inside the session'
+        }
+      }
       // The Server shell owns the same shared Codex app-server spine as desktop. Ask its boot-time
       // capability probe at the launch boundary: true routes through `nodeterm-codex`; every
       // unavailable/failed case stays on the safe bare command supplied by the shared assembler.
       const codexSharedIdentity =
         verb === 'open-agent' && agentId === 'codex'
-          ? await this.deps.codexSharedIdentity().catch(() => false)
+          ? await settleWithin(
+              Promise.resolve().then(() => this.deps.codexSharedIdentity()),
+              capabilityTimeout
+            ).then((result) => result.kind === 'settled' && result.value)
           : false
 
       const count = parseCount(args.count, verb === 'open-terminal' ? TERMINAL_LIMIT : AGENT_LIMIT)
@@ -1115,6 +1502,15 @@ export class HeadlessNodeFactory {
         if (state === 'working') this.awaitingFirstWorking.delete(depId)
       }
       const mustWait = after.some((depId) => afterStates.get(depId) !== 'done')
+      // Where this fan-out's numbering continues from: how many nodes this spawner has already
+      // opened in this project, read off the lineage ropes the control plane already writes. Two
+      // separate `open-agent` calls therefore do not both produce a "Claude 1".
+      const priorOpenedCount = ropes.filter(
+        (rope) =>
+          rope.source === source.node.id &&
+          target.nodes.some((node) => node.id === rope.target)
+      ).length
+      const ownerTitle = source.node.title
       const awaitWorking = after.filter((depId) =>
         afterStates.get(depId) !== 'done' &&
         afterStates.get(depId) !== 'working' &&
@@ -1126,13 +1522,17 @@ export class HeadlessNodeFactory {
         // unique (see `buildSessionName`). Still exactly one `nextId` call per node.
         const id = nextId('term')
         let command = args.cmd
-        let title = `Terminal ${startIndex + i + 1}`
+        // Generated cards say who opened them and what they run — "Terminal 13" and a bare
+        // "Claude" named neither. `titleAuto` still lets the agent's own session name replace
+        // this the moment there is one; the owner+task line lives in `taskSummary`, which that
+        // retitle does not touch.
+        let title = workerNodeTitle(ownerTitle, 'Terminal', priorOpenedCount + i + 1)
         let color: string = NODE_COLORS[(startIndex + i) % NODE_COLORS.length]
         let mintedSessionId: string | undefined
         let permissionMode
         if (verb === 'open-agent') {
           const config = AGENT_CONFIG[agentId as BuiltinAgentId]
-          title = config.label
+          title = workerNodeTitle(ownerTitle, config.label, priorOpenedCount + i + 1)
           color = config.color
           const resolvedMode = resolvePermissionMode(target, settings)
           permissionMode = agentId === 'claude'
@@ -1168,7 +1568,8 @@ export class HeadlessNodeFactory {
               ),
               launchCmdOverride: settings.agentLaunchCommands?.[agentId as BuiltinAgentId],
               sharedIdentity: codexSharedIdentity,
-              model: args.model
+              model: args.model,
+              remoteControl
             },
             this.deps.env ?? process.env
           ).command
@@ -1189,8 +1590,13 @@ export class HeadlessNodeFactory {
           kind: 'terminal',
           position: placeRight(target, source.node, nodeSize, created),
           size: { ...nodeSize },
+          ...(nodeSizeName ? { controlSize: nodeSizeName } : {}),
           title,
           ...(verb === 'open-agent' ? { titleAuto: true } : {}),
+          // Every node the control plane opens is a delegated WORKER: the only kind automatic
+          // placement is allowed to arrange. Manual UI opens carry no role and read as `primary`.
+          role: 'worker' as const,
+          taskSummary: workerTaskSummary(ownerTitle, verb === 'open-agent' ? args.prompt : args.cmd),
           color,
           group: null,
           tags: [],
@@ -1225,51 +1631,189 @@ export class HeadlessNodeFactory {
       target.nodes.push(...created)
       target.ropes = ropes
       target.bridges = bridges
+      // The tray: collect this spawner's workers under one frame (see @shared/worker-frame).
+      // Runs INSIDE the same transaction as the append, so the frame and its members are one
+      // save and one publish — a burst of spawns must not become a burst of merges.
+      const framed = this.applyWorkerFrame(target, source.node, created, sourceNodeId)
       await this.deps.workspaceStore.save(workspace)
       for (const node of created) {
         this.ownership.record(node.id, { sourceNodeId, projectId: target.id })
+        this.launchesInFlight.add(node.id)
       }
-      this.publish(target, created)
+      if (framed.groupId) {
+        this.ownership.record(framed.groupId, { sourceNodeId, projectId: target.id })
+      }
+      // Publish in the project's own order, which `groupsFirst` has already made parent-first:
+      // React Flow requires a frame to arrive before the children parented to it.
+      const touched = new Set([
+        ...created.map((node) => node.id),
+        ...framed.changed.map((node) => node.id)
+      ])
+      this.publish(target, target.nodes.filter((node) => touched.has(node.id)))
+      // The launch reads cwd/agent/account off these, never geometry — but returning the FINAL
+      // objects keeps "what we persisted" and "what we launch" one thing.
+      const finalById = new Map(target.nodes.map((node) => [node.id, node]))
+      return {
+        project: target,
+        created: created.map((node) => finalById.get(node.id) ?? node),
+        commands,
+        after,
+        verb,
+        agentId
+      }
+    }
+    const prepared = await this.runExclusive(verb, prepare)
 
-      const failed: string[] = []
-      for (const node of created) {
+    if ('ok' in prepared) return prepared
+    return this.launchPrepared(prepared)
+  }
+
+  /**
+   * Start durable nodes OUTSIDE the workspace transaction queue. PTY creation and command
+   * delivery cross process boundaries and are not cancellable; putting either behind `serial`
+   * meant one lost callback wedged every later canvas mutation for the life of the Server. The
+   * node is already persisted and published here, so a timeout can answer honestly without
+   * rolling back a backend whose eventual outcome is unknowable.
+   */
+  private async launchPrepared(plan: PreparedNodeLaunch): Promise<ServerControlReply> {
+    const ids = plan.created.map((node) => node.id)
+    const failed = new Set<string>()
+    const completed = new Set<string>()
+    const started = new Set<string>()
+    let expired = false
+
+    const launch = async (): Promise<void> => {
+      for (const node of plan.created) {
+        if (expired) break
+        if (this.cancelledLaunches.has(node.id)) {
+          failed.add(node.id)
+          completed.add(node.id)
+          this.cancelledLaunches.delete(node.id)
+          this.launchesInFlight.delete(node.id)
+          continue
+        }
+        started.add(node.id)
+        if (plan.verb === 'open-agent') this.launchingAgents.add(node.id)
         try {
-          const result = await this.attach(target, node)
+          const result = await this.attach(plan.project, node)
+          // The deadline cannot cancel a tmux/session-host request already in flight. If it later
+          // answers, keep the attached index honest but never type a command after reporting an
+          // unknown launch outcome to the caller.
+          if (expired) break
           if (!result.sessionId) {
-            failed.push(node.id)
+            failed.add(node.id)
+            completed.add(node.id)
             continue
           }
-          if (verb === 'open-agent' && result.fresh) this.awaitingFirstWorking.add(node.id)
-          const command = commands.get(node.id)
-          if (command && !(await this.deps.ptyManager.sendText(node.id, command))) failed.push(node.id)
+          if (
+            plan.verb === 'open-agent' &&
+            result.fresh &&
+            !this.workingSeenDuringLaunch.has(node.id)
+          ) {
+            this.awaitingFirstWorking.add(node.id)
+          }
+          const command = plan.commands.get(node.id)
+          if (command && !(await this.deps.ptyManager.sendText(node.id, command))) {
+            failed.add(node.id)
+          }
+          completed.add(node.id)
         } catch {
-          failed.push(node.id)
+          failed.add(node.id)
+          completed.add(node.id)
+        } finally {
+          // A close/stop can race either the attach or command await. Its first destroy may have
+          // run before this non-cancellable create established a backend, so repeat the exact-id
+          // destroy after the late operation settles. PtyManager coalesces concurrent destroys.
+          if (this.cancelledLaunches.has(node.id)) {
+            await this.deps.ptyManager
+              .destroySession(null, node.id, { everySocket: true })
+              .catch(() => undefined)
+            failed.add(node.id)
+            this.attached.delete(node.id)
+            this.cancelledLaunches.delete(node.id)
+          }
+          this.launchesInFlight.delete(node.id)
+          this.launchingAgents.delete(node.id)
+          this.workingSeenDuringLaunch.delete(node.id)
         }
       }
+    }
 
-      const ids = created.map((node) => node.id)
-      if (failed.length) {
-        return {
-          ok: false,
-          error:
-            `launch-failed: node(s) ${failed.join(', ')} were persisted but their PTY or initial ` +
-            'command could not be started; do not repeat the open request',
-          result: { ids, id: ids[0], after, failed }
-        }
+    const timeoutMs = this.deps.launchTimeoutMs ?? SERVER_LAUNCH_TIMEOUT_MS
+    // The serialized preparation ticket ends before this external phase starts. Keep the actual
+    // non-cancellable launch observable until its underlying promise settles, even if the caller
+    // has already received `launch-timeout`. Parallel opens produce parallel tickets; the health
+    // snapshot reports the oldest one without waiting on any of them.
+    const launchTicket = this.spawnHandlerState.enqueue(`${plan.verb}:launch`)
+    launchTicket.start()
+    const launchPromise = launch()
+    void launchPromise.then(
+      () => launchTicket.finish(),
+      (error) => launchTicket.finish(error)
+    )
+    const outcome = await settleWithin(launchPromise, timeoutMs)
+    if (outcome.kind === 'timeout') {
+      expired = true
+      const timedOut = ids.filter((id) => !completed.has(id))
+      for (const id of timedOut) {
+        // The one operation already started may still settle and needs its late-close guard. Nodes
+        // not yet reached by the sequential loop have no backend future and need no reservation.
+        if (!started.has(id)) this.launchesInFlight.delete(id)
+        this.launchingAgents.delete(id)
+        this.workingSeenDuringLaunch.delete(id)
       }
       return {
-        ok: true,
-        message:
-          `opened ${count} ${verb === 'open-agent' ? `${agentId} session` : 'terminal'}(s): ` +
-          ids.join(', ') +
-          (after.length ? `; waiting for ${after.join(', ')} before running` : ''),
-        result: { ids, id: ids[0], after }
+        ok: false,
+        error:
+          `launch-timeout: node(s) ${timedOut.join(', ')} were persisted, but their PTY or ` +
+          `initial command did not settle within ${timeoutMs}ms; later creations remain ` +
+          'available, but this launch may still finish — do not repeat the open request',
+        result: {
+          ids,
+          id: ids[0],
+          after: plan.after,
+          failed: [...new Set([...failed, ...timedOut])],
+          timedOut
+        }
       }
-    })
+    }
+
+    // `launch` catches per-node failures. This is only a defensive guard around a future edit
+    // that throws outside that loop; it must still answer by name rather than reject the socket.
+    if (outcome.kind === 'rejected') {
+      for (const id of ids) if (!started.has(id)) this.launchesInFlight.delete(id)
+      return {
+        ok: false,
+        error:
+          `launch-failed: node(s) ${ids.join(', ')} were persisted but their launch handler ` +
+          'failed; do not repeat the open request',
+        result: { ids, id: ids[0], after: plan.after, failed: ids }
+      }
+    }
+
+    if (failed.size) {
+      return {
+        ok: false,
+        error:
+          `launch-failed: node(s) ${[...failed].join(', ')} were persisted but their PTY or ` +
+          'initial command could not be started; do not repeat the open request',
+        result: { ids, id: ids[0], after: plan.after, failed: [...failed] }
+      }
+    }
+    return {
+      ok: true,
+      message:
+        `opened ${ids.length} ${
+          plan.verb === 'open-agent' ? `${plan.agentId} session` : 'terminal'
+        }(s): ` +
+        ids.join(', ') +
+        (plan.after.length ? `; waiting for ${plan.after.join(', ')} before running` : ''),
+      result: { ids, id: ids[0], after: plan.after }
+    }
   }
 
   sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('sticky', async () => {
       const parsed = parseStickyArgs(args)
       if ('error' in parsed) return { ok: false, error: `sticky: ${parsed.error}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -1336,9 +1880,11 @@ export class HeadlessNodeFactory {
   }
 
   /**
-   * Boot is intentionally inert. Creator proof is process-local and empty after restart, so even
-   * sending a persisted command would control a session this process cannot attribute. Owner opens
-   * and browser views are the only cold-spawn authority; current-run agent events drive arms below.
+   * Boot is intentionally inert, and stays inert now that creator proof SURVIVES a restart
+   * (node-ownership-store.ts). The ledger answers "who may act on this node", never "what should
+   * run without anyone asking": a persisted `pendingLaunch` is canvas data, so replaying one at
+   * boot would let a hand-edited project file drive a shell. Owner opens and browser views remain
+   * the only cold-spawn authority; current-run agent events drive arms below.
    */
   start(): Promise<void> {
     return Promise.resolve()
@@ -1346,12 +1892,15 @@ export class HeadlessNodeFactory {
 
   onAgentEvent(event: Pick<NormalizedAgentEvent, 'nodeId' | 'state'>): void {
     if (this.stopped || !event?.nodeId) return
-    if (event.state === 'working') this.awaitingFirstWorking.delete(event.nodeId)
+    if (event.state === 'working') {
+      if (this.launchingAgents.has(event.nodeId)) this.workingSeenDuringLaunch.add(event.nodeId)
+      this.awaitingFirstWorking.delete(event.nodeId)
+    }
     if (event.state === 'working' || event.state === 'done') void this.refreshArmed(event)
   }
 
   refreshArmed(observed?: Pick<NormalizedAgentEvent, 'nodeId' | 'state'>): Promise<void> {
-    return this.runExclusive(async () => {
+    return this.runExclusive('refresh-armed', async () => {
       if (this.stopped) return
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
       const changedByProject = new Map<Project, CanvasNodeState[]>()
@@ -1432,11 +1981,28 @@ export class HeadlessNodeFactory {
     this.retryTimers.set(nodeId, timer)
   }
 
+  /**
+   * Shutdown, NOT revocation.
+   *
+   * Everything dropped here is process-local scratch — in-flight launch bookkeeping, retry timers,
+   * and the per-run project grant cache. The creator ledger is deliberately NOT among them, and
+   * `this.ownership.clear()` used to be: harmless while ownership lived only in a Map that died
+   * with the process, and destructive the moment the Server shell started injecting the DURABLE
+   * store (`createPersistentHeadlessNodeOwnership`). `server/index.ts` close() runs
+   * `canvasControl?.stop()` — i.e. this method — and only then `nodeOwnership.flush()`, the call
+   * that exists to "land the last grant"; a clear in between turned that flush into the write that
+   * published `{"v":1,"owners":{}}`. Field symptom (2026-09-02): a service restart came back with
+   * every `list` row reading `opened-by-you=no` while the nodes and their tmux backends were all
+   * still alive, and the ledger's own mtime sat in the SIGTERM second, not the boot second.
+   *
+   * `HeadlessNodeOwnership.clear()` stays on the interface as the explicit "revoke every grant"
+   * primitive (and stays covered in node-ownership-store.test.ts). Stopping is simply not one.
+   */
   stop(): void {
     this.stopped = true
+    for (const id of this.launchesInFlight) this.cancelledLaunches.add(id)
     for (const timer of this.retryTimers.values()) (this.deps.clearSchedule ?? clearTimeout)(timer)
     this.retryTimers.clear()
-    this.ownership.clear()
     this.projectGrants.clear()
   }
 }

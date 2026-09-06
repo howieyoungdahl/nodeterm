@@ -149,6 +149,9 @@ describe('where the verbs sit in the routing tables', () => {
     // for a forgeable caller would authorize whoever forged it; new verb, so fail-closed from
     // day one strands nobody.
     expect([...requiresVerified].sort()).toEqual([
+      'message-ack',
+      'message-deliver',
+      'message-receipt',
       'notify',
       'open-project',
       'reply',

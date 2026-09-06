@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { rankQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { IconEditor } from './icons'
+import type { PaletteTranscriptStatus } from '../lib/usePaletteTranscriptSearch'
 
 export interface Command {
   id: string
@@ -38,6 +39,8 @@ interface CommandPaletteProps {
   onQueryChange?: (q: string) => void
   /** Pre-filtered commands appended verbatim (NOT re-filtered) — e.g. transcript hits. */
   extraCommands?: Command[]
+  /** Transcript capability/failure is separate from ordinary command/file matches. */
+  transcriptStatus?: PaletteTranscriptStatus
 }
 
 /** Case-insensitive subsequence match — "ntr" matches "New TeRminal". */
@@ -61,7 +64,8 @@ export function CommandPalette({
   onOpenFile,
   onRevealFile,
   onQueryChange,
-  extraCommands
+  extraCommands,
+  transcriptStatus = 'idle'
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
@@ -142,7 +146,17 @@ export function CommandPalette({
           }}
         />
         <div className="palette__list">
-          {items.length === 0 && <div className="palette__empty">No matches</div>}
+          {transcriptStatus !== 'idle' && (transcriptStatus !== 'success' || !extraCommands?.length) && (
+            <div role="status" aria-live="polite">
+              <div className="palette__section">Transcripts</div>
+              <div className="palette__empty">
+                {transcriptStatus === 'unavailable' ? 'Transcript search is unavailable here. Commands and files remain searchable.'
+                  : transcriptStatus === 'error' ? 'Transcript search failed. Change the query to retry.'
+                    : transcriptStatus === 'loading' ? 'Searching transcripts…' : 'No transcript matches.'}
+              </div>
+            </div>
+          )}
+          {items.length === 0 && <div className="palette__empty">{transcriptStatus === 'idle' ? 'No matches' : 'No matching commands or files'}</div>}
           {items.map((c, i) => (
             <div key={c.id} className="palette__row">
               {c.section && c.section !== items[i - 1]?.section && (

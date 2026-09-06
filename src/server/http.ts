@@ -54,6 +54,8 @@ export interface HttpHandlerOpts {
   /** Ticket store backing `GET /download` (Explorer file downloads). Omitted in tests that don't
    *  exercise it — the route then simply doesn't exist. */
   downloadTickets?: DownloadTickets
+  /** Dedicated bearer-authenticated loopback management plane. It owns all `/opsapi/*` auth. */
+  opsApi?: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
 }
 
 /** Parse the `nt_session=` value out of a Cookie header. Exported for the WS upgrade (Task 5). */
@@ -373,7 +375,7 @@ async function serveStatic(
 export function createHttpHandler(
   opts: HttpHandlerOpts
 ): (req: http.IncomingMessage, res: http.ServerResponse) => void {
-  const { auth, rendererDir, trustProxy, downloadTickets } = opts
+  const { auth, rendererDir, trustProxy, downloadTickets, opsApi } = opts
 
   return function handler(req: http.IncomingMessage, res: http.ServerResponse): void {
     void handle(req, res).catch(() => {
@@ -386,6 +388,14 @@ export function createHttpHandler(
     const url = new URL(req.url || '/', 'http://x')
     const pathname = url.pathname
     const method = req.method || 'GET'
+
+    // A separate principal and namespace: never let a browser session cookie or trusted-proxy
+    // header authenticate an operator request. The ops handler enforces TCP loopback + its bearer.
+    if (pathname === '/opsapi' || pathname.startsWith('/opsapi/')) {
+      if (opsApi) await opsApi(req, res)
+      else sendJson(res, 404, { error: 'not_found' })
+      return
+    }
 
     const proxyAuthed =
       trustProxy !== undefined && proxyAuthAllowed(trustProxy, req.headers, req.socket.remoteAddress)

@@ -1,5 +1,9 @@
 import { create } from 'zustand'
-import { DEFAULT_SETTINGS, type Settings } from '@shared/types'
+import {
+  applyRendererMemoryPolicyMigration,
+  DEFAULT_SETTINGS,
+  type Settings
+} from '@shared/types'
 
 interface SettingsState {
   settings: Settings
@@ -43,7 +47,13 @@ export const useSettings = create<SettingsState>((set, get) => ({
 
   async hydrate() {
     const s = await window.nodeTerminal.settings.load()
-    set({ settings: { ...DEFAULT_SETTINGS, ...s }, hydrated: true })
+    const merged = { ...DEFAULT_SETTINGS, ...s }
+    const migrated = applyRendererMemoryPolicyMigration(s, merged)
+    set({ settings: merged, hydrated: true })
+    // Static Server Edition assets can update without replacing the running server process. Save
+    // from the renderer too so a tab reload gets the one-minute release policy immediately and
+    // stamps it for the still-old SettingsStore; the new SettingsStore runs the same shared helper.
+    if (migrated) void window.nodeTerminal.settings.save(merged)
   },
 
   update(patch) {

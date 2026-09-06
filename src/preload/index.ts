@@ -137,6 +137,9 @@ const api: NodeTerminalApi = {
     }
   },
   workspace: {
+    loadReconciled: (clientId?: string) => ipcRenderer.invoke(IPC.workspaceLoadReconciled, clientId),
+    saveReconciled: (request: import('../shared/workspace-reconciliation').WorkspaceRevisionRequest) =>
+      ipcRenderer.invoke(IPC.workspaceSaveReconciled, request),
     load: () => ipcRenderer.invoke(IPC.workspaceLoad),
     save: (workspace: Workspace) => ipcRenderer.invoke(IPC.workspaceSave, workspace),
     probeFolder: (folder: string) => ipcRenderer.invoke(IPC.workspaceProbeFolder, folder),
@@ -156,14 +159,19 @@ const api: NodeTerminalApi = {
       const h = (_e: unknown, p: Project) => cb(p)
       ipcRenderer.on(IPC.workspaceExternalChange, h)
       return () => ipcRenderer.removeListener(IPC.workspaceExternalChange, h)
-    }
+    },
+    // Deliberate no-op on the desktop shell: nothing here writes the project file on an agent's
+    // behalf. `HeadlessNodeFactory` is Server Edition only — the desktop's canvas-control verbs run
+    // through the renderer's own React Flow state, and its watcher path stays on onExternalChange.
+    // A real subscription would be dead wiring for a channel this main process never broadcasts.
+    onServerChange: (_cb: (project: Project) => void) => () => {}
   },
   projectSettings: {
     read: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsRead, projectId),
     writeShared: (projectId: string, doc) =>
       ipcRenderer.invoke(IPC.projectSettingsWriteShared, projectId, doc),
-    updateLocal: (projectId: string, local) =>
-      ipcRenderer.invoke(IPC.projectSettingsUpdateLocal, projectId, local),
+    updateLocal: (projectId: string, request) =>
+      ipcRenderer.invoke(IPC.projectSettingsUpdateLocalReconciled, projectId, request),
     launchInfo: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsLaunchInfo, projectId),
     onTrustChanged: subscribeProjectTrustChanged
   },
@@ -756,6 +764,19 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, nodeId: string) => listener(nodeId)
     ipcRenderer.on(IPC.agentUnreadClear, handler)
     return () => ipcRenderer.removeListener(IPC.agentUnreadClear, handler)
+  },
+  agentStatusSnapshot: () => ipcRenderer.invoke(IPC.agentStatusSnapshot),
+  nodePaneEvidence: (nodeIds: string[]) => ipcRenderer.invoke(IPC.nodeStatusPanes, nodeIds),
+  taskContext: {
+    read: (query) => ipcRenderer.invoke(IPC.taskContextRead, query),
+    focus: (target) => ipcRenderer.invoke(IPC.taskContextFocus, target)
+  },
+  canvasLayout: {
+    plan: (request: unknown) => ipcRenderer.invoke(IPC.canvasLayoutPlan, request),
+    apply: (request) => ipcRenderer.invoke(IPC.canvasLayoutApply, request),
+    inverse: (request) => ipcRenderer.invoke(IPC.canvasLayoutInverse, request),
+    release: (projectId: string, holder: string, leaseToken?: string) =>
+      ipcRenderer.invoke(IPC.canvasLayoutRelease, { projectId, holder, leaseToken })
   },
   onAgentStatus: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)

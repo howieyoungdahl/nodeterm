@@ -1,6 +1,8 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { canonicalAssignmentValidator, type CanonicalAssignmentConfig } from '../core/agents/canonical-assignment'
+import { createMessageControl, IDENTIFIED_MESSAGE_VERBS, type MessageControlRuntime, type MessageControlRequest } from '../core/agents/message-control'
 
 import {
   createDeliveryQueue,
@@ -37,10 +39,18 @@ import {
   createServerEditionControlHandler,
   type ServerEditionControlActions
 } from './control-unsupported'
-import { HeadlessNodeFactory } from './headless-node-factory'
+import {
+  HeadlessNodeFactory,
+  type HeadlessNodeOwnership
+} from './headless-node-factory'
 import { sendSettledEnvelope } from './settled-envelope'
+import { SpawnHandlerState } from './spawn-handler-state'
+import type { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 export interface ServerCanvasControlDeps {
+  assignmentAuthority?: CanonicalAssignmentConfig
+  /** Trusted host integration only. Actual startup has no session-qualified issuer adapter. */
+  messageRuntime?: MessageControlRuntime
   workspaceStore: WorkspaceStore
   ptyManager: PtyManager
   settings(): Settings
@@ -71,11 +81,19 @@ export interface ServerCanvasControlDeps {
    * specifically exercising the install and has redirected `HOME` to a scratch directory first.
    */
   installAgentIntegrations: boolean
+  /** Shared with the operator inventory so creator provenance has one process-local source. */
+  ownership?: HeadlessNodeOwnership
+  /** Shared with `/opsapi/health`; snapshotting it never waits on the handler. */
+  spawnHandlerState?: SpawnHandlerState
+  /** Shared with `/opsapi` so every Server-owned workspace transaction is serialized. */
+  mutationQueue?: WorkspaceMutationQueue
 }
 
 export interface ServerCanvasControl {
-  handler: ReturnType<typeof createServerEditionControlHandler>
+  handler: (input: MessageControlRequest) => ReturnType<ReturnType<typeof createServerEditionControlHandler>>
   onAgentEvent(event: NormalizedAgentEvent): void
+  deliveryQueueDepths(): Record<string, number>
+  forgetNodes(nodeIds: readonly string[]): void
   installSkillInto(configDir: string): void
   stop(): void
 }
@@ -175,7 +193,17 @@ export async function initServerCanvasControl(
       deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
-    publishProject: (project: Project) => platform().broadcast(IPC.workspaceExternalChange, project)
+    ownership: deps.ownership,
+    spawnHandlerState: deps.spawnHandlerState,
+    mutationQueue: deps.mutationQueue,
+    // NOT `workspaceExternalChange`. That channel means "somebody else wrote this file" and the
+    // renderer answers it with `decideExternalChange`, which compares the whole project shell —
+    // and `ropes` is part of it, so every headless spawn (one appended `ctrl-…` rope) read as a
+    // conflict while the canvas was dirty, which it almost always is mid-burst. The bar that came
+    // up suspends autosave, so it latched on, and "Keep my version" then wrote the browser's edge
+    // state over the ropes this factory had just persisted. These writes are OURS; the renderer
+    // merges them (renderer/lib/serverChange.ts) and is never asked to choose.
+    publishProject: (project: Project) => platform().broadcast(IPC.workspaceServerChange, project)
   })
 
   const messaging: AgentMessagingDeps = {
@@ -185,6 +213,7 @@ export async function initServerCanvasControl(
     sendEnvelope: (nodeId, envelope) =>
       sendSettledEnvelope(deps.ptyManager, nodeId, envelope),
     hasLiveSession: (nodeId) => deps.ptyManager.hasLiveSession(nodeId),
+    sessionPresence: (nodeId) => deps.ptyManager.sessionPresence(nodeId),
     mirrorEntry,
     projects: () => deps.workspaceStore.persistedCanvases(),
     isRemoteNode: () => false,
@@ -196,10 +225,17 @@ export async function initServerCanvasControl(
     customAgents: () => deps.settings().customAgents,
     appendBoardLog: (projectId, entry) => deps.boardLog.append(projectId, entry)
   }
-  const queue = createDeliveryQueue(messaging)
+  const queue = createDeliveryQueue(messaging, {
+    validateAssignment: canonicalAssignmentValidator(deps.assignmentAuthority)
+  })
+  const identifiedControl = createMessageControl(queue, deps.messageRuntime)
   messaging.queue = queue
 
   const actions: ServerEditionControlActions = {
+    // Read-only pair: no `verified` argument because they write nothing — the handler's shared
+    // identity gate still runs ahead of them, so an unverified caller never reaches here.
+    list: (sourceNodeId, args) => factory.list(sourceNodeId, args),
+    board: (sourceNodeId, args) => factory.board(sourceNodeId, args),
     openProject: (sourceNodeId, args, verified) =>
       factory.openProject(sourceNodeId, args, verified),
     openTerminal: (sourceNodeId, args, verified) =>
@@ -209,6 +245,7 @@ export async function initServerCanvasControl(
     link: (sourceNodeId, args, verified) => factory.link(sourceNodeId, args, verified),
     group: (sourceNodeId, args) => factory.group(sourceNodeId, args),
     rename: (sourceNodeId, args) => factory.rename(sourceNodeId, args),
+    resize: (sourceNodeId, args, verified) => factory.resize(sourceNodeId, args, verified),
     color: (sourceNodeId, args) => factory.color(sourceNodeId, args),
     sticky: (sourceNodeId, args) => factory.sticky(sourceNodeId, args),
     // `runDelivery` applies caller→target creator proof before any pane probe or write, and
@@ -216,16 +253,21 @@ export async function initServerCanvasControl(
     deliver: async (input) => (await deliverFromControl(input, messaging)).reply
   }
 
-  // Boot deliberately performs no canvas/session adoption. Creator proof is process-local and a
-  // restart clears it, so an owner request or browser view is the only cold-spawn authority.
+  // Boot deliberately performs no canvas/session adoption, and durable creator proof does not
+  // change that: the ledger says who may act on a node, never that something should run unasked.
+  // An owner request or a browser view is still the only cold-spawn authority.
   await factory.start()
+  const legacyControl = createServerEditionControlHandler(actions)
 
   return {
-    handler: createServerEditionControlHandler(actions),
+    handler: (input) => IDENTIFIED_MESSAGE_VERBS.has(input.verb)
+      ? identifiedControl(input) : legacyControl(input),
     onAgentEvent: (event) => {
       onMessagingAgentEvent(event, queue)
       factory.onAgentEvent(event)
     },
+    deliveryQueueDepths: () => queue.depths(),
+    forgetNodes: (nodeIds) => factory.forgetNodes(nodeIds),
     installSkillInto,
     stop: () => {
       factory.stop()

@@ -170,6 +170,8 @@ export function createTriggerDelivery(deps: TriggerDeliveryDeps): TriggerDeliver
       })
       if (queued.kind === 'queueFull')
         return { outcome: 'failed', detail: `deliver-on-idle queue is full (${queued.capacity})` }
+      if (queued.kind !== 'queued')
+        return { outcome: 'failed', detail: `deliver-on-idle admission returned ${queued.kind}` }
       return {
         outcome: 'queued',
         detail: `${a.reason} — will deliver when it goes idle (waits up to ${Math.round(queued.ttlMs / 60_000)} min)`

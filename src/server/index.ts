@@ -50,8 +50,16 @@ import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
 import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
+import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
+import { ServerNodeOps, type OpsAdoptedNode } from './node-ops'
+import { ServerDeadCardReaper } from './dead-card-reaper'
+import { createOpsApiHandler } from './ops-api'
+import { loadOrCreateOpsToken, OPS_TOKEN_FILE } from './ops-token'
+import { SpawnHandlerState } from './spawn-handler-state'
+import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 import { refreshNodeTokens } from '../core/agents/node-token-service'
 import { armServerNodeIdentity } from './node-identity-arm'
+import { wireServerCodexSharedIdentity } from './codex-shared-identity'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -65,6 +73,7 @@ import {
   flush as flushAgentStatusMirror,
   recordAgentEvent,
   ackDone,
+  registerAgentStatusSnapshotIpc,
   setMirrorSettingsProvider,
   setMirrorServerProvider,
   onInboxActionable,
@@ -75,20 +84,26 @@ import {
   setNodeSessionName,
   setNodeHibernated,
   sessionNameSweepEntries,
-  nodeSessionName
+  nodeSessionName,
+  mirrorEntry,
+  nodeLastActivityAt,
+  clearNode
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
 import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
+import { registerNodeStatusIpc } from '../core/node-status-service'
+import { registerTaskContextIpc } from '../core/task-context-service'
+import { registerCanvasLayoutIpc } from '../core/canvas-layout'
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor, registerClaudeAccountsSource } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
 import { registerClientScope } from './client-scope'
-import { initCanvasSync } from '../core/canvas-sync'
+import { initCanvasSync, publishCanvasMutation } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
 import { initServerContextLink } from './context-link'
 import { createServerWorkspaceWatcher } from './workspace-external-watch'
@@ -160,6 +175,17 @@ function readInstallMeta(dataDir: string): MirrorServer | undefined {
   }
 }
 
+/** One adoption log line per PROJECT, so an operator reads "which canvas got its cards back". */
+function groupByProject(adopted: readonly OpsAdoptedNode[]): Map<string, OpsAdoptedNode[]> {
+  const byProject = new Map<string, OpsAdoptedNode[]>()
+  for (const entry of adopted) {
+    const list = byProject.get(entry.projectName) ?? []
+    list.push(entry)
+    byProject.set(entry.projectName, list)
+  }
+  return byProject
+}
+
 /**
  * Boot the headless server: wires the CorePlatform (ServerPlatform) to auth + HTTP +
  * WebSocket, then constructs and registers the same core services the desktop main
@@ -172,7 +198,12 @@ function readInstallMeta(dataDir: string): MirrorServer | undefined {
 export async function startServer(
   config: ServerConfig
 ): Promise<{ port: number; close(): Promise<void> }> {
+  const startedAt = Date.now()
   fs.mkdirSync(config.dataDir, { recursive: true })
+  // The default dataDir is ~/.nodeterm-server, yielding the designed ~/.nodeterm-server/ops-token.
+  // This credential is its own principal: it is never printed, derived from the UI password, or
+  // accepted as a browser cookie. A custom dataDir keeps all Server state together by design.
+  const opsToken = loadOrCreateOpsToken(path.join(config.dataDir, OPS_TOKEN_FILE))
 
   // Core platform boundary — must be initialized before any core service registers handlers.
   const platform = new ServerPlatform({
@@ -202,7 +233,36 @@ export async function startServer(
   // Core services — same construction + registration order as src/main/index.ts.
   const settingsStore = new SettingsStore()
   const ptyManager = new PtyManager()
-  const workspaceStore = new WorkspaceStore()
+  // The local save rescue (WorkspaceStore.rescueOmittedLocalNodes). `workspace:save` is a whole-
+  // workspace last-writer-wins write and local projects have no conflict machinery, so one browser
+  // tab holding a stale node list can delete every card created since its snapshot — silently, and
+  // for every other tab. On 2026-09-01 that cost eight cards over four hours while all eleven tmux
+  // sessions kept running. These two predicates are what makes the store able to refuse: keep a
+  // node the save dropped when its backend is still there and nobody deleted it here.
+  const workspaceStore = new WorkspaceStore(undefined, {
+    // `sessionExists` is the warm-attach probe: it answers this process's own live sessions first
+    // and falls back to `tmux has-session nt-<id>` / the session host, and it deliberately answers
+    // TRUE on an unreadable probe. That fail-safe direction is the one we want here too — a card
+    // kept by mistake is one click to close, a card lost is gone with its session's address.
+    hasLiveBackend: (nodeId) => ptyManager.sessionExists(nodeId),
+    // The × / node deletion. A deletion must always travel: never rescue back what its owner closed.
+    wasDeleted: (nodeId) => ptyManager.wasDeleted(nodeId)
+  })
+  // Creator ownership for canvas control, DURABLE across a restart (node-ownership-store.ts).
+  // A server-authored 0600 file in our own dataDir is the same trust class as `node-tokens/` next
+  // to it, so it may reassert who created a node where canvas state never could — the difference
+  // that lets a director loop keep the grants for the children it spawned before an upgrade.
+  //
+  // The prune set is filled in AFTER the boot workspace load further down; `undefined` until then
+  // means "not known yet", so a load that never happens (or fails) preserves the ledger rather
+  // than emptying it — a failed read is not evidence of absence.
+  let bootWorkspaceNodeIds: ReadonlySet<string> | undefined
+  const nodeOwnership = createPersistentHeadlessNodeOwnership(
+    path.join(config.dataDir, 'node-ownership.json'),
+    { prune: () => bootWorkspaceNodeIds }
+  )
+  const spawnHandlerState = new SpawnHandlerState()
+  const workspaceMutationQueue = new WorkspaceMutationQueue()
 
   settingsStore.init()
   // The linked-account resolver's one source of truth on this shell. Registered as
@@ -454,6 +514,46 @@ export async function startServer(
   // Set after the initial workspace load when the opt-in flag is on. The status listener is wired
   // now so the runtime, once present, consumes the exact same normalized stream as the UI/mirror.
   let canvasControl: ServerCanvasControl | null = null
+  const nodeOps = new ServerNodeOps({
+    workspaceStore,
+    sessionPresence: (nodeId) => ptyManager.sessionPresence(nodeId),
+    destroySession: (nodeId) =>
+      ptyManager.destroySession(null, nodeId, { everySocket: true }),
+    statusOf: (nodeId) => {
+      const entry = mirrorEntry(nodeId)
+      const updatedAt = nodeLastActivityAt(nodeId)
+      return entry || updatedAt !== undefined
+        ? { state: entry?.state, updatedAt: updatedAt ?? entry!.updatedAt }
+        : undefined
+    },
+    ownerOf: (nodeId) => nodeOwnership.ownerOf(nodeId),
+    onRemoved: (nodeIds) => {
+      for (const nodeId of nodeIds) clearNode(nodeId)
+      canvasControl?.forgetNodes(nodeIds)
+    },
+    // Same reasoning as the headless factory's publishProject (see server/canvas-control.ts): a
+    // dead-card sweep, an operator removal and boot orphan adoption are all writes THIS core made
+    // and already persisted, so they must not travel the outside-edit channel and end up behind
+    // the Reload/Keep-mine bar. The renderer three-way merges `workspace:server-change` instead.
+    publishProject: (project) => platform.broadcast(IPC.workspaceServerChange, project),
+    publishRemoval: (projectId, nodeId) =>
+      publishCanvasMutation(projectId, { op: 'remove', id: nodeId }),
+    // Orphan adoption's live insertion — the same upsert the headless factory publishes for a node
+    // it just created, so an adopted card appears in every open tab without a reload.
+    publishNode: (projectId, node) => publishCanvasMutation(projectId, { op: 'upsert', node }),
+    listSessions: () => ptyManager.listNodetermSessions(),
+    listPaneCwds: () => ptyManager.listNodetermPaneCwds(),
+    mirrorOf: (nodeId) => mirrorEntry(nodeId),
+    // The adopted id was NOT created during this Server run, so it takes the persisted-card
+    // classification, not the fresh-spawn path: `attach-session` only, dead card if the session
+    // vanishes. Same production function Server boot runs over the saved cards.
+    protectAdopted: (nodeIds) => ptyManager.protectPersistedSessionsAtBoot(nodeIds),
+    mutationQueue: workspaceMutationQueue
+  })
+  const deadCardReaper = new ServerDeadCardReaper({
+    intervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
+    sweep: (dryRun) => nodeOps.sweep(dryRun)
+  })
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
@@ -502,6 +602,21 @@ export async function startServer(
     if (typeof msg?.nodeId !== 'string' || !msg.nodeId) return
     setNodeHibernated(msg.nodeId, msg.on === true)
   })
+  // Last-known status for every node the mirror can still speak for — a PULL seed so a freshly
+  // (re)loaded browser tab paints badges before the next hook event. The mirror restores its map at
+  // boot but only ever pushes on a live event, so without this every pane read idle after a Server
+  // restart. Registered in both shells (see src/main/index.ts) from one core body.
+  registerAgentStatusSnapshotIpc()
+  // The one input that may produce a `failed` badge: prove whether a node's tmux/session-host
+  // backend is still there. Same primitive `ServerNodeOps` probes with, double-checked in core
+  // before it answers `dead`. Registered in both shells (see src/main/index.ts).
+  registerNodeStatusIpc({ panePresence: (nodeId) => ptyManager.sessionPresence(nodeId) })
+  registerTaskContextIpc()
+  // Automatic canvas layout (`core/canvas-layout/`): the ONE way in. Nothing here polls — a plan
+  // is built only when the renderer asks, on a node-created / status-changed / rules-changed /
+  // organize trigger. Off unless `settings.canvasLayout.enabled` says otherwise, read at call
+  // time so the switch takes effect without a restart. Registered in both shells (see src/main/index.ts).
+  registerCanvasLayoutIpc({ settings: () => settingsStore.get().canvasLayout, store: workspaceStore.organizerCoordinator() })
   // Phone→host read-acks: the phone drops `~/.nodeterm/acks/<nodeId>.seen` on this host when it READS
   // a finished session. Sweep it (15s cadence, cheap dir-mtime gate) and for each ack: `ackDone`
   // (mirror resolve + phone Live-Activity dismiss) + broadcast `agent:unread-clear` so the browser
@@ -604,6 +719,15 @@ export async function startServer(
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }
 
+  // The Server Edition has the same local app-server, signed node tokens, and persistent canvas
+  // store as Electron. Wire the shared-thread spine after those secrets exist, so its Codex panes
+  // get the same daemon-reset supervisor instead of bypassing it through bare `codex`.
+  void wireServerCodexSharedIdentity(
+    hookServer,
+    workspaceStore,
+    (channel, event) => platform.broadcast(channel, event)
+  ).catch((error) => console.warn('[codex-identity] shared identity unavailable:', error))
+
   // Context Link: core owns the whole feature (read handler, shim, skill, instruction blocks) and
   // writes everything under `dataDir`; what it needs from a shell is the link map. The desktop's
   // renderer pushes it from the live canvas — headless there may be no browser attached at all, so
@@ -627,17 +751,71 @@ export async function startServer(
   // and this shell may never have one. Read it once so links are live before any browser connects.
   // Read-only: boot must not sideline a conflict-marked project.json (that stays a renderer/probe
   // decision). The onPersist above turns this load into the initial refresh.
-  await workspaceStore.load({ sideline: false }).catch((e) => {
+  const bootWorkspace = await workspaceStore.load({ sideline: false }).catch((e) => {
     console.warn('[nodeterm-server] context-link initial workspace load failed', e)
+    return undefined
   })
+  if (bootWorkspace) {
+    // Arms the ownership ledger's prune (see its construction above): every node id the persisted
+    // workspace still knows about. Grants for anything else name a node nobody can address.
+    bootWorkspaceNodeIds = new Set(
+      bootWorkspace.projects.flatMap((project) => project.nodes.map((node) => node.id))
+    )
+    const persistedLocalTerminals = bootWorkspace.projects.flatMap((project) =>
+      project.ssh
+        ? []
+        : project.nodes.filter((node) => node.kind === 'terminal').map((node) => node.id)
+    )
+    const protectedSessions = await ptyManager.protectPersistedSessionsAtBoot(
+      persistedLocalTerminals
+    )
+    if (protectedSessions.dead.length) {
+      console.info(
+        `[nodeterm-server] marked ${protectedSessions.dead.length} persisted terminal card(s) dead; no backend was respawned`
+      )
+    }
+    // …and the mirror image of that classification: a live `nt-<id>` session that NO project has a
+    // card for gets one back. This is the repair for cards already lost to a stale client's save
+    // (the rescue above only stops new losses), and it is consistent with the inert-boot rule
+    // rather than an exception to it: adoption adds a CARD for a backend it just proved exists, and
+    // creates/attaches/sends nothing — the browser attaches on mount through the attach-only path,
+    // because `protectAdopted` puts every adopted id through the same boot classification.
+    try {
+      const adoption = await nodeOps.adoptOrphans()
+      for (const [projectName, entries] of groupByProject(adoption.adopted)) {
+        console.info(
+          `[nodeterm-server] adopted ${entries.length} orphaned live terminal(s) into ` +
+            `${projectName}: ${entries.map((entry) => entry.id).join(', ')}`
+        )
+      }
+      // Once, and named: an operator who sees a pane running and no card must be able to tell
+      // "we could not place it" from "we did not look".
+      if (adoption.skipped.length) {
+        console.info(
+          `[nodeterm-server] left ${adoption.skipped.length} orphaned live terminal(s) alone: ` +
+            adoption.skipped
+              .map((entry) => `${entry.sessionName} (${entry.reason}${entry.cwd ? ` ${entry.cwd}` : ''})`)
+              .join(', ')
+        )
+      }
+    } catch (error) {
+      // Never fatal: a boot that cannot adopt is the state every previous release shipped in.
+      console.warn('[nodeterm-server] orphan adoption failed', error)
+    }
+  }
+  deadCardReaper.start()
 
   if (config.canvasControl === true) {
     try {
       canvasControl = await initServerCanvasControl({
+        assignmentAuthority: config.assignmentAuthority,
         workspaceStore,
         ptyManager,
         settings: () => settingsStore.get(),
         boardLog,
+        ownership: nodeOwnership,
+        spawnHandlerState,
+        mutationQueue: workspaceMutationQueue,
         installAgentIntegrations: config.installHooks !== false
       })
       hookServer.setControlHandler(canvasControl.handler)
@@ -764,9 +942,13 @@ export async function startServer(
         projectSetupService.disposeAll()
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
+        deadCardReaper.stop()
         pressure.stop()
         ptyPressure.stop()
         canvasControl?.stop()
+        // Land the last grant: the ownership ledger's write is debounced, and a stop inside that
+        // window would silently revoke a node the agent just opened.
+        await nodeOwnership.flush().catch(() => undefined)
         workspaceWatcher.dispose()
         await contextLink.stop()
         await ptyManager.killAll()
@@ -782,12 +964,32 @@ export async function startServer(
     }
   }
 
+  const opsApi = createOpsApiHandler({
+    token: opsToken,
+    nodes: () => nodeOps.list(),
+    sweep: (dryRun) => nodeOps.sweep(dryRun),
+    remove: (nodeId, force) => nodeOps.remove(nodeId, force),
+    adoptOrphans: () => nodeOps.adoptOrphans(),
+    health: () => ({
+      startedAt,
+      uptimeMs: Math.max(0, Date.now() - startedAt),
+      wsClientCount: platform.clientIds().length,
+      canvasControlEnabled: canvasControl !== null,
+      spawnHandler: spawnHandlerState.snapshot(),
+      deliveryQueueDepths: canvasControl?.deliveryQueueDepths() ?? {},
+      projects: workspaceStore.persistedCanvases().map((project) => ({
+        id: project.id,
+        nodeCount: project.nodes.length
+      }))
+    })
+  })
   const server = http.createServer(
     createHttpHandler({
       auth,
       rendererDir: config.rendererDir,
       trustProxy: config.trustProxy,
-      downloadTickets
+      downloadTickets,
+      opsApi
     })
   )
   // A closed browser tab is the NORMAL way to leave the Server Edition and sends no `pty:kill`,
@@ -821,9 +1023,13 @@ export async function startServer(
       projectSetupService.disposeAll()
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
+      deadCardReaper.stop()
       pressure.stop()
       ptyPressure.stop()
       canvasControl?.stop()
+      // Land the last grant: the ownership ledger's write is debounced, and a stop inside that
+      // window would silently revoke a node the agent just opened.
+      await nodeOwnership.flush().catch(() => undefined)
       workspaceWatcher.dispose()
       await contextLink.stop()
       await ptyManager.killAll()

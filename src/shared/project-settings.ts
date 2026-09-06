@@ -72,6 +72,8 @@ export type ProjectSettingsParse =
  *  turns the pair into effective values; this type only reports what each side says. Shared here
  *  (not core) so the renderer's `ProjectSettingsApi` can name it without importing core. */
 export interface ProjectSettingsSnapshot {
+  /** Exact operator-read enrollment for this host's local overlay; absent means not writable. */
+  localBase?: import('./local-settings-reconciliation').LocalSettingsBase
   shared: ProjectSettingsFileV1 | null
   local: ProjectLocalSettings | undefined
   /** The shared file exists but is git-conflict-marked, so it is left untouched for the user to

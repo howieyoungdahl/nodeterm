@@ -13,11 +13,12 @@ interface RemotePickerProps {
 /** A small portal menu listing saved SSH servers; picking one opens a remote terminal. */
 export function RemotePicker({ x, y, onPick, onManage, onClose }: RemotePickerProps) {
   const servers = useSshServers((s) => s.servers)
+  const readError = useSshServers((s) => s.readError)
   return createPortal(
     <>
       <div className="ctx-backdrop" onClick={onClose} />
       <div className="ctx-menu" style={{ top: y, left: x }} onClick={(e) => e.stopPropagation()}>
-        {servers.length === 0 ? (
+        {readError ? <div role="status" className="ctx-item">{readError}</div> : servers.length === 0 ? (
           <button
             className="ctx-item"
             onClick={() => {

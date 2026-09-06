@@ -10,6 +10,7 @@ import { WorkspaceStore } from '../core/workspace-store'
 import type { AgentState } from '../shared/agents/normalize'
 import {
   DEFAULT_SETTINGS,
+  type ClaudeCliCaps,
   type CanvasNodeState,
   type PtyCreateOptions,
   type PtyCreateResult,
@@ -19,9 +20,12 @@ import {
 import {
   createHeadlessNodeOwnership,
   HeadlessNodeFactory,
+  type HeadlessNodeFactoryDeps,
   type HeadlessNodeOwnership,
   type HeadlessPty
 } from './headless-node-factory'
+import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
+import { SpawnHandlerState } from './spawn-handler-state'
 
 class FakePty implements HeadlessPty {
   readonly creates: PtyCreateOptions[] = []
@@ -93,8 +97,13 @@ describe('HeadlessNodeFactory', () => {
   let removed: string[]
   let publishedProjects: Workspace['projects']
   let factory: HeadlessNodeFactory
+  let factoryDeps: HeadlessNodeFactoryDeps
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
+  let cliCaps: () => Promise<ClaudeCliCaps>
+  let handlerNow: number
+  let spawnHandlerState: SpawnHandlerState
+  let remoteControlFlag: boolean
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -115,6 +124,20 @@ describe('HeadlessNodeFactory', () => {
     removed = []
     publishedProjects = []
     codexSharedIdentity = false
+    remoteControlFlag = false
+    cliCaps = async () => ({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      nameFlag: false,
+    sessionIdFlag: false,
+      remoteControlFlag
+    })
+    handlerNow = 1_000
+    spawnHandlerState = new SpawnHandlerState({
+      now: () => handlerNow,
+      wedgeAfterMs: 100
+    })
     ownership = createHeadlessNodeOwnership()
     ownership.record('term-upstream', {
       sourceNodeId: 'term-source',
@@ -145,26 +168,22 @@ describe('HeadlessNodeFactory', () => {
       ]
     }
     await store.save(initial)
-    factory = new HeadlessNodeFactory({
+    factoryDeps = {
+      grokCaps: async () => ({ nameFlag: false,
+    sessionIdFlag: false }),
       workspaceStore: store,
       ptyManager: pty,
       settings,
-      cliCaps: async () => ({
-        version: null,
-        autoPermissionMode: false,
-        fullscreenTui: false,
-        sessionIdFlag: false,
-        nameFlag: false
-      }),
-      // Stated, not defaulted — the required field is what stops a probe being forgotten.
-      grokCaps: async () => ({ sessionIdFlag: false }),
+      cliCaps: () => cliCaps(),
       codexSharedIdentity: async () => codexSharedIdentity,
       ownership,
+      spawnHandlerState,
       stateOf: (id) => states[id],
       publishNode: (_projectId, node) => published.push(node),
       publishRemoval: (_projectId, nodeId) => removed.push(nodeId),
       publishProject: (project) => publishedProjects.push(structuredClone(project))
-    })
+    }
+    factory = new HeadlessNodeFactory(factoryDeps)
   })
 
   afterEach(() => {
@@ -207,6 +226,287 @@ describe('HeadlessNodeFactory', () => {
     expect(reloaded.projects[0].nodes.find((node) => node.id === id)).toMatchObject({
       cwd: projectDir
     })
+  })
+
+  it('does not let one hung PTY creation block a later node creation', async () => {
+    let releaseFirst!: (result: PtyCreateResult) => void
+    let markFirstEntered!: () => void
+    const firstEntered = new Promise<void>((resolve) => (markFirstEntered = resolve))
+    const createNormally = pty.createHeadless.bind(pty)
+    vi.spyOn(pty, 'createHeadless')
+      .mockImplementationOnce((options) => {
+        pty.creates.push(options)
+        markFirstEntered()
+        return new Promise<PtyCreateResult>((resolve) => (releaseFirst = resolve))
+      })
+      .mockImplementation(createNormally)
+
+    const first = factory.openTerminal('term-source', {}, true)
+    await firstEntered
+    const second = factory.openTerminal('term-source', {}, true)
+    const wedged = Symbol('creation remained behind the first PTY')
+    const observed = await Promise.race([
+      second,
+      new Promise<typeof wedged>((resolve) => setTimeout(() => resolve(wedged), 500))
+    ])
+
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-terminal:launch',
+      active: 1,
+      queued: 0
+    })
+
+    // Always release/consume both requests so the red pre-fix run leaves no background promise.
+    releaseFirst({ sessionId: 'pty-first', fresh: true, persistent: true })
+    await first
+    const secondReply = observed === wedged ? await second : observed
+
+    expect(observed).not.toBe(wedged)
+    expect(secondReply).toMatchObject({ ok: true })
+    expect(pty.creates).toHaveLength(2)
+  })
+
+  it('kills a backend that appears after its in-flight card was closed', async () => {
+    let releaseCreate!: (result: PtyCreateResult) => void
+    let markCreateEntered!: () => void
+    const createEntered = new Promise<void>((resolve) => (markCreateEntered = resolve))
+    vi.spyOn(pty, 'createHeadless').mockImplementationOnce((options) => {
+      pty.creates.push(options)
+      markCreateEntered()
+      return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
+    })
+
+    const opening = factory.openTerminal('term-source', {}, true)
+    await createEntered
+    const nodeId = pty.creates[0].persistKey as string
+    await expect(factory.close('term-source', { node: nodeId }, true)).resolves.toMatchObject({
+      ok: true
+    })
+
+    // The non-cancellable create resolves AFTER close's first absent-backend destroy. The launch
+    // guard must issue an exact second destroy instead of leaving this late backend orphaned.
+    pty.live.add(nodeId)
+    releaseCreate({ sessionId: `pty-${nodeId}`, fresh: true, persistent: true })
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-failed')
+    })
+    expect(pty.sends).toEqual([])
+    expect(pty.live.has(nodeId)).toBe(false)
+    expect(pty.destroys.filter((entry) => entry.nodeId === nodeId)).toHaveLength(2)
+    expect(pty.destroys.at(-1)).toMatchObject({ nodeId, wasLive: true })
+    const workspace = await store.load({ sideline: false })
+    expect(workspace.projects[0].nodes.some((node) => node.id === nodeId)).toBe(false)
+  })
+
+  it('kills a backend that appears after operator removal forgets an in-flight card', async () => {
+    let releaseCreate!: (result: PtyCreateResult) => void
+    let markCreateEntered!: () => void
+    const createEntered = new Promise<void>((resolve) => (markCreateEntered = resolve))
+    vi.spyOn(pty, 'createHeadless').mockImplementationOnce((options) => {
+      pty.creates.push(options)
+      markCreateEntered()
+      return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
+    })
+
+    const opening = factory.openTerminal('term-source', {}, true)
+    await createEntered
+    const nodeId = pty.creates[0].persistKey as string
+    // ServerNodeOps force removal kills first, persists the card removal, then calls forgetNodes.
+    await pty.destroySession(null, nodeId, { everySocket: true })
+    factory.forgetNodes([nodeId])
+
+    pty.live.add(nodeId)
+    releaseCreate({ sessionId: `pty-${nodeId}`, fresh: true, persistent: true })
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-failed')
+    })
+    expect(pty.live.has(nodeId)).toBe(false)
+    expect(pty.destroys.filter((entry) => entry.nodeId === nodeId)).toHaveLength(2)
+    expect(pty.destroys.at(-1)).toMatchObject({ nodeId, wasLive: true })
+  })
+
+  it('bounds a hung launch with a named timeout and leaves later creations available', async () => {
+    factory.stop()
+    factory = new HeadlessNodeFactory({
+      ...factoryDeps,
+      ownership: createHeadlessNodeOwnership(),
+      launchTimeoutMs: 25
+    })
+    const createNormally = pty.createHeadless.bind(pty)
+    vi.spyOn(pty, 'createHeadless')
+      .mockImplementationOnce((options) => {
+        pty.creates.push(options)
+        return new Promise<PtyCreateResult>(() => {})
+      })
+      .mockImplementation(createNormally)
+
+    const timedOut = await factory.openTerminal('term-source', {}, true)
+    expect(timedOut).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-timeout'),
+      result: {
+        timedOut: [expect.stringMatching(/^term-/)]
+      }
+    })
+    expect(timedOut.error).toContain('later creations remain available')
+    expect(timedOut.error).toContain('do not repeat')
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-terminal:launch',
+      active: 1,
+      queued: 0
+    })
+    handlerNow += 101
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-terminal:launch',
+      activeForMs: 101,
+      active: 1
+    })
+
+    await expect(factory.openTerminal('term-source', {}, true)).resolves.toMatchObject({ ok: true })
+    expect(pty.creates).toHaveLength(2)
+    // The timed-out underlying create remains visible while the successful later launch settles.
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-terminal:launch',
+      active: 1
+    })
+  })
+
+  it('bounds a missing Codex capability answer and degrades to the ordinary CLI', async () => {
+    factory.stop()
+    factory = new HeadlessNodeFactory({
+      ...factoryDeps,
+      ownership: createHeadlessNodeOwnership(),
+      capabilityTimeoutMs: 25,
+      codexSharedIdentity: () => new Promise<boolean>(() => {})
+    })
+
+    const reply = await factory.openAgent(
+      'term-source',
+      { agent: 'codex', prompt: 'bounded preflight' },
+      true
+    )
+    expect(reply).toMatchObject({ ok: true })
+    expect(pty.sends.at(-1)?.text).toBe(
+      "codex 'bounded preflight' --ask-for-approval untrusted"
+    )
+    await expect(factory.openTerminal('term-source', {}, true)).resolves.toMatchObject({ ok: true })
+  })
+
+  it('reports the real serialized creation handler as wedged without waiting behind it', async () => {
+    let releaseCaps!: (caps: ClaudeCliCaps) => void
+    const pendingCaps = new Promise<ClaudeCliCaps>((resolve) => {
+      releaseCaps = resolve
+    })
+    cliCaps = () => pendingCaps
+    const first = factory.openAgent('term-source', { agent: 'claude' }, true)
+    await Promise.resolve()
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'running',
+      operation: 'open-agent',
+      queued: 0
+    })
+
+    const second = factory.openTerminal('term-source', {}, true)
+    handlerNow += 101
+    expect(factory.spawnHandlerSnapshot()).toMatchObject({
+      state: 'wedged',
+      operation: 'open-agent',
+      activeForMs: 101,
+      queued: 1
+    })
+
+    releaseCaps({
+      version: null,
+      autoPermissionMode: false,
+      fullscreenTui: false,
+      nameFlag: false,
+    sessionIdFlag: false,
+      remoteControlFlag: false
+    })
+    await Promise.all([first, second])
+  })
+
+  it('defaults control-spawned agents to half-footprint compact geometry and persists overrides', async () => {
+    const compact = await factory.openAgent('term-source', { agent: 'claude' }, true)
+    const compactId = (compact.result as { id: string }).id
+    const normal = await factory.openAgent(
+      'term-source',
+      { agent: 'codex', size: 'normal' },
+      true
+    )
+    const normalId = (normal.result as { id: string }).id
+
+    const project = (await new WorkspaceStore().load({ sideline: false })).projects[0]
+    expect(project.nodes.find((node) => node.id === compactId)).toMatchObject({
+      size: { width: 440, height: 320 },
+      controlSize: 'compact'
+    })
+    expect(project.nodes.find((node) => node.id === normalId)).toMatchObject({
+      size: { width: 640, height: 440 },
+      controlSize: 'normal'
+    })
+    expect(published.find((node) => node.id === compactId)?.size).toEqual({
+      width: 440,
+      height: 320
+    })
+    expect(published.find((node) => node.id === normalId)?.size).toEqual({
+      width: 640,
+      height: 440
+    })
+
+    await expect(
+      factory.openAgent('term-source', { agent: 'claude', size: 'small' }, true)
+    ).resolves.toEqual({ ok: false, error: 'open-agent: --size must be compact or normal' })
+  })
+
+  it('resizes an owned terminal durably without respawning its PTY', async () => {
+    const opened = await factory.openAgent(
+      'term-source',
+      { agent: 'claude', size: 'normal' },
+      true
+    )
+    const id = (opened.result as { id: string }).id
+    const creates = pty.creates.length
+    const sends = pty.sends.length
+    published.length = 0
+
+    await expect(
+      factory.resize('term-source', { node: id }, true)
+    ).resolves.toEqual({ ok: false, error: 'resize requires --size compact|normal' })
+
+    await expect(
+      factory.resize('term-source', { node: id, size: 'compact' }, true)
+    ).resolves.toMatchObject({
+      ok: true,
+      result: { id, size: { width: 440, height: 320 } }
+    })
+    expect(pty.creates).toHaveLength(creates)
+    expect(pty.sends).toHaveLength(sends)
+    expect(published).toEqual([
+      expect.objectContaining({
+        id,
+        size: { width: 440, height: 320 },
+        controlSize: 'compact'
+      })
+    ])
+    expect((await store.load({ sideline: false })).projects[0].nodes
+      .find((node) => node.id === id)).toMatchObject({
+        size: { width: 440, height: 320 },
+        controlSize: 'compact'
+      })
+
+    await expect(
+      factory.resize('term-source', { node: id, size: 'normal' }, true)
+    ).resolves.toMatchObject({ result: { size: { width: 640, height: 440 } } })
+    await expect(
+      factory.resize('term-source', { node: id, size: 'wide' }, true)
+    ).resolves.toEqual({ ok: false, error: 'resize: --size must be compact or normal' })
   })
 
   it('re-grants an exact saved local project after a Server restart before cross-project open', async () => {
@@ -399,6 +699,7 @@ describe('HeadlessNodeFactory', () => {
       await factory.link('term-source', { to: 'term-foreign' }, true),
       await factory.group('term-source', { nodes: 'term-source,term-foreign' }),
       await factory.rename('term-source', { node: 'term-foreign', title: 'Stolen' }),
+      await factory.resize('term-source', { node: 'term-foreign', size: 'compact' }, true),
       await factory.color('term-source', { node: 'term-foreign', color: '#32d74b' }),
       await factory.sticky('term-source', { node: 'sticky-foreign', append: 'stolen' }),
       await factory.openAgent(
@@ -408,11 +709,20 @@ describe('HeadlessNodeFactory', () => {
       )
     ]
 
-    expect(replies.map((reply) => reply.ok)).toEqual([false, false, false, false, false, false])
+    expect(replies.map((reply) => reply.ok)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ])
     expect(replies.map((reply) => reply.error)).toEqual([
       expect.stringContaining('link-not-owner'),
       expect.stringContaining('group-not-owner'),
       expect.stringContaining('rename-not-owner'),
+      expect.stringContaining('resize-not-owner'),
       expect.stringContaining('color-not-owner'),
       expect.stringContaining('sticky-not-owner'),
       expect.stringContaining('open-agent-not-owner')
@@ -858,19 +1168,42 @@ describe('HeadlessNodeFactory', () => {
     }
 
     const nodes = (await store.load({ sideline: false })).projects[0].nodes
-    const overlap = (a: CanvasNodeState, b: CanvasNodeState): boolean =>
-      a.position.x < b.position.x + b.size.width &&
-      a.position.x + a.size.width > b.position.x &&
-      a.position.y < b.position.y + b.size.height &&
-      a.position.y + a.size.height > b.position.y
+    // Spawned workers collect under a tray frame, so a persisted position is parent-relative from
+    // the second spawn on: the no-overlap rule is about where cards LAND, which is absolute. The
+    // frame itself is excluded because containing its members is what a frame is.
+    const absolute = (node: CanvasNodeState): { x: number; y: number } => {
+      let { x, y } = node.position
+      const seen = new Set<string>([node.id])
+      let parentId = node.parentId
+      while (parentId && !seen.has(parentId)) {
+        seen.add(parentId)
+        const parent = nodes.find((candidate) => candidate.id === parentId)
+        if (!parent) break
+        x += parent.position.x
+        y += parent.position.y
+        parentId = parent.parentId
+      }
+      return { x, y }
+    }
+    const overlap = (a: CanvasNodeState, b: CanvasNodeState): boolean => {
+      const pa = absolute(a)
+      const pb = absolute(b)
+      return (
+        pa.x < pb.x + b.size.width &&
+        pa.x + a.size.width > pb.x &&
+        pa.y < pb.y + b.size.height &&
+        pa.y + a.size.height > pb.y
+      )
+    }
+    const cards = nodes.filter((candidate) => candidate.kind !== 'group')
     for (const id of spawnedIds) {
       const node = nodes.find((candidate) => candidate.id === id)!
-      expect(nodes.filter((candidate) => candidate.id !== id).some((candidate) => overlap(node, candidate)), id)
+      expect(cards.filter((candidate) => candidate.id !== id).some((candidate) => overlap(node, candidate)), id)
         .toBe(false)
     }
     expect(new Set(spawnedIds.map((id) => {
-      const node = nodes.find((candidate) => candidate.id === id)!
-      return `${node.position.x},${node.position.y}`
+      const position = absolute(nodes.find((candidate) => candidate.id === id)!)
+      return `${position.x},${position.y}`
     })).size).toBe(spawnedIds.length)
   })
 
@@ -892,6 +1225,48 @@ describe('HeadlessNodeFactory', () => {
       agentId: agent
     })
     expect(pty.sends.at(-1)).toEqual({ nodeId: id, text: command })
+  })
+
+  it('feature-detects Claude Remote Control and safely passes an optional name', async () => {
+    remoteControlFlag = true
+
+    const unnamed = await factory.openAgent(
+      'term-source',
+      { agent: 'claude', 'remote-control': '' },
+      true
+    )
+    expect(unnamed.ok).toBe(true)
+    expect(pty.sends.at(-1)?.text).toBe('claude --remote-control')
+
+    const named = await factory.openAgent(
+      'term-source',
+      {
+        agent: 'claude',
+        prompt: 'watch this',
+        'remote-control': "  Overnight\nO'Brien  "
+      },
+      true
+    )
+    expect(named.ok).toBe(true)
+    expect(pty.sends.at(-1)?.text).toBe(
+      "claude 'watch this' --remote-control 'Overnight O'\\''Brien'"
+    )
+  })
+
+  it('refuses unsupported or non-Claude Remote Control before creating a node', async () => {
+    await expect(
+      factory.openAgent('term-source', { agent: 'claude', 'remote-control': '' }, true)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('remote-control-unsupported')
+    })
+    await expect(
+      factory.openAgent('term-source', { agent: 'codex', 'remote-control': '' }, true)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('remote-control-agent-refused')
+    })
+    expect(pty.creates).toEqual([])
   })
 
   it('never cold-spawns a persisted arm during boot reconciliation', async () => {
@@ -1110,4 +1485,184 @@ describe('HeadlessNodeFactory', () => {
     expect(reply).toMatchObject({ ok: false, error: expect.stringContaining('claude|codex|gemini') })
     expect(pty.creates).toEqual([])
   })
+
+  /**
+   * Regression, from the field (2026-09-02): a `systemctl restart` of Server Edition came back with
+   * `node-ownership.json` holding `{"v":1,"owners":{}}` and every `list` row reading
+   * `opened-by-you=no`, even though the nodes and their tmux backends were all still there.
+   *
+   * The shutdown, not the boot, is what emptied it. `server/index.ts` close() runs
+   * `canvasControl?.stop()` — which lands here — and only THEN `nodeOwnership.flush()`, the call
+   * whose comment says it exists to "land the last grant". With a durable ledger wired in, a
+   * `clear()` in `stop()` turns that flush into the write that revokes everything.
+   *
+   * `clear()` itself is fine and stays: it is the explicit "revoke every grant" primitive, proved
+   * in node-ownership-store.test.ts. Shutdown is simply not a revocation.
+   */
+  it('stop() leaves a durable ledger intact, so the shutdown flush lands grants instead of erasing them', async () => {
+    const ledgerFile = path.join(dataDir, 'node-ownership.json')
+    const durable = createPersistentHeadlessNodeOwnership(ledgerFile)
+    durable.record('term-owned', { sourceNodeId: 'term-source', projectId: 'project-1' })
+    const shuttingDown = new HeadlessNodeFactory({ ...factoryDeps, ownership: durable })
+
+    // The Server shell's exact shutdown order.
+    shuttingDown.stop()
+    await durable.flush()
+
+    // A fresh store over the same bytes IS the next boot.
+    expect(createPersistentHeadlessNodeOwnership(ledgerFile).ownerOf('term-owned')).toMatchObject({
+      sourceNodeId: 'term-source',
+      projectId: 'project-1'
+    })
+  })
+
+  describe('spawn defaults: role, generated names and the tray frame', () => {
+    const idOf = (reply: { result?: unknown }): string => (reply.result as { id: string }).id
+    const load = async (): Promise<CanvasNodeState[]> =>
+      (await store.load({ sideline: false })).projects[0].nodes
+    const nodeById = (nodes: CanvasNodeState[], id: string): CanvasNodeState =>
+      nodes.find((node) => node.id === id)!
+
+    it('marks a control-spawned node a worker and names it after its owner and what it runs', async () => {
+      const reply = await factory.openAgent('term-source', { agent: 'claude', prompt: 'ship  it' }, true)
+      const node = nodeById(await load(), idOf(reply))
+      expect(node).toMatchObject({
+        role: 'worker',
+        title: 'Director · Claude Code',
+        taskSummary: 'Opened by Director — ship it',
+        titleAuto: true
+      })
+    })
+
+    it('leaves the operator’s own nodes as primary — an untouched canvas keeps its shape', async () => {
+      await factory.openAgent('term-source', { agent: 'claude' }, true)
+      const nodes = await load()
+      for (const id of ['term-source', 'term-upstream', 'term-owned']) {
+        expect(nodeById(nodes, id).role).toBeUndefined()
+        expect(nodeById(nodes, id).parentId).toBeUndefined()
+      }
+    })
+
+    it('does not build a frame around a single worker', async () => {
+      const id = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const nodes = await load()
+      expect(nodes.filter((node) => node.kind === 'group')).toEqual([])
+      expect(nodeById(nodes, id).parentId).toBeUndefined()
+    })
+
+    it('builds the tray when the SECOND worker arrives, taking the first in with it', async () => {
+      const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const second = idOf(await factory.openAgent('term-source', { agent: 'codex' }, true))
+
+      const nodes = await load()
+      const frames = nodes.filter((node) => node.kind === 'group')
+      expect(frames).toHaveLength(1)
+      // Collapsed on creation: "put away" is half of what the tray is for, and a tray that opens
+      // expanded has put nothing away.
+      expect(frames[0]).toMatchObject({
+        title: 'Director workers',
+        taskFrame: true,
+        collapsed: true
+      })
+      expect(nodeById(nodes, first).parentId).toBe(frames[0].id)
+      expect(nodeById(nodes, second).parentId).toBe(frames[0].id)
+      // The frame is a creation of this caller, so it can be renamed/colored/closed like any other.
+      expect(factory.ownsSpawn('term-source', frames[0].id)).toBe(true)
+      // Parent before child: React Flow hydrates in array order.
+      expect(nodes.findIndex((node) => node.id === frames[0].id)).toBeLessThan(
+        nodes.findIndex((node) => node.id === first)
+      )
+      const trayIndex = published.findIndex((node) => node.id === frames[0].id)
+      expect(trayIndex).toBeGreaterThanOrEqual(0)
+      expect(trayIndex).toBeLessThan(published.findIndex((node) => node.id === second))
+    })
+
+    it('puts a later worker into the tray that already exists', async () => {
+      await factory.openAgent('term-source', { agent: 'claude' }, true)
+      await factory.openAgent('term-source', { agent: 'codex' }, true)
+      const third = idOf(await factory.openAgent('term-source', { agent: 'gemini' }, true))
+
+      const nodes = await load()
+      const frames = nodes.filter((node) => node.kind === 'group')
+      expect(frames).toHaveLength(1)
+      expect(nodeById(nodes, third).parentId).toBe(frames[0].id)
+    })
+
+    it('numbers the fan-out across separate commands, not per command', async () => {
+      const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const second = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const nodes = await load()
+      expect(nodeById(nodes, first).title).toBe('Director · Claude Code')
+      expect(nodeById(nodes, second).title).toBe('Director · Claude Code 2')
+    })
+
+    it('builds the tray from one command that opens two workers', async () => {
+      const reply = await factory.openAgent('term-source', { agent: 'claude', count: '2' }, true)
+      const ids = (reply.result as { ids: string[] }).ids
+      const nodes = await load()
+      const frames = nodes.filter((node) => node.kind === 'group')
+      expect(frames).toHaveLength(1)
+      expect(ids.map((id) => nodeById(nodes, id).parentId)).toEqual([frames[0].id, frames[0].id])
+    })
+
+    it('joins the spawner’s OWN frame on the first worker, moving nothing that is already there', async () => {
+      const workspace = await store.load({ sideline: false })
+      const project = workspace.projects[0]
+      project.nodes.unshift({
+        id: 'group-existing',
+        kind: 'group',
+        position: { x: 0, y: 0 },
+        size: { width: 900, height: 700 },
+        title: 'Lane',
+        color: '#0a84ff',
+        group: null
+      })
+      project.nodes = project.nodes.map((node) =>
+        node.id === 'term-source' ? { ...node, parentId: 'group-existing' } : node
+      )
+      await store.save(workspace)
+
+      const id = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const nodes = await load()
+      expect(nodeById(nodes, id).parentId).toBe('group-existing')
+      expect(nodes.filter((node) => node.kind === 'group')).toHaveLength(1)
+      expect(nodeById(nodes, 'term-source').parentId).toBe('group-existing')
+    })
+
+    it('never pulls a worker the operator has placed by hand into a new tray', async () => {
+      const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      const workspace = await store.load({ sideline: false })
+      workspace.projects[0].nodes = workspace.projects[0].nodes.map((node) =>
+        node.id === first ? { ...node, manualPlacement: true } : node
+      )
+      await store.save(workspace)
+
+      const second = idOf(await factory.openAgent('term-source', { agent: 'codex' }, true))
+      const nodes = await load()
+      expect(nodes.filter((node) => node.kind === 'group')).toEqual([])
+      expect(nodeById(nodes, first).parentId).toBeUndefined()
+      expect(nodeById(nodes, second).parentId).toBeUndefined()
+    })
+
+    it('never pulls a worker this caller does not own into a new tray', async () => {
+      const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
+      ownership.forget(first)
+      const second = idOf(await factory.openAgent('term-source', { agent: 'codex' }, true))
+      const nodes = await load()
+      expect(nodes.filter((node) => node.kind === 'group')).toEqual([])
+      expect(nodeById(nodes, first).parentId).toBeUndefined()
+      expect(nodeById(nodes, second).parentId).toBeUndefined()
+    })
+
+    it('starts no session and types nothing for the frame itself', async () => {
+      await factory.openAgent('term-source', { agent: 'claude' }, true)
+      await factory.openAgent('term-source', { agent: 'codex' }, true)
+      const frames = (await load()).filter((node) => node.kind === 'group')
+      expect(frames).toHaveLength(1)
+      expect(pty.creates.map((options) => options.persistKey)).not.toContain(frames[0].id)
+      expect(pty.sends.map((send) => send.nodeId)).not.toContain(frames[0].id)
+      expect(pty.destroys).toEqual([])
+    })
+  })
+
 })

@@ -1,13 +1,12 @@
 /**
- * POSIX-sh prelude prepended to every managed hook script.
+ * POSIX-sh identity prelude shared by local commands and managed hooks.
  *
  * WHY IT EXISTS: with the shared app-server, the shell a Codex TOOL runs in is spawned by that
- * server, not by the TUI client NodeTerm launched. It therefore inherits `CODEX_THREAD_ID` but
- * none of the `NODETERM_*` env we set on the pane — so the hook it runs has no idea which canvas
- * node it belongs to, and the node's badge/status would simply never move. This recovers the node
- * binding from the thread id.
+ * server, not by the TUI client NodeTerm launched. It carries `CODEX_THREAD_ID`, but its ambient
+ * `NODETERM_*` can be absent, incomplete OR a complete foreign identity left in a reused daemon.
+ * Always compare the exact thread binding before a consumer can use that ambient capability.
  *
- * The mapping file is parsed as DATA (`sed`), never sourced as shell code, and both recovered
+ * The mapping file is parsed as DATA (`awk`), never sourced as shell code, and both recovered
  * fields are re-validated before they are exported. The record itself is HMAC-signed by
  * `codex-identity-proxy.ts`; this prelude cannot verify that signature (no key in an agent's
  * shell), which is why the charset re-validation below is not redundant.
@@ -17,11 +16,10 @@
  * the daemon's env to pick the scope:
  *   - a known, safe account id ⇒ read ONLY that account's record, and require the record's
  *     `accountId=` line to agree with the daemon scope;
- *   - an EMPTY account id (the classic shared tool shell that knows only a bare thread id) ⇒ scan
- *     EVERY scope (bare-root system + each managed subdir) and bind ONLY when exactly one candidate
- *     matches (`nt_codex_matches -eq 1`). Two accounts holding the same thread id ⇒ ambiguous ⇒
- *     change nothing (Property 3 / Constraint 8, the same fail-closed posture as the TypeScript
- *     `resolveCodexThreadNodeIdentity`).
+ *   - an explicitly EMPTY account id ⇒ system only (`codexSessionEnv` clears managed scope this
+ *     way); UNSET ⇒ unknown, scan system + managed scopes and require exactly one valid candidate.
+ * Missing records preserve a complete direct `codex exec` context. Existing invalid/unreadable
+ * evidence, ambiguity, or a complete context disagreeing with its binding refuses by name.
  *
  * WHAT IT EXPORTS IS WHAT THE RECORD SAYS — it does not decide. `NODETERM_AGENT_ID` and
  * `NODETERM_CANVAS_CONTROL` used to be constants here (`codex`, granted), and both are facts only
@@ -36,8 +34,7 @@
  * falls back to the guess.
  *
  * Inert for every other agent: without `CODEX_THREAD_ID` the whole block is skipped. A machine with
- * no managed accounts has no subdirs, so the scan reduces to the one bare-root read S4 did — the
- * legacy layout keeps resolving byte-for-byte (Constraint 12).
+ * no managed accounts has no subdirs, so unknown-scope lookup reduces to the bare-root S4 layout.
  *
  * Deliberately free of Node/Electron imports beyond the path it is given: the generated-script
  * cores are shared by the desktop and the Server Edition.
@@ -45,116 +42,147 @@
 import { posixQuote } from '../shared/ssh'
 
 /**
- * PROBE U5 (Codex 0.146.0, 2026-08-19 — docs/superpowers/probes/2026-08-codex-tool-shell-env.md):
- * a shared `app-server`-spawned tool shell carries `CODEX_THREAD_ID` (measured — a fresh id per
- * thread) and NOT the per-pane `NODETERM_*` (the tool shell forks from the shared daemon, not the
- * connecting client; corroborated by the deployed S4 resolver that depends on exactly this). The
- * premise HOLDS, so the account-scoped scan below is warranted. Caveat: an in-process app-server
- * (`codex exec`) leaks `NODETERM_*`, but the outer `[ -z "$NODETERM_NODE_ID" ]` guard no-ops there.
- *
  * @param identityRoot absolute path of the thread → node record directory
  *   (`codexThreadIdentityRoot()`, i.e. under `CorePlatform.userDataDir` — NOT `~`).
+ * @param caller commands fail with status 1; hooks must drain stdin then exit 0, preserving the
+ *   existing telemetry-hook contract without EPIPEing a writer of a payload larger than a pipe.
  */
-export function codexThreadIdentityResolverSh(identityRoot: string): string {
-  return `# A shared-app-server Codex tool shell inherits CODEX_THREAD_ID, not the TUI client's
-# NODETERM_* env. Recover this thread's exact node binding (account-scoped), or change nothing.
-if [ -z "\${NODETERM_NODE_ID-}" ] && [ -n "\${CODEX_THREAD_ID-}" ]; then
-  case "$CODEX_THREAD_ID" in
-    # '.' and '..' MATCH the charset and are path segments: "$identityRoot"/.. is the record dir's
-    # PARENT. Refused by name here for the same reason isSafeThreadId refuses them in TypeScript.
-    ''|.|..|*[!A-Za-z0-9._-]*) ;;
-    *)
-      nt_codex_root=${posixQuote(identityRoot)}
-      nt_codex_matches=0
-      nt_codex_node=''
-      nt_codex_endpoint=''
-      nt_codex_agent=''
-      nt_codex_grant=''
-      # Validate one candidate record file for an expected scope, parsed as DATA. On success it
-      # records the node/endpoint/agent/grant and counts the match. $1=file, $2=expected scope
-      # ('' = system).
-      nt_codex_try() {
-        [ -r "$1" ] || return 0
-        nt_a=$(sed -n 's/^accountId=//p' "$1" | head -n 1)
-        # The record's own account line must AGREE with the directory it was found in. A system
-        # record's line is empty or the reserved word 'system'; a managed record's line is its id.
-        case "$2" in
-          '') case "$nt_a" in ''|system) ;; *) return 0 ;; esac ;;
-          *) [ "$nt_a" = "$2" ] || return 0 ;;
-        esac
-        nt_n=$(sed -n 's/^nodeId=//p' "$1" | head -n 1)
-        nt_e=$(sed -n 's/^endpoint=//p' "$1" | head -n 1)
-        nt_g=$(sed -n 's/^agentId=//p' "$1" | head -n 1)
-        nt_c=$(sed -n 's/^canvasControl=//p' "$1" | head -n 1)
-        case "$nt_n" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-        case "$nt_e" in /*) ;; *) return 0 ;; esac
-        # SPACES ARE ADMITTED DELIBERATELY, and this line is the reason to say so. The endpoint is
-        # this app's own data-dir path, which on macOS is "~/Library/Application Support/…" — a
-        # filter without the space would reject every macOS record and silently disable the whole
-        # recovery there. What the value is used FOR is what makes that safe: both shims DOT-SOURCE
-        # it with the dot command (canvas-control-core.ts / context-link-core.ts) and the
-        # socket it names then reaches curl --unix-socket "$NODETERM_HOOK_SOCK" — every expansion
-        # inside double quotes, so a space cannot split into extra arguments. The charset is what
-        # keeps quoting and command substitution out; the leading slash above keeps it absolute.
-        [ "$(printf %s "$nt_e" | tr -cd 'A-Za-z0-9._/ -')" = "$nt_e" ] || return 0
-        # A PRE-AGENT record (no agentId line, or an empty one) means codex with canvas control:
-        # every record written before the agent fields existed was written by this same Codex
-        # spine, and codex is unconditionally canvas-control-capable, so the implied pair
-        # reproduces what this prelude hardcoded. A record that DOES name an agent is exported as
-        # it stands and never falls back to the guess — including its grant, which is then the
-        # canControlCanvas answer the pane itself got, not an assumption made here.
-        case "$nt_g" in
-          '')
-            nt_g=codex
-            nt_c=1
-            ;;
-          *[!A-Za-z0-9._:-]*) return 0 ;;
-        esac
-        nt_codex_node=$nt_n
-        nt_codex_endpoint=$nt_e
-        nt_codex_agent=$nt_g
-        nt_codex_grant=$nt_c
-        nt_codex_matches=$((nt_codex_matches + 1))
+export function codexThreadIdentityResolverSh(
+  identityRoot: string,
+  caller: 'command' | 'hook' = 'command'
+): string {
+  return `# A reused Codex daemon can carry a foreign NODETERM_* context, even a complete one.
+# These protected records are shape/scope checked here, NOT HMAC-verified by the shell.
+if [ -n "\${CODEX_THREAD_ID-}" ]; then
+  nt_codex_clear_transport() {
+    unset NODETERM_HOOK_SOCK NODETERM_HOOK_PORT NODETERM_HOOK_TOKEN NODETERM_HOOK_VERSION \\
+      NODETERM_NODE_TOKEN_DIR NODETERM_CODEX_NODE_TOKEN
+  }
+  nt_codex_refuse() {
+    unset NODETERM_NODE_ID NODETERM_HOOK_ENDPOINT NODETERM_AGENT_ID NODETERM_CANVAS_CONTROL
+    nt_codex_clear_transport
+    # Only a fixed reason is printed: never an identity, endpoint, credential or hook payload.
+    printf 'Nodeterm Codex identity refused: %s.\\n' "$1" >&2
+    ${caller === 'hook' ? 'cat >/dev/null 2>&1 || :\n    exit 0' : 'exit 1'}
+  }
+  nt_codex_safe_id() {
+    case "$1" in ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    [ "\${#1}" -le 128 ]
+  }
+  nt_codex_safe_endpoint() {
+    case "$1" in /|[!/]*) return 1 ;; /*) ;; *) return 1 ;; esac
+    [ "$(printf %s "$1" | tr -cd 'A-Za-z0-9._/ -')" = "$1" ]
+  }
+  nt_codex_safe_account() {
+    case "$1" in ''|system|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  }
+  nt_codex_safe_id "$CODEX_THREAD_ID" || nt_codex_refuse invalid-thread-id
+  nt_codex_complete=0
+  # buildPtyEnv supplies node + endpoint + a client capability. Every NONEMPTY capability value
+  # opens the existing command gate (even '0'); agent-role metadata is optional, not authority.
+  if nt_codex_safe_id "\${NODETERM_NODE_ID-}" && \\
+     nt_codex_safe_endpoint "\${NODETERM_HOOK_ENDPOINT-}" && \\
+     [ -n "\${NODETERM_CANVAS_CONTROL-}" ]; then
+    nt_codex_complete=1
+  fi
+  nt_codex_root=${posixQuote(identityRoot)}
+  nt_codex_matches=0
+  nt_codex_node=''
+  nt_codex_endpoint=''
+  nt_codex_check_dir() {
+    if [ -e "$1" ] || [ -L "$1" ]; then
+      [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ] || nt_codex_refuse unreadable-binding
+    fi
+  }
+  # Absence is different from an existing unreadable/malformed record. One bad candidate also
+  # prevents an unknown-scope lookup from treating a second, readable candidate as unique.
+  nt_codex_try() {
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    [ -f "$1" ] && [ ! -L "$1" ] || nt_codex_refuse invalid-binding
+    [ -r "$1" ] || nt_codex_refuse unreadable-binding
+    nt_fields=$(awk '
+      /^[[:space:]]*$/ { next }
+      {
+        eq = index($0, "="); key = substr($0, 1, eq - 1)
+        if (eq < 1 || key !~ /^(accountId|nodeId|endpoint|signature|agentId|canvasControl)$/ || ++seen[key] > 1) bad = 1
+        value[key] = substr($0, eq + 1)
       }
-      case "\${NODETERM_CODEX_ACCOUNT_ID-}" in
-        '')
-          # Unknown account: scan every scope, bind only if exactly one candidate matches.
-          nt_codex_try "$nt_codex_root/$CODEX_THREAD_ID" ''
-          for nt_codex_dir in "$nt_codex_root"/*/; do
-            [ -d "$nt_codex_dir" ] || continue
-            nt_codex_scope=\${nt_codex_dir%/}
-            nt_codex_scope=\${nt_codex_scope##*/}
-            case "$nt_codex_scope" in
-              ''|.|..|system|*[!A-Za-z0-9._-]*) continue ;;
-            esac
-            nt_codex_try "$nt_codex_dir$CODEX_THREAD_ID" "$nt_codex_scope"
-          done
-          ;;
-        # A daemon scope that could escape the mapping directory, or the reserved system word used
-        # as a managed id: resolve nothing.
-        .|..|system|*[!A-Za-z0-9._-]*) ;;
-        *)
-          nt_codex_try "$nt_codex_root/\${NODETERM_CODEX_ACCOUNT_ID}/$CODEX_THREAD_ID" \\
-            "$NODETERM_CODEX_ACCOUNT_ID"
-          ;;
-      esac
-      if [ "$nt_codex_matches" -eq 1 ] && [ -n "$nt_codex_node" ] && [ -n "$nt_codex_endpoint" ]
-      then
-        NODETERM_NODE_ID="$nt_codex_node"
-        NODETERM_HOOK_ENDPOINT="$nt_codex_endpoint"
-        NODETERM_AGENT_ID="$nt_codex_agent"
-        export NODETERM_NODE_ID NODETERM_HOOK_ENDPOINT NODETERM_AGENT_ID
-        # The grant is EXPORTED ONLY WHEN THE RECORD CARRIES IT, and is left UNSET otherwise —
-        # absent, never '0', the same shape buildPtyEnv produces, because both shims gate on
-        # \`[ -z "$NODETERM_CANVAS_CONTROL" ]\`. Withholding is the honest degrade: the tool shell
-        # loses a verb its pane still has, whereas asserting a grant the pane was denied is the
-        # widening this file must never do.
-        if [ "$nt_codex_grant" = 1 ]; then
-          NODETERM_CANVAS_CONTROL=1
-          export NODETERM_CANVAS_CONTROL
-        fi
+      END {
+        if (bad || seen["nodeId"] != 1 || seen["endpoint"] != 1 || seen["signature"] != 1) exit 1
+        printf "%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n", value["accountId"], value["nodeId"], value["endpoint"], value["signature"], value["agentId"], value["canvasControl"], seen["agentId"]
+      }
+    ' "$1" 2>/dev/null) || nt_codex_refuse invalid-binding
+    nt_a=$(printf '%s\\n' "$nt_fields" | sed -n '1p')
+    nt_n=$(printf '%s\\n' "$nt_fields" | sed -n '2p')
+    nt_e=$(printf '%s\\n' "$nt_fields" | sed -n '3p')
+    nt_s=$(printf '%s\\n' "$nt_fields" | sed -n '4p')
+    nt_g=$(printf '%s\\n' "$nt_fields" | sed -n '5p')
+    nt_c=$(printf '%s\\n' "$nt_fields" | sed -n '6p')
+    nt_has_agent=$(printf '%s\\n' "$nt_fields" | sed -n '7p')
+    if [ "$nt_has_agent" = 1 ]; then
+      case "$nt_g" in ''|*[!A-Za-z0-9._:-]*) nt_codex_refuse invalid-binding ;; esac
+      case "$nt_c" in ''|0|1) ;; *) nt_codex_refuse invalid-binding ;; esac
+    else
+      nt_g=codex
+      nt_c=1
+    fi
+    case "$2" in
+      '') case "$nt_a" in ''|system) ;; *) nt_codex_refuse invalid-binding ;; esac ;;
+      *) [ "$nt_a" = "$2" ] || nt_codex_refuse invalid-binding ;;
+    esac
+    nt_codex_safe_id "$nt_n" && nt_codex_safe_endpoint "$nt_e" || nt_codex_refuse invalid-binding
+    case "$nt_s" in ''|*[!A-Za-z0-9_-]*) nt_codex_refuse invalid-binding ;; esac
+    nt_codex_node=$nt_n
+    nt_codex_endpoint=$nt_e
+    nt_codex_agent=$nt_g
+    nt_codex_grant=$nt_c
+    nt_codex_matches=$((nt_codex_matches + 1))
+  }
+  nt_codex_check_dir "$nt_codex_root"
+  if [ "\${NODETERM_CODEX_ACCOUNT_ID+x}" = x ]; then
+    # Explicit empty is the system launch contract; 'system' is reserved, not a managed id.
+    case "$NODETERM_CODEX_ACCOUNT_ID" in
+      '') nt_codex_try "$nt_codex_root/$CODEX_THREAD_ID" '' ;;
+      *)
+        nt_codex_safe_account "$NODETERM_CODEX_ACCOUNT_ID" || nt_codex_refuse invalid-account-scope
+        nt_codex_check_dir "$nt_codex_root/$NODETERM_CODEX_ACCOUNT_ID"
+        nt_codex_try "$nt_codex_root/$NODETERM_CODEX_ACCOUNT_ID/$CODEX_THREAD_ID" "$NODETERM_CODEX_ACCOUNT_ID"
+        ;;
+    esac
+  else
+    nt_codex_try "$nt_codex_root/$CODEX_THREAD_ID" ''
+    for nt_codex_dir in "$nt_codex_root"/*/; do
+      [ -d "$nt_codex_dir" ] || continue
+      nt_codex_scope=\${nt_codex_dir%/}
+      nt_codex_scope=\${nt_codex_scope##*/}
+      nt_codex_safe_account "$nt_codex_scope" || continue
+      nt_codex_check_dir "$nt_codex_dir"
+      nt_codex_try "$nt_codex_dir$CODEX_THREAD_ID" "$nt_codex_scope"
+    done
+  fi
+  case "$nt_codex_matches" in
+    0) [ "$nt_codex_complete" = 1 ] || nt_codex_refuse missing-binding ;;
+    1)
+      # Compare the signed strings byte-for-byte. Resolving symlinks or normalizing path aliases
+      # could hide a disagreement; a complete direct context with NO record stays untouched above.
+      if [ "$nt_codex_complete" = 1 ] && \\
+         { [ "$NODETERM_NODE_ID" != "$nt_codex_node" ] || [ "$NODETERM_HOOK_ENDPOINT" != "$nt_codex_endpoint" ]; }; then
+        nt_codex_refuse complete-context-conflict
       fi
+      # An inherited socket wins over a newly sourced port in all three consumers. Clear every
+      # derived transport/credential field before they source THIS binding's endpoint file.
+      nt_codex_clear_transport
+      NODETERM_NODE_ID="$nt_codex_node"
+      NODETERM_HOOK_ENDPOINT="$nt_codex_endpoint"
+      NODETERM_AGENT_ID="$nt_codex_agent"
+      unset NODETERM_CANVAS_CONTROL
+      if [ "$nt_codex_grant" = 1 ]; then
+        NODETERM_CANVAS_CONTROL=1
+        export NODETERM_CANVAS_CONTROL
+      fi
+      export NODETERM_NODE_ID NODETERM_HOOK_ENDPOINT NODETERM_AGENT_ID
       ;;
+    *) nt_codex_refuse ambiguous-binding ;;
   esac
 fi`
 }

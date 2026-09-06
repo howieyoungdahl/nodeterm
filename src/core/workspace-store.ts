@@ -11,7 +11,7 @@ import {
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, inlineProjectFileRelPath, isInlineProjectFileId,
   projectToFile, resolveNodes, sameProjectContent,
-  sanitizeLoadedClosedSessions, sanitizeNodeTriggers, serializeProjectFile, splitWorkspace,
+  sanitizeLayoutRulesBlock, sanitizeLoadedClosedSessions, sanitizeNodeTriggers, serializeProjectFile, splitWorkspace,
   validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
@@ -27,6 +27,9 @@ import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 import { collisionSeed, derivedProjectId, freshProjectId } from '../shared/project-id'
 import { appendProjectNode, removeProjectNode, type RemoteNodeInput } from './project-node-append'
+import { WorkspaceReconciliationStore } from './workspace-reconciliation-store'
+import { ProjectCommitStore, readPublicationFile, isPublicationReadError } from './project-commit-store'
+import type { WorkspaceRevisionRequest } from '../shared/workspace-reconciliation'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
  *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
@@ -41,6 +44,31 @@ export interface RemoteWorkspaceIO {
    *  which is exactly the disconnected behaviour. */
   readSettings?(projectId: string, ssh: NonNullable<Project['ssh']>): Promise<RemoteReadResult>
   writeSettings?(projectId: string, ssh: NonNullable<Project['ssh']>, content: string): Promise<boolean>
+}
+
+/**
+ * The two backend questions the LOCAL save rescue asks before it keeps a node an incoming save
+ * omitted. Injected (like `remoteIO`) so `src/core`'s store never reaches for a PtyManager, and
+ * defaulted to "no rescue" so every existing caller and test is unchanged.
+ *
+ * Both may answer asynchronously: `hasLiveBackend` is a `tmux has-session` probe on the shells
+ * that wire it. The store asks each omitted id AT MOST ONCE per save (see `probedBackends`), so
+ * the caller does not need a cache of its own.
+ */
+export interface WorkspaceBackendGuards {
+  /**
+   * Does a real backend still exist for this node id — a live session this process holds, or a
+   * surviving `nt-<id>` tmux session? Fail-safe direction, same as every other probe here: an
+   * UNREADABLE answer must say true, because a failed read is never evidence of absence and the
+   * cost of being wrong is a card the user can close versus a card they cannot get back.
+   */
+  hasLiveBackend(nodeId: string): boolean | Promise<boolean>
+  /**
+   * Was this node DELETED through this process (`PtyManager.endSession('delete')`'s tombstone)?
+   * The deletion must travel: the rescue may never hand back a terminal its owner closed, which
+   * is the same discriminator `clearedNodes` provides on the ssh side.
+   */
+  wasDeleted(nodeId: string): boolean | Promise<boolean>
 }
 
 const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PROJECT_FILE)
@@ -80,12 +108,17 @@ interface LoadedEntry {
 }
 
 export async function writeAtomic(filePath: string, content: string): Promise<void> {
+  // Once enrolled, EVERY legacy producer must refuse, including another WorkspaceStore/process.
+  // A current global cache is not evidence of the calling producer's acknowledged revision.
+  const recovery = path.join(path.dirname(filePath), '.recovery', path.basename(filePath))
+  let managed = false
+  try { await fs.access(recovery); managed = true } catch { /* not enrolled */ }
+  if (managed) throw new Error(`E_EXPECTED_REVISION_REQUIRED: managed file at ${filePath}; recovery at ${recovery}`)
   // Unique temp per write: writers that bypass each other's queue (a second app instance, the SSH
   // poll's index write) must never share a tmp file — interleaved writes into one shared tmp
   // published spliced JSON under the atomic rename. writeFileAtomic also removes its own temp on
   // failure (project.json temps live in the USER'S repo, where litter is visible) and retries the
-  // rename over Windows sharing violations. The error still propagates; per-file callers swallow
-  // it by design.
+  // rename over Windows sharing violations. Save callers must report errors so the UI can retry.
   await writeFileAtomic(filePath, content)
 }
 
@@ -188,25 +221,69 @@ export class WorkspaceStore {
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
   onPersist?: () => void
 
-  constructor(private remoteIO?: RemoteWorkspaceIO) {}
+  constructor(
+    private remoteIO?: RemoteWorkspaceIO,
+    /** Defaults to "nothing is live, nothing was deleted", i.e. NO rescue: an existing caller or
+     *  test that wires neither predicate keeps the exact pre-rescue save behaviour. */
+    private backends: WorkspaceBackendGuards = { hasLiveBackend: () => false, wasDeleted: () => false }
+  ) {}
 
   private get indexPath(): string {
     return path.join(platform().userDataDir, 'workspace.json')
   }
 
+  private versioned?: WorkspaceReconciliationStore
+  private reconciliation(): WorkspaceReconciliationStore {
+    return this.versioned ??= new WorkspaceReconciliationStore({
+      indexPath: this.indexPath,
+      load: async (raw) => {
+        if (raw === undefined) return { workspace: await this.load({ sideline: false }), entries: this.index?.entries ?? [] }
+        // Parse THIS observed index once. A concurrent load may replace this.index,
+        // but cannot substitute another caller's entry view or raw base here.
+        const parsed = JSON.parse(raw)
+        if (parsed?.version !== 3) return { workspace: migrateLegacy(parsed), entries: [] }
+        const workspace = await this.loadV3(parsed as WorkspaceIndexV3, false)
+        this.onPersist?.()
+        return { workspace, entries: (parsed as WorkspaceIndexV3).entries }
+      },
+      published: async (id, raw) => {
+        const entry = this.index?.entries.find((item) => item.id === id)
+        if (!entry) return
+        const file = entry.cwd ? projectFilePath(entry.cwd) : entry.dataFile ? inlineFilePath(id) : undefined
+        // An enrollment/ack can finish after another producer publishes. An old receipt must
+        // not roll host caches back or label newer external bytes as our own watcher echo.
+        if (file && await fs.readFile(file, 'utf8').catch(() => undefined) === raw) {
+          this.lastWritten.set(file, raw)
+          this.revs.set(id, (JSON.parse(raw) as ProjectFileV1).rev)
+        }
+        this.onPersist?.()
+      }
+    })
+  }
+
+  loadReconciled(clientId?: string) { return this.reconciliation().load(clientId) }
+  saveReconciled(request: WorkspaceRevisionRequest) { return this.reconciliation().save(request) }
+  organizerCoordinator() { return this.reconciliation() }
+
   registerIpc(): void {
     platform().handle(IPC.workspaceLoad, () => this.load())
-    platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
+    platform().handle(IPC.workspaceSave, async (workspace: Workspace) => {
+      const recovery = await this.reconciliation().preserveRefusal(workspace)
+      throw new Error(`E_EXPECTED_REVISION_REQUIRED: legacy save refused; proposal retained at ${recovery}`)
+    })
+    platform().handle(IPC.workspaceLoadReconciled, (clientId?: string) => this.loadReconciled(clientId))
+    platform().handle(IPC.workspaceSaveReconciled, (request: WorkspaceRevisionRequest) => this.saveReconciled(request))
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
     platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
       typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
     platform().handle(IPC.projectSettingsRead, (projectId: unknown) =>
-      typeof projectId === 'string' ? this.readProjectSettings(projectId) : null)
+      typeof projectId === 'string' ? this.readAcknowledgedProjectSettings(projectId) : null)
     platform().handle(IPC.projectSettingsWriteShared, (projectId: unknown, doc: ProjectSettingsDoc) =>
       typeof projectId === 'string' ? this.writeProjectSettings(projectId, doc) : false)
-    platform().handle(IPC.projectSettingsUpdateLocal,
-      (projectId: unknown, local: ProjectLocalSettings | undefined) =>
-        typeof projectId === 'string' ? this.updateLocalProjectSettings(projectId, local) : false)
+    // Stale clients interpret any object as true. Never send typed refusals on their boolean wire.
+    platform().handle(IPC.projectSettingsUpdateLocal, () => false)
+    platform().handle(IPC.projectSettingsUpdateLocalReconciled,
+      (projectId: string, request: unknown) => this.updateLocalProjectSettings(projectId, request))
   }
 
   /**
@@ -227,8 +304,9 @@ export class WorkspaceStore {
     if (sideline) await sweepStaleTmp(this.indexPath)
     let raw: string
     try {
-      raw = await fs.readFile(this.indexPath, 'utf-8')
-    } catch {
+      raw = await readPublicationFile(this.indexPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error
       // No index. Usually a first run — but it is also what a crash BETWEEN the sideline rename
       // below and the next index write leaves behind, and that case owes the user the note. Only
       // this branch pays for the readdir, and only for a load that may touch disk anyway.
@@ -313,10 +391,13 @@ export class WorkspaceStore {
         // non-array throws and takes the whole sidebar render down) and hands each entry's node
         // to React Flow.
         const history = sanitizeLoadedClosedSessions(closedSessions)
+        const layoutRules = sanitizeLayoutRulesBlock(base.layoutRules)
+        const { layoutRules: _rawRules, ...withoutRules } = base
         built.push({
           entry: e,
           project: {
-            ...base,
+            ...withoutRules,
+            ...(layoutRules ? { layoutRules } : {}),
             nodes: sanitizeNodeTriggers(base.nodes),
             ...(history ? { closedSessions: history } : {})
           }
@@ -535,9 +616,12 @@ export class WorkspaceStore {
    * rare enough (a panel opening, a launch) that a stale answer would cost more than the read does.
    */
   async readProjectSettings(projectId: string): Promise<ProjectSettingsState | null> {
-    const e = this.index?.entries.find((x) => x.id === projectId)
+    // Local overlays are index metadata: never consume a failed edit's speculative host map,
+    // or let a late receipt roll a newer writer's overlay back. This read grants no write base.
+    const index = JSON.parse(await readPublicationFile(this.indexPath)) as WorkspaceIndexV3
+    const e = index.entries?.find((x) => x.id === projectId)
     if (!e) return null
-    const local = this.localSettingsByProject.get(projectId)
+    const local = sanitizeProjectLocalSettings(e.localSettings)
     if (e.ssh) return this.readSshSettings(projectId, e.ssh, local)
     // An inline canvas has no folder, so there is no shared document to have.
     if (!e.cwd) return { shared: null, local }
@@ -757,22 +841,27 @@ export class WorkspaceStore {
   }
 
   /**
-   * Replaces this machine's overlay for one project (undefined = clear it) and persists the index
-   * NOW, without waiting for a canvas save: a settings edit is often the only thing the user did in
-   * that session, and an overlay that lives only in memory until the next node is dragged is an
-   * overlay that quietly disappears when the app quits.
+   * Index-only caller-bound delta. Never changes host maps speculatively or invokes the legacy
+   * whole-index serializer. Unknown/failed results retain the same immutable operation.
    */
   async updateLocalProjectSettings(
     projectId: string,
-    local: ProjectLocalSettings | undefined
-  ): Promise<boolean> {
-    const e = this.index?.entries.find((x) => x.id === projectId)
-    if (!e) return false
-    const clean = local === undefined ? undefined : sanitizeProjectLocalSettings(local)
-    if (clean && Object.keys(clean).length) this.localSettingsByProject.set(projectId, clean)
-    else this.localSettingsByProject.delete(projectId)
-    await this.persistIndexNow()
-    return true
+    request: unknown
+  ) {
+    return this.reconciliation().localSettings().update(projectId, request)
+  }
+
+  async readAcknowledgedProjectSettings(projectId: string): Promise<ProjectSettingsSnapshot | null> {
+    const view = await this.reconciliation().localSettings().read(projectId)
+    if (!view) return null
+    // Read only the shared local file/cache. This metadata read cannot initiate SSH healing.
+    const sharedRaw = view.entry.cwd && !view.entry.ssh
+      ? await fs.readFile(path.join(view.entry.cwd, PROJECT_DIR, 'settings.json'), 'utf8').catch(() => undefined) : undefined
+    const read = sharedRaw === undefined ? undefined : parseProjectSettingsFile(sharedRaw)
+    const cached = view.entry.ssh && view.entry.settingsCache ? parseProjectSettingsFile(JSON.stringify(view.entry.settingsCache)) : undefined
+    return { local: view.local, localBase: { clientId: view.clientId, indexRevision: view.indexRevision },
+      shared: read?.status === 'ok' ? read.file : cached?.status === 'ok' ? cached.file : null,
+      ...(read?.status === 'conflict' ? { conflict: true as const } : {}) }
   }
 
   /** Rewrites the CURRENT index with the settings maps applied. On `saveChain` like every other
@@ -800,8 +889,9 @@ export class WorkspaceStore {
     const file = projectFilePath(cwd)
     let raw: string
     try {
-      raw = await fs.readFile(file, 'utf-8')
-    } catch {
+      raw = await readPublicationFile(file)
+    } catch (error) {
+      if (isPublicationReadError(error)) throw error
       return null
     }
     try {
@@ -865,8 +955,9 @@ export class WorkspaceStore {
     const file = inlineFilePath(projectId)
     let raw: string
     try {
-      raw = await fs.readFile(file, 'utf-8')
-    } catch {
+      raw = await readPublicationFile(file)
+    } catch (error) {
+      if (isPublicationReadError(error)) throw error
       return null
     }
     try {
@@ -899,18 +990,84 @@ export class WorkspaceStore {
     }
   }
 
+  /**
+   * Keep the nodes a LOCAL save silently dropped while their backend is still running.
+   *
+   * `workspace:save` is a WHOLE-workspace, last-writer-wins write, and local projects have none of
+   * the conflict machinery the ssh path grew (`rescuableNodes` / `clearedNodes`). A client holding
+   * a stale node list therefore republishes it verbatim and every card created since its snapshot
+   * leaves the file, with no error anywhere. That is the 2026-09-01 loss: over four hours eight
+   * panes (four Claude sessions, four shells) disappeared from `project.json` while all eleven tmux
+   * sessions stayed alive, and the next Server restart reloaded the truncated file and rendered two
+   * terminals. The PANES were never at risk — only the cards that address them, which is what makes
+   * this recoverable at all (re-adding a node under its original id reattaches `nt-<id>`).
+   *
+   * The discriminator is the ssh rescue's, asked of the BACKEND instead of the server: a node the
+   * incoming save omits is kept only when it still has a live backend AND was not deleted through
+   * this process. A deletion must always travel, and a node whose session is definitively gone is
+   * an ordinary close. Both predicates default to "no rescue", so a shell that wires neither (the
+   * desktop today, every unit test) writes exactly what it was handed.
+   *
+   * Returns `candidate` itself when nothing is rescued, so the unchanged path allocates nothing.
+   */
+  private async rescueOmittedLocalNodes(
+    prev: ProjectFileV1,
+    candidate: ProjectFileV1,
+    client: string,
+    probed: Map<string, boolean>
+  ): Promise<ProjectFileV1> {
+    const incoming = new Set(candidate.nodes.map((n) => n.id))
+    const omitted = prev.nodes.filter((n) => !incoming.has(n.id))
+    if (!omitted.length) return candidate
+    const rescued: CanvasNodeState[] = []
+    for (const node of omitted) {
+      if (await this.backends.wasDeleted(node.id)) continue
+      let live = probed.get(node.id)
+      if (live === undefined) {
+        live = !!(await this.backends.hasLiveBackend(node.id))
+        probed.set(node.id, live)
+      }
+      if (live) rescued.push(node)
+    }
+    if (!rescued.length) return candidate
+    const nodes = [...candidate.nodes, ...rescued]
+    const present = new Set(nodes.map((n) => n.id))
+    // A rescued node whose frame the same save removed would carry a parentId nothing resolves —
+    // React Flow renders that as a lost child. Promote it to the canvas root instead: its position
+    // is then frame-relative and lands near the origin, which is visibly wrong but recoverable,
+    // and the alternative is the node being invisible again.
+    const reparented = nodes.map((n) => {
+      if (!n.parentId || present.has(n.parentId)) return n
+      const { parentId: _gone, ...root } = n
+      return root as CanvasNodeState
+    })
+    console.warn(
+      `[workspace] rescued ${rescued.length} node(s) with live backends that a save omitted: ` +
+        `${rescued.map((n) => n.id).join(', ')} (client ${client})`
+    )
+    return { ...candidate, nodes: reparented }
+  }
+
   /** In-flight save chain: saves run FIFO (same idiom as SpeechService.queue). Overlapping saves
    *  used to interleave their file writes and land their indexes out of call order — the "both
    *  projects went blank after tab switching" wipe. */
   private saveChain: Promise<unknown> = Promise.resolve()
 
-  save(workspace: Workspace): Promise<void> {
-    const run = this.saveChain.then(() => this.saveNow(workspace))
+  save(workspace: Workspace, opts?: { client?: string }): Promise<void> {
+    const run = this.saveChain.then(() => this.saveNow(workspace, opts?.client ?? 'internal'))
     this.saveChain = run.catch(() => {})
     return run
   }
 
-  private async saveNow(workspace: Workspace): Promise<void> {
+  private async saveNow(workspace: Workspace, client = 'internal'): Promise<void> {
+    try {
+      await fs.access(new ProjectCommitStore(this.indexPath).recovery)
+    } catch { return this.saveLegacyNow(workspace, client) }
+    const recovery = await this.reconciliation().preserveRefusal(workspace)
+    throw new Error(`E_EXPECTED_REVISION_REQUIRED: legacy workspace proposal retained at ${recovery}`)
+  }
+
+  private async saveLegacyNow(workspace: Workspace, client = 'internal'): Promise<void> {
     if (!workspace.projects.length && !this.index) {
       // A store that never read the index may not replace a populated one with "no projects":
       // that is the boot-save wipe — load() failed transiently, the renderer hydrated zero
@@ -993,27 +1150,42 @@ export class WorkspaceStore {
     const projectIdForCwd = new Map(
       index.entries.filter((e) => e.cwd).map((e) => [e.cwd!, e.id] as const)
     )
+    // One probe per node id per save (the rescue's "cache the probe per save" — a node id can only
+    // reach the rescue once anyway, but two tabs on one folder can put the same id in two files).
+    const probedBackends = new Map<string, boolean>()
+    const writeFailures: Error[] = []
     for (const [cwd, candidate] of files) {
       const projectId = projectIdForCwd.get(cwd) ?? cwd
       const file = projectFilePath(cwd)
       const prev = this.lastWritten.get(file)
       const prevParsed = prev ? (JSON.parse(prev) as ProjectFileV1) : null
       if (prevParsed && sameProjectContent(prevParsed, candidate)) continue
-      if (!prevParsed && candidate.nodes.length === 0 && !(await this.emptyOrAbsentOnDisk(file))) {
+      // LOCAL projects only (`files` never holds an ssh project — splitWorkspace puts those in
+      // `cache`, which has its own rescue below).
+      const kept = prevParsed
+        ? await this.rescueOmittedLocalNodes(prevParsed, candidate, client, probedBackends)
+        : candidate
+      // The omission was the ONLY difference: nothing to write, and no rev to bump.
+      if (prevParsed && sameProjectContent(prevParsed, kept)) continue
+      if (!prevParsed && kept.nodes.length === 0 && !(await this.emptyOrAbsentOnDisk(file))) {
         // The local twin of the SSH "never blind-write a file we have not read" rule: an empty
         // canvas from a store that never read this file (setProjectFolder, migration, a hydrate
         // race) must not overwrite the populated — or corrupt-but-recoverable — only copy. The
         // disk stays authoritative; the next load returns its truth.
         continue
       }
-      const next: ProjectFileV1 = { ...candidate, rev: (this.revs.get(projectId) ?? 0) + 1 }
+      const next: ProjectFileV1 = { ...kept, rev: (this.revs.get(projectId) ?? 0) + 1 }
       const content = serializeProjectFile(next)
       try {
         await fs.mkdir(path.dirname(file), { recursive: true })
         await writeAtomic(file, content)
         this.lastWritten.set(file, content)
         this.revs.set(projectId, next.rev)
-      } catch { /* folder gone (unmounted disk): the entry simply stays stale → unavailable next load */ }
+      } catch (cause) {
+        // Keep saving the other projects and the index, but never acknowledge a partial save as
+        // durable. Otherwise the renderer clears dirty and new cards vanish on refresh.
+        writeFailures.push(new Error(`Could not save canvas: ${file}`, { cause }))
+      }
     }
 
     // Inline (cwd-less) canvases: their own file under userData, written before the index and with
@@ -1080,6 +1252,7 @@ export class WorkspaceStore {
     }
 
     this.onPersist?.()
+    if (writeFailures.length) throw new AggregateError(writeFailures, 'Canvas project writes failed')
   }
 
   /**
@@ -1201,7 +1374,7 @@ export class WorkspaceStore {
   }
 
   async readLocalRef(projectId: string): Promise<Project | null> {
-    const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
+    const e = this.index?.entries.find((x) => x.id === projectId && x.cwd && !x.ssh)
     if (!e?.cwd) return null
     const read = await this.readProjectFile(e.cwd, false)
     if (!read) return null
@@ -1552,24 +1725,25 @@ export class WorkspaceStore {
     const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
     if (!e?.cwd) return false
     const file = projectFilePath(e.cwd)
-    let raw: string
+    const coordinator = new ProjectCommitStore(file)
+    let base: Awaited<ReturnType<ProjectCommitStore['observe']>>
     try {
-      raw = await fs.readFile(file, 'utf-8')
+      base = await coordinator.observe()
     } catch {
       return false
     }
-    const updated = appendProjectNode(raw, input, now, accountColor)
+    const updated = appendProjectNode(base.raw, input, now, accountColor)
     if (updated === null) return false
-    try {
-      await writeAtomic(file, updated)
-    } catch {
-      return false
-    }
-    this.lastWritten.set(file, updated)
+    const receipt = await coordinator.commit({ clientId: 'host-registrar', operationId: randomUUID(),
+      expectedRevision: base.revision, proposed: updated })
+    if (receipt.kind !== 'committed' || !receipt.current)
+      throw new Error(`E_REGISTRATION_NOT_PERSISTED: ${receipt.kind}; recovery at ${receipt.recovery}`)
+    const committed = receipt.current.raw
+    this.lastWritten.set(file, committed)
     // appendProjectNode only returns a string it produced from a valid ProjectFileV1, so this parse
     // cannot realistically fail — but a throw here would turn a landed write into a `false`.
     try {
-      const parsed = JSON.parse(updated) as ProjectFileV1
+      const parsed = JSON.parse(committed) as ProjectFileV1
       this.revs.set(e.id, parsed.rev)
       platform().broadcast(
         IPC.workspaceExternalChange,
@@ -1612,22 +1786,23 @@ export class WorkspaceStore {
       // machine (and a relay `pty.attach` only ever reaches THIS machine's tmux anyway).
       if (!e.cwd || e.ssh) continue
       const file = projectFilePath(e.cwd)
-      let raw: string
+      const coordinator = new ProjectCommitStore(file)
+      let base: Awaited<ReturnType<ProjectCommitStore['observe']>>
       try {
-        raw = await fs.readFile(file, 'utf-8')
+        base = await coordinator.observe()
       } catch {
         continue
       }
-      const updated = removeProjectNode(raw, nodeId, now)
+      const updated = removeProjectNode(base.raw, nodeId, now)
       if (updated === null) continue // not in this project (or unreadable file) — keep looking
+      const receipt = await coordinator.commit({ clientId: 'host-removal', operationId: randomUUID(),
+        expectedRevision: base.revision, proposed: updated })
+      if (receipt.kind !== 'committed' || !receipt.current)
+        throw new Error(`E_REMOVAL_NOT_PERSISTED: ${receipt.kind}; recovery at ${receipt.recovery}`)
+      const committed = receipt.current.raw
+      this.lastWritten.set(file, committed)
       try {
-        await writeAtomic(file, updated)
-      } catch {
-        return false
-      }
-      this.lastWritten.set(file, updated)
-      try {
-        const parsed = JSON.parse(updated) as ProjectFileV1
+        const parsed = JSON.parse(committed) as ProjectFileV1
         this.revs.set(e.id, parsed.rev)
         platform().broadcast(
           IPC.workspaceExternalChange,

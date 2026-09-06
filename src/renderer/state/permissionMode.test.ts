@@ -27,14 +27,16 @@ const MODERN: ClaudeCliCaps = {
   autoPermissionMode: true,
   fullscreenTui: true,
   sessionIdFlag: true,
-  nameFlag: true
+  nameFlag: true,
+  remoteControlFlag: true
 }
 const OLD: ClaudeCliCaps = {
   version: '2.1.50 (Claude Code)',
   autoPermissionMode: false,
   fullscreenTui: false,
   sessionIdFlag: false,
-  nameFlag: false
+  nameFlag: false,
+  remoteControlFlag: false
 }
 
 const SSH_SERVER = { id: 's1', label: 'box', host: 'box', user: 'me' } as unknown as SshConnection

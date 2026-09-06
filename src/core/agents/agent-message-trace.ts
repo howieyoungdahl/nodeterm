@@ -38,6 +38,8 @@ import type { AgentMessageOutcomeKind, ReceiptSignal, TraceKind } from './agent-
 export const TRACE_RING_CAPACITY = 200
 
 export interface DeliveryTraceEntry {
+  messageId?: string
+  actionId?: string
   traceId: string
   ts: number
   sourceNodeId: string
@@ -65,6 +67,8 @@ export interface TraceDeps {
 }
 
 export interface DeliveryTraceInput {
+  messageId?: string
+  actionId?: string
   sourceNodeId: string
   sourceTitle: string
   targetNodeId: string
@@ -104,7 +108,7 @@ export async function recordDelivery(
         type: 'agent-message',
         from: input.sourceNodeId,
         to: input.targetNodeId,
-        title: input.outcome
+        title: input.messageId ? `${input.outcome} (${input.messageId})` : input.outcome
       }
     })
     if (ok) traced = 'board-log'
@@ -112,6 +116,8 @@ export async function recordDelivery(
     traced = 'memory' // an exception from the shell's appender is the same fact as `false`
   }
   ring.push({
+    ...(input.messageId ? { messageId: input.messageId } : {}),
+    ...(input.actionId ? { actionId: input.actionId } : {}),
     traceId,
     ts,
     sourceNodeId: input.sourceNodeId,

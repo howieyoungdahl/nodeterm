@@ -99,7 +99,8 @@ vi.mock('child_process', () => {
     const ok = (stdout: string): void => cb?.(null, { stdout, stderr: '' })
     if (args.includes('has-session')) {
       const target = args[args.indexOf('-t') + 1]
-      if (liveTmuxSessions.has(target)) ok('')
+      const exact = target.startsWith('=') ? target.slice(1) : target
+      if (liveTmuxSessions.has(exact)) ok('')
       // Real execFile carries tmux's exit status on err.code — 1 is what probeSaysAbsent
       // reads as genuine absence (vs a spawn failure, which has a string/no code).
       else cb?.(Object.assign(new Error('no such session'), { code: 1 }))

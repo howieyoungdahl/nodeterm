@@ -614,3 +614,87 @@ describe('project icon: emitted only when valid, sanitized on the hostile load p
     expect(fileToProject(f, { id: 'p1' }).icon).toBeUndefined()
   })
 })
+
+/**
+ * Persistent visual preferences, shared half (@shared/appearance).
+ *
+ * These assert the PERSISTENCE claim D5 rests on — that a project border rule and a per-node
+ * override written by the Settings UI / the node popover come back identical after a stop and a
+ * start — at the layer where the file is actually produced and consumed. The resolver's precedence
+ * is covered in src/shared/appearance.test.ts; this is the disk boundary either side of it.
+ */
+describe('shared appearance rules survive the project file', () => {
+  const rules = {
+    version: 1,
+    appearance: {
+      project: { color: '#7aa2f7', thickness: 3 },
+      byProvider: { claude: { color: '#bb9af7', glow: true } }
+    }
+  }
+
+  it('round-trips layoutRules unchanged through projectToFile → fileToProject', () => {
+    const f = projectToFile(project({ layoutRules: rules }), 1, 'now')
+    expect(f.layoutRules).toEqual(rules)
+    expect(fileToProject(f, { id: 'p1' }).layoutRules).toEqual(rules)
+  })
+
+  it('round-trips a per-node override, which outranks every rule when resolved', () => {
+    const p = project({ nodes: [node({ appearance: { color: '#f7768e', thickness: 4 } })] })
+    const back = fileToProject(projectToFile(p, 1, 'now'), { id: 'p1' })
+    expect(back.nodes[0].appearance).toEqual({ color: '#f7768e', thickness: 4 })
+  })
+
+  it('an absent block adds no bytes to the committed file', () => {
+    const f = projectToFile(project(), 1, 'now')
+    expect(f.layoutRules).toBeUndefined()
+    expect(f.nodes[0].appearance).toBeUndefined()
+  })
+
+  // Forward compatibility: an older build must still render a canvas a newer one saved. An unknown
+  // version is kept and changes nothing, and unknown keys drop out field by field rather than
+  // taking the whole block (or the whole project) down with them.
+  it('keeps an unknown rules version and carries another owner key through the round trip', () => {
+    // `layoutRules` is shared property: the layout-rule engine keeps `spawn` / `tray` in the same
+    // block. Rebuilding it field by field would DELETE those on the next ordinary save, out of a
+    // git-shared file. An unknown top-level key survives untouched; an unknown knob inside
+    // `appearance` — a key this module is the only writer of — is still dropped.
+    const f = {
+      ...projectToFile(project(), 1, 'now'),
+      layoutRules: {
+        version: 99,
+        appearance: { project: { color: '#7aa2f7', someFutureKey: 'x' } },
+        someFutureHalf: { spawn: 'grid' }
+      }
+    } as any
+    const back = fileToProject(f, { id: 'p1' })
+    expect(back.layoutRules).toEqual({
+      version: 99,
+      appearance: { project: { color: '#7aa2f7' } },
+      someFutureHalf: { spawn: 'grid' }
+    })
+  })
+
+  // The colour reaches a CSS custom property, so the file is hostile input at BOTH boundaries: a
+  // value that arrived some other way is never written back out as if it were ours either.
+  it('drops a hostile colour on load and refuses to write one back out', () => {
+    const hostile = { color: 'red;background:url(//x)', thickness: 2 }
+    const f = { ...projectToFile(project(), 1, 'now'), layoutRules: { appearance: { project: hostile } } } as any
+    expect(fileToProject(f, { id: 'p1' }).layoutRules).toEqual({ appearance: { project: { thickness: 2 } } })
+
+    const p = project({ nodes: [node({ appearance: hostile as any })], layoutRules: { appearance: { project: hostile } } as any })
+    const out = projectToFile(p, 1, 'now')
+    expect(out.nodes[0].appearance).toEqual({ thickness: 2 })
+    expect(out.layoutRules).toEqual({ appearance: { project: { thickness: 2 } } })
+  })
+
+  // The machine-local half must be structurally unable to travel: there is no field on the file
+  // for it, so even a hand-added one is not read back as a project fact.
+  it('never carries the machine-local half (window edge / motion) into the shared file', () => {
+    const f = projectToFile(project({ layoutRules: rules }), 1, 'now') as any
+    expect(f.appearance).toBeUndefined()
+    expect(f.layoutRules.windowEdge).toBeUndefined()
+    expect(f.layoutRules.reducedMotion).toBeUndefined()
+    const forged = { ...f, layoutRules: { ...rules, windowEdge: { color: '#ff0000' }, reducedMotion: true } }
+    expect(fileToProject(forged, { id: 'p1' }).layoutRules).toEqual(rules)
+  })
+})

@@ -41,6 +41,16 @@ export { applyCanvasMutation } from '@shared/canvas-mutations'
 export { accountNodeColor, agentAccountColor } from '@shared/agents/account-color'
 import { sanitizeInboundNode } from '@shared/node-exec'
 import { NODE_COLORS } from '@shared/node-colors'
+import type { BorderAppearance } from '@shared/appearance'
+import {
+  COMPACT_CONTROL_NODE_SIZE,
+  resolveControlNodeSize,
+  resolveControlNodeSizeName,
+  type ControlNodeSizeName,
+  type NodeSize
+} from '@shared/control-node-size'
+import type { NodeRole } from '@shared/node-role'
+import type { WorkerFrameNode, WorkerFramePlan } from '@shared/worker-frame'
 
 // Preserve the renderer's long-standing import surface; validation and the palette now live in
 // shared so Server Edition and canvas-control accept exactly what these pickers display.
@@ -84,11 +94,31 @@ export interface NodeData {
   hideFanout?: boolean
   /** Expanded height to restore when un-collapsing (kept out of the persisted size). */
   expandedHeight?: number
+  /** Named geometry choice for agent nodes opened through canvas-control. */
+  controlSize?: ControlNodeSizeName
+  /** Who this node belongs to; absent = 'primary'. Persisted — see CanvasNodeState.role. */
+  role?: NodeRole
+  /** Generated nodes: the one-line owner + task line. Persisted — see CanvasNodeState.taskSummary. */
+  taskSummary?: string
+  /** group-only: this frame is a control-plane spawn tray. Persisted — see CanvasNodeState.taskFrame. */
+  taskFrame?: boolean
+  /**
+   * Set while the node is expanded out of its compact footprint: the ROOT-space rect the "put
+   * away" half of the toggle gives back. Persisted — see CanvasNodeState.compactRect.
+   */
+  compactRect?: { x: number; y: number; width: number; height: number }
+  /** Operator intent: automatic placement leaves this node alone. Persisted. */
+  pinned?: boolean
+  /** Set the first time the operator drags or resizes the node by hand. Persisted. */
+  manualPlacement?: boolean
   /**
    * Set while the node is maximized to the viewport (issue #399): the ROOT-space rect the
    * restore toggle gives back. Persisted — see CanvasNodeState.premaxRect.
    */
   premaxRect?: { x: number; y: number; width: number; height: number }
+  /** Explicit visual override for this node/frame — the top tier of `resolveNodeAppearance`
+   *  (@shared/appearance). Persisted and git-shared; see CanvasNodeState.appearance. */
+  appearance?: BorderAppearance
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
   /**
@@ -276,6 +306,73 @@ function terminalNodeSize(): { width: number; height: number } {
   return {
     width: clamp(s.defaultNodeWidth, 280, 2400, TERMINAL_SIZE.width),
     height: clamp(s.defaultNodeHeight, 160, 1600, TERMINAL_SIZE.height)
+  }
+}
+
+/**
+ * Resolve the geometry used only by canvas-control agent opens/resizes. Manual factories continue
+ * to call terminalNodeSize directly and therefore retain the configured normal dimensions.
+ */
+export function canvasControlNodeSize(value?: string): NodeSize | null {
+  return resolveControlNodeSize(value, terminalNodeSize())
+}
+
+export interface CanvasControlNodeGeometry {
+  name: ControlNodeSizeName
+  size: NodeSize
+}
+
+export function canvasControlNodeGeometry(value?: string): CanvasControlNodeGeometry | null {
+  const name = resolveControlNodeSizeName(value)
+  const size = canvasControlNodeSize(value)
+  return name && size ? { name, size } : null
+}
+
+/**
+ * Apply control-plane terminal geometry without letting React Flow's previous measurement win on
+ * the next serialization. A collapsed node stays header-height while its new expanded height is
+ * persisted through NodeData.expandedHeight.
+ */
+export function resizeTerminalNodeGeometry(
+  node: CanvasNode,
+  geometry: CanvasControlNodeGeometry
+): CanvasNode {
+  const { name, size } = geometry
+  const height = node.data.collapsed ? COLLAPSED_HEIGHT : size.height
+  return {
+    ...node,
+    measured: undefined,
+    width: size.width,
+    height,
+    style: { ...node.style, width: size.width, height },
+    data: { ...node.data, expandedHeight: size.height, controlSize: name }
+  }
+}
+
+/**
+ * Compatibility for a refreshed Server renderer talking to the pre-size running process. Core
+ * headless publications have no client `src`; manual browser opens always do. Only a NEW agent node
+ * with no explicit marker is upgraded, so later resizes and new-server `--size normal` are retained.
+ */
+export function normalizeLegacyServerControlSpawnMutation(
+  mutation: CanvasMutation,
+  nodeAlreadyExists: boolean
+): CanvasMutation {
+  if (
+    mutation.op !== 'upsert' ||
+    nodeAlreadyExists ||
+    mutation.src !== undefined ||
+    mutation.node.kind !== 'terminal' ||
+    !mutation.node.agentId ||
+    mutation.node.controlSize !== undefined
+  ) return mutation
+  return {
+    ...mutation,
+    node: {
+      ...mutation.node,
+      size: { ...COMPACT_CONTROL_NODE_SIZE },
+      controlSize: 'compact'
+    }
   }
 }
 
@@ -630,7 +727,9 @@ export function createAgentNode(
    *  brief survives the single-line typed delivery. Validated by the caller
    *  (`promptFilePathError` + an existence check) — the factory trusts it. Trailing/optional so
    *  every existing caller is unchanged. */
-  promptFile?: string
+  promptFile?: string,
+  /** Named, concrete persisted geometry for a canvas-control open. Manual callers leave absent. */
+  controlGeometry?: CanvasControlNodeGeometry
 ): CanvasNode {
   const { label, color: agentColor } = resolveAgent(agentId)
   // ONE binding decision, shared with the phone-registration path (core/project-node-append) so
@@ -754,7 +853,7 @@ export function createAgentNode(
       `[custom-agent] ${label}: ${missingEnv.map((m) => '${env:' + m + '}').join(', ')} unset in launch command — expanded to empty.`
     )
   }
-  const size = terminalNodeSize()
+  const size = controlGeometry?.size ?? terminalNodeSize()
   return {
     id: nodeId,
     type: 'terminal',
@@ -769,6 +868,7 @@ export function createAgentNode(
       agentId,
       // See `boundAccountId` (shared/agents/account-binding.ts) for which agents bind at all.
       ...(bound ? { accountId: bound } : {}),
+      ...(controlGeometry ? { controlSize: controlGeometry.name } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
@@ -1613,6 +1713,146 @@ export function restoreMaximizedNode(nodes: CanvasNode[], nodeId: string): Canva
 }
 
 /**
+ * "Put away / Expand" (plan PR-A A3): the one action that moves a card between its compact
+ * footprint and the configured normal size — and back to EXACTLY where and how big it was, which
+ * is why the compact rect is remembered rather than recomputed.
+ *
+ * It is a canvas-state transform and nothing else. It never respawns, kills or writes to the PTY:
+ * putting a worker away is filing it, not ending it. `resizeTerminalNodeGeometry`'s rule applies
+ * here too — the stale React Flow measurement is dropped in the same tick, or a commit racing the
+ * re-measure persists the OLD size.
+ *
+ * `null` = the toggle has nothing to offer (not a terminal, a frame, collapsed, mid-maximize, or
+ * already at the normal size having never been compact). The button and the menu row both read
+ * this, so neither can offer a no-op.
+ */
+export function compactToggleState(
+  node: CanvasNode | undefined,
+  normal: NodeSize = terminalNodeSize()
+): 'expand' | 'put-away' | null {
+  if (!node || node.type !== 'terminal') return null
+  if (node.data.collapsed || node.data.premaxRect) return null
+  if (node.data.compactRect) return 'put-away'
+  const width = nodeW(node) || (node.style?.width as number) || 0
+  const height = nodeH(node) || (node.style?.height as number) || 0
+  if (!(width > 0) || !(height > 0)) return null
+  return width < normal.width || height < normal.height ? 'expand' : null
+}
+
+/**
+ * Apply that toggle. Expanding remembers the node's ROOT-space rect (same reason as
+ * `premaxRect`: re-fitting an ancestor frame moves its origin, and root-space survives an
+ * ungroup meanwhile) and grows the node in place; putting away restores the remembered rect
+ * exactly. `controlSize` is kept truthful in both directions so a later canvas-control
+ * `resize --size compact|normal` still means what it says.
+ */
+export function toggleCompactNode(
+  nodes: CanvasNode[],
+  nodeId: string,
+  normal: NodeSize = terminalNodeSize()
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  const state = compactToggleState(node, normal)
+  if (!node || !state) return nodes
+  if (state === 'put-away') {
+    return withNodeRect(nodes, node, node.data.compactRect!, {
+      compactRect: undefined,
+      controlSize: 'compact'
+    })
+  }
+  const root = rootPosition(node, nodes)
+  const compactRect = {
+    x: root.x,
+    y: root.y,
+    width: nodeW(node) || (node.style?.width as number) || 0,
+    height: nodeH(node) || (node.style?.height as number) || 0
+  }
+  return withNodeRect(
+    nodes,
+    node,
+    { x: root.x, y: root.y, width: normal.width, height: normal.height },
+    { compactRect, controlSize: 'normal' }
+  )
+}
+
+/**
+ * Record that the operator placed these nodes BY HAND. Called only from the React Flow change
+ * handler's drag-end / resize path — programmatic placement (arrange, tidy, maximize, zone snap,
+ * the spawn-time tray) goes through `setNodes` directly and never reaches it, which is exactly
+ * the distinction the flag has to make. Idempotent, and it returns the SAME array when nothing
+ * changes so the caller's setNodes is a no-op re-render at worst.
+ */
+export function markManualPlacement(nodes: CanvasNode[], ids: readonly string[]): CanvasNode[] {
+  const set = new Set(ids)
+  if (!set.size) return nodes
+  let changed = false
+  const next = nodes.map((n) => {
+    if (!set.has(n.id) || n.data.manualPlacement) return n
+    changed = true
+    return { ...n, data: { ...n.data, manualPlacement: true } }
+  })
+  return changed ? next : nodes
+}
+
+/**
+ * Read the shape @shared/worker-frame plans over off a live React Flow node. The DECISION about
+ * where a spawned worker lands is shared with the Server shell; only the geometry differs, and
+ * `applyWorkerFramePlan` below hands that to the same transforms a hand-made frame goes through.
+ */
+export function workerFrameNodeOf(node: CanvasNode): WorkerFrameNode {
+  return {
+    id: node.id,
+    kind: node.type ?? 'terminal',
+    parentId: node.parentId,
+    role: node.data.role,
+    pinned: node.data.pinned,
+    manualPlacement: node.data.manualPlacement,
+    taskFrame: node.data.taskFrame
+  }
+}
+
+/** Apply that decision. Returns the SAME array for a plan with nothing to do. */
+export function applyWorkerFramePlan(
+  nodes: CanvasNode[],
+  plan: WorkerFramePlan,
+  label: string
+): CanvasNode[] {
+  if (plan.kind === 'none') return nodes
+  if (plan.kind === 'join') {
+    return plan.memberIds.reduce((acc, id) => reparentNode(acc, id, plan.groupId), nodes)
+  }
+  const before = new Set(nodes.filter((n) => n.type === 'group').map((n) => n.id))
+  const next = groupSelectedNodes(nodes, [...plan.memberIds], before.size)
+  const frame = next.find((n) => n.type === 'group' && !before.has(n.id))
+  // `groupSelectedNodes` refuses a set that does not share one container; a refusal returns the
+  // canvas untouched rather than half-forming a tray.
+  if (!frame) return nodes
+  // Collapsed on creation, like the Server path: a tray that opens expanded has put nothing away.
+  return next.map((n) =>
+    n.id === frame.id
+      ? { ...n, data: { ...n.data, title: label, taskFrame: true, collapsed: true } }
+      : n
+  )
+}
+
+/** Operator intent: pin (or unpin) these nodes against automatic placement. */
+export function setNodesPinned(
+  nodes: CanvasNode[],
+  ids: readonly string[],
+  pinned: boolean
+): CanvasNode[] {
+  const set = new Set(ids)
+  if (!set.size) return nodes
+  let changed = false
+  const next = nodes.map((n) => {
+    if (!set.has(n.id) || !!n.data.pinned === pinned) return n
+    changed = true
+    return { ...n, data: { ...n.data, pinned: pinned || undefined } }
+  })
+  return changed ? next : nodes
+}
+
+/**
  * Wraps nodes that share ONE container in a new group frame. The members may themselves be
  * frames, so this is how a nested tree is built. The frame is created beside its members inside
  * their current parent and every root-space position stays fixed. Mixed containers and
@@ -1950,8 +2190,15 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         // node data — so every surface that renders an icon gets a value this module vouched for
         // rather than each one re-deciding. An unrecognized icon becomes no icon.
         icon: normalizeNodeIcon(n.icon),
+        controlSize: n.controlSize,
+        role: n.role,
+        taskSummary: n.taskSummary,
+        taskFrame: n.taskFrame,
+        pinned: n.pinned,
+        manualPlacement: n.manualPlacement,
         expandedHeight: n.size.height,
         premaxRect: n.premaxRect,
+        compactRect: n.compactRect,
         shell: n.shell,
         cwd: n.cwd,
         text: n.text,
@@ -1973,7 +2220,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
         worktree: n.worktree,
-        trigger: n.trigger
+        trigger: n.trigger,
+        appearance: n.appearance
       }
     }
   })
@@ -2031,6 +2279,12 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         // peer canvas mutation or a future caller put on live node data cannot be written to the
         // shared file unchecked — the file is only ever as trustworthy as its last writer.
         icon: normalizeNodeIcon(n.data.icon),
+        controlSize: n.data.controlSize,
+        role: n.data.role,
+        taskSummary: n.data.taskSummary,
+        taskFrame: n.data.taskFrame,
+        pinned: n.data.pinned,
+        manualPlacement: n.data.manualPlacement,
         parentId: n.parentId,
         shell: n.data.shell,
         cwd: n.data.cwd,
@@ -2054,7 +2308,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         sshFs: n.data.sshFs,
         worktree: n.data.worktree,
         trigger: n.data.trigger,
-        premaxRect: n.data.premaxRect
+        premaxRect: n.data.premaxRect,
+        compactRect: n.data.compactRect,
+        appearance: n.data.appearance
       }
     })
 }

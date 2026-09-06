@@ -191,7 +191,6 @@ describe('AccountsSection — detected config dirs', () => {
     expect(byLabel(host, `Link ${CLAUDE_2}`)).toBeUndefined()
     root.unmount()
   })
-
   it('renders nothing when every observed dir is already known', () => {
     useAgentStatus.setState({
       byId: {

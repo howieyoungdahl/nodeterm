@@ -463,7 +463,7 @@ function nextLocalIgnoreShared(
 const SAVE_FAILED_NOTE: Record<'shared' | 'local', string> = {
   shared:
     'Could not save — the shared settings file may be conflicted or unavailable; reload the project settings.',
-  local: 'Could not save this override on this machine; reload the project settings.'
+  local: 'Could not save this override on this machine; the edit is retained. Retry the retained local edit above.'
 }
 
 /** Why a run the service refused never happened. A refusal must read as a refusal: the button was
@@ -654,6 +654,7 @@ function FamilySection({
   ssh,
   saveShared,
   saveLocal,
+  localError,
   reload
 }: {
   projectId: string
@@ -688,6 +689,7 @@ function FamilySection({
    *  file's answer, not ours (it went conflicted, or the folder went away, between our read and our
    *  write), and only a fresh read can make the pane describe the file as it now is. */
   reload: () => void
+  localError?: string | null
 }): React.JSX.Element | null {
   const config = FAMILY_CONFIG[family]
   const sharedDisabled = conflict || !ready || !sharedEditable
@@ -729,15 +731,13 @@ function FamilySection({
   }
   const commitLocal = (key: string, value: unknown): void => {
     if (localDisabled) return
-    void saveLocal((current) => nextLocalField(current, family, key, value)).then((ok) =>
-      settle('local', ok)
-    )
+    void saveLocal((current) => nextLocalField(current, family, key, value)).then(
+      (ok) => settle('local', ok), () => settle('local', false))
   }
   const commitIgnoreShared = (on: boolean): void => {
     if (localDisabled) return
-    void saveLocal((current) => nextLocalIgnoreShared(current, family, on)).then((ok) =>
-      settle('local', ok)
-    )
+    void saveLocal((current) => nextLocalIgnoreShared(current, family, on)).then(
+      (ok) => settle('local', ok), () => settle('local', false))
   }
 
   // EFFECTIVE values (local-over-shared, `ignoreShared` respected), like the setup family's run
@@ -901,7 +901,7 @@ function FamilySection({
           }}
         />
       ) : null}
-      {saveFailed ? (
+      {saveFailed && (saveFailed !== 'local' || localError !== null) ? (
         <p role="status" className="text-[12px] leading-relaxed text-[color:var(--warn)]">
           {SAVE_FAILED_NOTE[saveFailed]}
         </p>
@@ -940,6 +940,7 @@ export function ProjectFamilyEditors({
   ssh = false,
   saveShared,
   saveLocal,
+  localError,
   reload
 }: {
   projectId: string
@@ -962,6 +963,7 @@ export function ProjectFamilyEditors({
   /** SSH project → the worktree family is inert (local-only feature). Defaults false; forwarded to
    *  each `FamilySection` for its per-row caveat. */
   ssh?: boolean
+  localError?: string | null
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
   saveLocal: (
     update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
@@ -998,6 +1000,7 @@ export function ProjectFamilyEditors({
           ssh={ssh}
           saveShared={saveShared}
           saveLocal={saveLocal}
+          localError={localError}
           reload={reload}
         />
       ))}

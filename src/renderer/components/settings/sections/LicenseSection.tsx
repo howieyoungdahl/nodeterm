@@ -112,7 +112,7 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
       searchEntries={ENTRIES}
     >
       <SearchableRow {...ROWS.license}>
-        {ent.isPremium ? (
+        {ent.readError ? <p role="status">{ent.readError}</p> : ent.isPremium ? (
           <div className="space-y-3">
             <ProCompare />
             <p className="text-sm text-muted">

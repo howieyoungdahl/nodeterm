@@ -4,6 +4,8 @@ import { isReleaseRefusal } from '@renderer/lib/licenseCopy'
 
 interface EntitlementState {
   status: LicenseStatus
+  /** A failed status read is not a statement about entitlement or device counts. */
+  readError: string | null
   /** True when an active Pro entitlement is present — features gate on this. */
   isPremium: boolean
   /** Team seat cap (premium → max(3, N), premium-no-field → 3 = Pro's free seats, free/inactive
@@ -67,16 +69,23 @@ const EMPTY_DETAIL: LicenseDetail = {
 
 export const useEntitlement = create<EntitlementState>((set, get) => {
   const apply = (status: LicenseStatus) =>
-    set({ status, isPremium: status.active, seats: status.seats })
+    set({ status, isPremium: status.active, seats: status.seats, readError: null })
   // Live updates from the main process (launch refresh, offline grace).
   window.nodeTerminal.license.onChange(apply)
   return {
     status: EMPTY,
+    readError: null,
     isPremium: false,
     seats: 0,
     detail: null,
     async hydrate() {
-      apply(await window.nodeTerminal.license.getStatus())
+      try {
+        apply(await window.nodeTerminal.license.getStatus())
+      } catch (error) {
+        set({ readError: (error as { code?: string })?.code === 'E_UNSUPPORTED'
+          ? 'License management is unavailable in this browser build.'
+          : 'License status could not be read. Entitlement has not been verified.' })
+      }
     },
     async upgrade(target) {
       apply(await window.nodeTerminal.license.upgrade(target))

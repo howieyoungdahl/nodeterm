@@ -72,7 +72,8 @@ export function autosaveDelay(
   conflictOpen: boolean,
   delivery: SaveDelivery | undefined
 ): number | null {
-  if (!dirty || conflictOpen) return null
+  // Hydration and explicit writes can fail before the first edit marks the canvas dirty.
+  if ((!dirty && !delivery) || conflictOpen) return null
   if (!delivery) return SAVE_DEBOUNCE_MS
   return saveRetryDelay(delivery.attempts)
 }

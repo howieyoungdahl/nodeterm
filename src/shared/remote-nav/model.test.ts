@@ -35,7 +35,6 @@ import {
   UNICODE_LONG_TITLE,
   generateFixture
 } from './fixture'
-import { resumeCommandWith } from '../agents/config'
 
 // ---------------------------------------------------------------------------
 // Test fixtures — a small hand-built registry, so a rule is asserted against input a reader can
@@ -142,18 +141,12 @@ describe('the vocabulary this model switches on stays equal to the fixture it is
     expect(COLD_BAND).toBe('COLD')
   })
 
-  it('the resume grammar agrees with the app launcher for every provider it emits', () => {
+  it('registry metadata never selects a provider account by emitting a bare resume', () => {
     const sid = 'abc-123'
-    for (const [provider, expected] of [
-      ['claude', resumeCommandWith('claude', 'claude', sid)],
-      ['codex', resumeCommandWith('codex', 'codex', sid)],
-      ['gemini', resumeCommandWith('gemini', 'gemini', sid)],
-      ['grok', resumeCommandWith('grok', 'grok', sid)],
-      ['opencode', resumeCommandWith('opencode', 'opencode', sid)],
-      ['copilot', resumeCommandWith('copilot', 'copilot', sid)]
-    ] as const) {
+    for (const provider of ['claude', 'codex', 'gemini', 'grok', 'opencode', 'copilot']) {
       const open = openActionFor('term-x', node({ class: 'DEAD', provider, session: sid }), null, null)
-      expect(open.command, provider).toBe(expected)
+      expect(open.command, provider).toBeNull()
+      expect(open.typingAllowed).toBe(false)
     }
   })
 })
@@ -278,15 +271,17 @@ describe('opening a session', () => {
   it('a live node attaches to its own tmux session by EXACT target', () => {
     const open = openActionFor('term-abc-123', node({ class: 'BUSY', band: 'WARM' }), null, null)
     expect(open.kind).toBe('tmux-attach')
-    expect(open.command).toBe(`tmux -L node-terminal attach -t =${navSessionName('term-abc-123')}`)
+    expect(open.command).toBe(`tmux -L node-terminal attach -r -t =${navSessionName('term-abc-123')}`)
     expect(open.command).toContain('-t =nt-') // without `=`, tmux prefix-matches and can hit another session
-    expect(open.typingAllowed).toBe(true)
+    expect(open.typingAllowed).toBe(false)
+    expect(open.refusal?.code).toBe('CONTROL-NOT-GRANTED')
   })
 
-  it('a dead node falls back to the provider resume line', () => {
+  it('a dead node needs explicit host/account-aware reopening', () => {
     const open = openActionFor('term-abc-123', node({ class: 'DEAD', provider: 'codex', session: 'sess-9' }), null, null)
-    expect(open.kind).toBe('resume')
-    expect(open.command).toBe('codex resume sess-9')
+    expect(open.kind).toBe('none')
+    expect(open.command).toBeNull()
+    expect(open.note).toContain('host/account-aware')
   })
 
   it('refuses to put an unsafe session id on a command line', () => {
