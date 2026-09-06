@@ -51,6 +51,7 @@ import {
   type CapabilityAckMap
 } from '../project-capability-consent'
 import type { ProjectCapability } from '../../shared/project-capabilities'
+import type { AssignmentValidator, MessageIdentity } from './message-integrity'
 
 /** The little the service needs to know about a stored node. */
 export interface MessagingStoredNode {
@@ -192,7 +193,7 @@ const QUEUE_TRACE_AUTHOR = { name: 'nodeterm', color: '#8b8b8b' } as const
  */
 export function createDeliveryQueue(
   deps: AgentMessagingDeps,
-  opts: { capacity?: number; ttlMs?: number; schedule?: DeliveryQueueDeps['schedule'] } = {}
+  opts: { capacity?: number; ttlMs?: number; schedule?: DeliveryQueueDeps['schedule']; validateAssignment?: AssignmentValidator } = {}
 ): DeliveryQueue {
   const now = deps.now ?? ((): number => Date.now())
   /** The project that lists a node id, for a board-log write. A trace is not an authorization, so
@@ -212,12 +213,13 @@ export function createDeliveryQueue(
       kind: 'event',
       event: { type: 'agent-message', from: req.sourceNodeId, to: req.targetNodeId, title }
     }
-    void deps.appendBoardLog(projectId, entry)
+    void deps.appendBoardLog(projectId, entry).catch(() => {})
   }
   return new DeliveryQueue(
     {
       now,
-      deliver: (qreq) =>
+      validateAssignment: opts.validateAssignment,
+      deliver: (qreq, beforeSend) =>
         runDelivery(
           {
             verb: qreq.verb as AgentMessageDeliverRequest['verb'],
@@ -225,7 +227,8 @@ export function createDeliveryQueue(
             targetNodeId: qreq.targetNodeId,
             body: qreq.body
           },
-          deps
+          deps,
+          { message: qreq.message, beforeSend }
         ),
       // The trace leg: ring always, board log when the TARGET's owning project is resolvable.
       trace: (input) =>
@@ -237,8 +240,8 @@ export function createDeliveryQueue(
           now
         }),
       // The sender leg: a durable line where the sender's operator will see it.
-      onExpired: (req) => senderBoardLog(req, 'expired'),
-      onFlushed: (req, outcome) => senderBoardLog(req, outcome.kind),
+      onExpired: (req) => senderBoardLog(req, `expired${req.message ? ` (${req.message.message_id})` : ''}`),
+      onFlushed: (req, outcome) => senderBoardLog(req, `${outcome.kind}${req.message ? ` (${req.message.message_id})` : ''}`),
       // Injected so a test pins TTL expiry deterministically; production uses the default setTimeout.
       ...(opts.schedule ? { schedule: opts.schedule } : {})
     },
@@ -329,6 +332,9 @@ export function renderMessageOutcome(o: AgentMessageOutcome): AgentMessageReply 
     : 'Do not retry.'
   const trace = 'traceId' in o ? ` Trace ${o.traceId}${'traced' in o ? ` (${o.traced})` : ''}.` : ''
   switch (o.kind) {
+    case 'unknown':
+    case 'messageRejected':
+      return { ok: false, error: `${o.kind}: ${o.reason}. Do not retry.${trace}`, result: o }
     case 'delivered':
       return {
         ok: true,
@@ -453,6 +459,8 @@ export function renderMessageOutcome(o: AgentMessageOutcome): AgentMessageReply 
 /** Outcomes whose bytes reached the pane — the only ones that consume flow budget (`noteSent`'s
  *  own contract: "called after the write, not before the gate"). */
 const WROTE: ReadonlySet<AgentMessageOutcome['kind']> = new Set([
+  // An exception after a write is uncertain; reserve flow as though it wrote to prevent a burst.
+  'unknown',
   'delivered',
   'stalled',
   'deliveredToReplacedTarget'
@@ -468,7 +476,8 @@ const WROTE: ReadonlySet<AgentMessageOutcome['kind']> = new Set([
  */
 export async function runDelivery(
   req: AgentMessageDeliverRequest,
-  deps: AgentMessagingDeps
+  deps: AgentMessagingDeps,
+  guard?: { message?: MessageIdentity; beforeSend: NonNullable<DeliveryDeps['beforeSend']> }
 ): Promise<AgentMessageOutcome> {
   const now = deps.now ?? ((): number => Date.now())
 
@@ -521,6 +530,7 @@ export async function runDelivery(
     (deps.mirrorEntry ?? coreMirrorEntry)(req.targetNodeId)?.agentId ?? ''
 
   const delivery: DeliveryDeps = {
+    ...(guard ? { beforeSend: guard.beforeSend } : {}),
     sessionPresence: deps.sessionPresence ? (id) => deps.sessionPresence!(id) : undefined,
     paneOwner: (id) => deps.paneOwner(id),
     // #210 retired the `#{bracket_paste_flag}` probe with a "do not reintroduce" note
@@ -552,6 +562,7 @@ export async function runDelivery(
   try {
     const outcome = await deliverAgentMessage(
       {
+        message: guard?.message,
         targetNodeId: req.targetNodeId,
         sourceNodeId: req.sourceNodeId,
         // The from-line is composed HERE from the store's title (oneLine'd inside buildEnvelope);

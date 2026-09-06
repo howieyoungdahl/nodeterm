@@ -3,6 +3,7 @@ import type { AgentState } from '../../shared/agents/normalize'
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
 import { agentPidIn, isAgentPane } from '../../shared/agents/pane-owner-predicate'
 import { buildEnvelope, newFrameNonce } from './agent-message-envelope'
+import { canonicalMessage, type MessageIdentity } from './message-integrity'
 import { PANE_PROBE_TIMEOUT_MS, probeWithin } from './pane-probe'
 import {
   decideDelivery,
@@ -66,6 +67,7 @@ export interface ReceiptEvent {
 }
 
 export interface DeliveryRequest {
+  message?: MessageIdentity
   targetNodeId: string
   sourceNodeId: string
   sourceTitle: string
@@ -106,6 +108,8 @@ export interface DeliveryRequest {
  * guarantee is checked by execution, not by grepping this file for a name.
  */
 export interface DeliveryDeps {
+  /** Recheck queued expiry/assignment inside the node lock, immediately before writing. */
+  beforeSend?(): Promise<AgentMessageOutcome | undefined>
   /** Optional detached-session truth, probed only AFTER the free permission/status gates.
    * Browser attachment is not proof of whether a persistent tmux session exists. */
   sessionPresence?(nodeId: string): Promise<'alive' | 'dead' | 'unknown'>
@@ -331,6 +335,8 @@ export async function deliverAgentMessage(
       sourceTitle: req.sourceTitle,
       targetNodeId: req.targetNodeId,
       outcome,
+      messageId: req.message?.message_id,
+      actionId: req.message?.action_id,
       ...(receipt ? { receipt } : {}),
       bodyChars
     })
@@ -440,7 +446,12 @@ export async function deliverAgentMessage(
     // herdr :116 — framing an unaware app made OpenCode read `A != B` as shell mode; `-p` frames
     // only when the pane's app really requested bracketed paste, so that failure mode is tmux's
     // to prevent now, not ours.
+    if (req.message && (!deps.beforeSend || !canonicalMessage(req.message, req.targetNodeId)))
+      return refuse({ kind: 'messageRejected', reason: 'assignment-validator-unavailable' })
+    const refusal = 'beforeSend' in deps ? await deps.beforeSend?.() : undefined
+    if (refusal) return refuse(refusal)
     const payload = buildEnvelope({
+      message: req.message,
       nonce: (deps.nonce ?? newFrameNonce)(),
       sourceId: req.sourceNodeId,
       sourceTitle: req.sourceTitle,
@@ -452,7 +463,12 @@ export async function deliverAgentMessage(
     // subscription opened after that probe would miss it and report `stalled` for a message that
     // demonstrably landed. See `watchForReceipt`: that miss is what makes an LLM send it twice.
     const watch = watchForReceipt(req.targetNodeId, deps.subscribeEvents)
-    const wrote = await deps.sendEnvelope(req.targetNodeId, payload)
+    let wrote: boolean
+    try { wrote = await deps.sendEnvelope(req.targetNodeId, payload) }
+    catch {
+      watch.cancel()
+      return refuse({ kind: 'unknown', reason: 'delivery-exception' })
+    }
     // The pane went away between the gate and the write. Not a failure of ours and not retryable:
     // the node is gone. It IS traced: a `sendEnvelope` that fails after a partial write has left
     // bytes in somebody's pane, and that must not be the one event with no record.

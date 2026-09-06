@@ -316,6 +316,8 @@ and instruction installation; temporary test paths must never reach live provide
 
 ## Testing
 
+Messaging queue changes must preserve deadlines at the actual send boundary and keep transport delivery separate from recipient work acceptance. The opt-in assignment adapter, receipt bounds, and remaining legacy integration are documented in `docs/message-delivery-integrity.md`.
+
 `npm test` must pass, and `npm run typecheck` is the fastest gate.
 
 Beyond that, one habit is worth more than any other here:
