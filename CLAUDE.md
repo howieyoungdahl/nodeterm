@@ -159,6 +159,16 @@ button; an unresolved external-change conflict pauses saving. Regression tests m
 exercise real timers under fake time, and drive failed project writes through the store IPC handler.
 This protects both desktop and Server Edition; it does not create or restart terminal backends.
 
+The optional browser-server updater (`core/server-updater.ts`, `server/update-main.ts`) builds
+one configured integration ref in detached release worktrees. It uses an updater-private fetched
+ref because FETCH_HEAD is shared with concurrent worktrees. Activation checks browser/spawn/message
+quiescence twice, backs up saved canvases, retains original tmux pane ids/PIDs, and verifies both
+process and card continuity after switching a stable symlink. A failed activation rolls back the
+release and rechecks continuity. It never restores old workspace data over newer writes. Open
+browsers defer updates; this is not a coordinated browser-save protocol. The install helper only
+sets up user units and a current-build symlink; it does not restart the live service. Details and
+limits: `docs/server-auto-updates.md`.
+
 **React Flow is the single live source of truth** for nodes. There is intentionally no
 separate store mirroring node state — earlier dual-source designs caused sync bugs.
 `src/renderer/state/workspace.ts` holds only pure helpers: the color palette, the node

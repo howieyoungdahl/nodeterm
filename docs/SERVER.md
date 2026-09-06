@@ -57,6 +57,10 @@ npm run server:start  # node out/server/main.cjs
 
 ## Configuration
 
+For automatic updates to an existing browser-server user service, see
+[Automatic browser-server updates](server-auto-updates.md). It builds merged changes separately
+and waits for browser viewers to disconnect before activating a verified release.
+
 Precedence: **CLI flag > environment variable > default.**
 
 | Flag | Env var | Default | Meaning |

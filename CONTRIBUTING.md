@@ -125,6 +125,10 @@ reporting "no sessions" on a host running thirty.
 to keep changes unsaved, show a warning, and retry on a bounded schedule. Swallowing a per-project
 error can leave new terminal cards only in browser memory until a refresh removes them. Keep
 initial saves on the same failure path, and never let retries override an unresolved conflict.
+Browser-server updates must build in isolated release worktrees and preserve tmux. The optional
+updater waits for all browser clients to disconnect, verifies exact pane ids/PIDs and saved cards,
+and rolls back failed activation. Never replace those checks with an HTTP-only health check.
+See `docs/server-auto-updates.md` for the deployment contract and its remaining connection race.
 
 **Degrade to nothing, never to something wrong.** A probe that fails means the bare, safe command —
 never a substituted nearest match. A hand-editable value that is unrecognised must yield the safe
