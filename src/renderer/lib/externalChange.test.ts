@@ -4,7 +4,8 @@ import {
   canonicalJson,
   conflictBarMessage,
   decideExternalChange,
-  mergeIncomingNodes
+  mergeIncomingNodes,
+  reloadKeepingOpenNodes
 } from './externalChange'
 import type { CanvasNodeState, Project } from '@shared/types'
 
@@ -33,7 +34,7 @@ const project = (nodes: CanvasNodeState[], over: Partial<Project> = {}): Project
 const phoneNode = node('term-mmm-9f2a', { title: 'Mobile session', agentId: 'claude' })
 
 describe('decideExternalChange', () => {
-  it('reloads wholesale when there are no unsaved local edits (unchanged behavior)', () => {
+  it('loads disk edits when there are no unsaved local edits', () => {
     const base = project([node('term-a-1')])
     const incoming = project([node('term-a-1'), phoneNode])
     expect(
@@ -177,6 +178,57 @@ describe('mergeIncomingNodes', () => {
   it('returns the SAME array when there is nothing new (no needless re-render)', () => {
     const current = [{ id: 'a' }]
     expect(mergeIncomingNodes(current, [{ id: 'a' }])).toBe(current)
+  })
+})
+
+describe('reloadKeepingOpenNodes', () => {
+  it('keeps cards opened after the conflict snapshot, in their original groups and positions', () => {
+    const saved = node('saved')
+    const group = node('new-group', { kind: 'group', position: { x: 500, y: 900 } })
+    const terminal = node('new-session', {
+      parentId: group.id, position: { x: 28, y: 62 }, agentSessionId: 'same-conversation'
+    })
+    const incoming = project([node('saved', { title: 'Disk title' })])
+    const current = project([saved, group, terminal], {
+      bridges: [{ id: 'link', source: saved.id, target: terminal.id }],
+      ropes: [{ id: 'rope', source: saved.id, target: terminal.id }]
+    })
+    const result = reloadKeepingOpenNodes(current, incoming)
+    expect(result.retained).toBe(2)
+    expect(result.project.nodes).toEqual([incoming.nodes[0], group, terminal])
+    expect(result.project.bridges).toEqual(current.bridges)
+    expect(result.project.ropes).toEqual(current.ropes)
+    expect(incoming.nodes).toHaveLength(1)
+    expect(reloadKeepingOpenNodes(result.project, result.project).retained).toBe(0)
+  })
+
+  it('preserves unsaved notes too, without overriding disk edits to existing cards or links', () => {
+    const current = project([node('a'), node('b'), node('note', { kind: 'sticky', text: 'Unsaved work' })], {
+      bridges: [{ id: 'removed-on-disk', source: 'a', target: 'b' }, { id: 'dangling', source: 'note', target: 'gone' }]
+    })
+    const incoming = project([node('a', { position: { x: 900, y: 40 } }), node('b')])
+    const result = reloadKeepingOpenNodes(current, incoming)
+    expect(result.project.nodes[0]).toEqual(incoming.nodes[0])
+    expect(result.project.nodes[2].text).toBe('Unsaved work')
+    expect(result.project.bridges).toEqual([])
+  })
+
+  it('leaves a matching saved layout unchanged and never imports another project’s cards', () => {
+    const incoming = project([node('saved')])
+    expect(reloadKeepingOpenNodes(incoming, incoming)).toEqual({ project: incoming, retained: 0 })
+    expect(reloadKeepingOpenNodes(project([node('other')], { id: 'other-project' }), incoming))
+      .toEqual({ project: incoming, retained: 0 })
+  })
+
+  it('keeps a new terminal in the same canvas position when disk moves its existing group', () => {
+    const current = project([
+      node('frame', { kind: 'group', position: { x: 500, y: 700 } }),
+      node('new', { parentId: 'frame', position: { x: 28, y: 62 } })
+    ])
+    const incoming = project([node('frame', { kind: 'group', position: { x: 100, y: 200 } })])
+    const result = reloadKeepingOpenNodes(current, incoming)
+    expect(result.project.nodes[1]).toMatchObject({ parentId: 'frame', position: { x: 428, y: 562 } })
+    expect(result.project.nodes[0]).toEqual(incoming.nodes[0])
   })
 })
 
