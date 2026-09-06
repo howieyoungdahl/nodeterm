@@ -87,6 +87,41 @@ const req = (over: Partial<QueuedDeliveryRequest> = {}): QueuedDeliveryRequest =
 })
 
 describe('DeliveryQueue', () => {
+  it('expires at the deadline even when the timer callback is delayed', async () => {
+    const h = harness()
+    const q = new DeliveryQueue(h.deps, { ttlMs: 1000 })
+    await q.enqueue(req())
+    h.setClock(2000)
+    await q.onTargetIdle('dst')
+    expect(h.delivered).toEqual([])
+    expect(h.expired).toHaveLength(1)
+    expect(q.depth('dst')).toBe(0)
+  })
+
+  it('reports a delivery exception as unknown and never replays it', async () => {
+    const h = harness({ deliver: async () => { throw new Error('possibly wrote') } })
+    const q = new DeliveryQueue(h.deps)
+    await q.enqueue(req())
+    await expect(q.onTargetIdle('dst')).resolves.toBeUndefined()
+    expect(h.flushed).toEqual([{ req: req(), outcome: expect.objectContaining({ kind: 'unknown' }) }])
+    expect(h.traced.map((t) => t.outcome)).toEqual(['queued', 'unknown'])
+    expect(q.depth('dst')).toBe(0)
+  })
+
+  it('notifies expiry even when its trace fails', async () => {
+    let traces = 0
+    const h = harness({ trace: async () => {
+      if (++traces > 1) throw new Error('disk failure')
+      return { traceId: 'queued-id', traced: 'memory' }
+    } })
+    const q = new DeliveryQueue(h.deps, { ttlMs: 1000 })
+    await q.enqueue(req())
+    h.setClock(2001)
+    await expect(q.onTargetIdle('dst')).resolves.toBeUndefined()
+    expect(h.expired).toHaveLength(1)
+    expect(h.expired[0].info.traceId).toBe('queued-id')
+  })
+
   it('enqueue returns a queued receipt with position + TTL, and traces `queued`', async () => {
     const h = harness()
     const q = new DeliveryQueue(h.deps)

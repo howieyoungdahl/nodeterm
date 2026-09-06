@@ -1,6 +1,7 @@
 import type { MirrorEntry } from '../agent-status-mirror'
 import type { AgentPaneVerdict } from '../../shared/agents/pane-owner-predicate'
 import { MIN_TOKEN_AWARE_REVISION } from './hooks/managed-script'
+import type { MessageReceipt } from './message-integrity'
 
 /**
  * THE PURE DECIDER — every reason a delivery may not happen, decided without a single side effect.
@@ -53,7 +54,7 @@ export type ReceiptSignal = 'newTurn' | 'working'
 /** Where a delivery's trace landed. `memory` is a bounded ring, not a durable log — see Task 3.5. */
 export type TraceKind = 'board-log' | 'memory'
 
-export type AgentMessageOutcome =
+export type AgentMessageOutcome = (
   | { kind: 'delivered'; traceId: string; traced: TraceKind; receipt: 'observed'; signal: ReceiptSignal }
   | { kind: 'queued'; traceId: string; position: number; ttlMs: number }
   | { kind: 'stalled'; traceId: string; traced: TraceKind; waitedMs: number }
@@ -77,6 +78,9 @@ export type AgentMessageOutcome =
   | { kind: 'targetNotPasteAware' }
   | { kind: 'targetGone' }
   | { kind: 'notPermitted'; reason: NotPermittedReason }
+  | { kind: 'unknown'; reason: string; traceId?: string }
+  | { kind: 'messageRejected'; reason: string }
+) & { message?: MessageReceipt }
 
 export type AgentMessageOutcomeKind = AgentMessageOutcome['kind']
 
@@ -109,7 +113,9 @@ export const RETRYABLE: Record<AgentMessageOutcomeKind, boolean> = {
   targetNotAgentPane: false,
   targetNotPasteAware: false,
   targetGone: false,
-  notPermitted: false
+  notPermitted: false,
+  unknown: false,
+  messageRejected: false
 }
 
 /**

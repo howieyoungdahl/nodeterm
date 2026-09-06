@@ -1,6 +1,8 @@
 import type { AgentMessageOutcome } from './agent-message-decide'
 import { RETRYABLE } from './agent-message-decide'
 import type { DeliveryTraceInput } from './agent-message-trace'
+import { randomUUID } from 'crypto'
+import { MessageIntegrity, MESSAGE_BODY_MAX_BYTES, type MessageIdentity, type AssignmentValidator } from './message-integrity'
 
 /**
  * DELIVER-ON-IDLE — a bounded, per-target queue with a TTL, and never a silent drop.
@@ -70,6 +72,7 @@ export interface QueuedDeliveryRequest {
   sourceTitle: string
   /** For the expiry trace's `bodyChars` — the body itself is never traced (see agent-message-trace). */
   body: string
+  message?: MessageIdentity
   [k: string]: unknown
 }
 
@@ -83,7 +86,9 @@ export interface DeliveryQueueDeps {
    * the whole gate chain (scope, ownership, grant, flow, `deliverAgentMessage`) runs again against
    * live state. This is what makes the queue safe: it caches no authorization decision.
    */
-  deliver(req: QueuedDeliveryRequest): Promise<AgentMessageOutcome>
+  deliver(req: QueuedDeliveryRequest, beforeSend: () => Promise<AgentMessageOutcome | undefined>): Promise<AgentMessageOutcome>
+  /** Canonical D15 authority adapter, independent of creator/control permission checks. */
+  validateAssignment?: AssignmentValidator
   /** Record an outcome (`recordDelivery`). The queue traces `queued` on enqueue and `expired` on a
    *  TTL lapse; the flush's own outcomes are traced inside `deliver`. */
   trace(input: DeliveryTraceInput): Promise<{ traceId: string; traced: string }>
@@ -116,6 +121,7 @@ interface QueueEntry {
   cancelTimer: CancelTimer
   /** The traceId minted when this was queued, reused on its expiry so the two entries correlate. */
   queuedTraceId: string
+  attempts: number
 }
 
 /** Outcomes that mean "the target still is not ready, come back" — a flush that gets one of these
@@ -132,6 +138,7 @@ const REQUEUE_ON: ReadonlySet<AgentMessageOutcome['kind']> = new Set(
 )
 
 export class DeliveryQueue {
+  readonly messages: MessageIntegrity
   private readonly queues = new Map<string, QueueEntry[]>()
   private readonly admissions = new Map<string, Promise<void>>()
   private readonly pendingAdmissions = new Map<string, number>()
@@ -146,6 +153,7 @@ export class DeliveryQueue {
     private readonly deps: DeliveryQueueDeps,
     opts: { capacity?: number; ttlMs?: number } = {}
   ) {
+    this.messages = new MessageIntegrity(deps)
     this.capacity = opts.capacity ?? DELIVERY_QUEUE_CAPACITY
     this.ttlMs = opts.ttlMs ?? DELIVERY_QUEUE_TTL_MS
     this.schedule =
@@ -180,9 +188,12 @@ export class DeliveryQueue {
   async enqueue(
     req: QueuedDeliveryRequest,
     opts: { hibernated?: boolean } = {}
-  ): Promise<
-    Extract<AgentMessageOutcome, { kind: 'queued' } | { kind: 'queueFull' }>
-  > {
+  ): Promise<AgentMessageOutcome> {
+    if (Buffer.byteLength(req.body) > MESSAGE_BODY_MAX_BYTES) return { kind: 'messageRejected', reason: 'body-too-large' }
+    return this.messages.admit(req, (snapshot) => this.admit(snapshot, opts))
+  }
+
+  private async admit(req: QueuedDeliveryRequest, opts: { hibernated?: boolean }): Promise<AgentMessageOutcome> {
     const nodeId = req.targetNodeId
     const pending = this.pendingAdmissions.get(nodeId) ?? 0
     const occupied = this.depth(nodeId) + (this.inFlight.has(nodeId) ? 1 : 0) + pending
@@ -209,7 +220,7 @@ export class DeliveryQueue {
   private async enqueueNow(
     req: QueuedDeliveryRequest,
     opts: { hibernated?: boolean }
-  ): Promise<Extract<AgentMessageOutcome, { kind: 'queued' } | { kind: 'queueFull' }>> {
+  ): Promise<AgentMessageOutcome> {
     const occupied = this.depth(req.targetNodeId) + (this.inFlight.has(req.targetNodeId) ? 1 : 0)
     if (occupied >= this.capacity) {
       // Refused, not dropped-oldest: an accepted message is never silently discarded to make room.
@@ -221,24 +232,32 @@ export class DeliveryQueue {
       sourceTitle: req.sourceTitle,
       targetNodeId: req.targetNodeId,
       outcome: 'queued',
-      bodyChars: req.body.length
+      bodyChars: req.body.length,
+      messageId: req.message?.message_id, actionId: req.message?.action_id
     })
     const entry: QueueEntry = {
       req,
       enqueuedAt: now,
-      ttlMs: this.ttlMs,
+      ttlMs: Math.min(this.ttlMs, req.message ? req.message.expires_at - now : this.ttlMs),
       queuedTraceId: t.traceId,
-      cancelTimer: this.schedule(this.ttlMs, () => void this.expire(req.targetNodeId, entry))
+      attempts: 0,
+      cancelTimer: () => {}
     }
     // A delivery may have completed while its new neighbour was being traced.
     const list = this.queues.get(req.targetNodeId) ?? []
     list.push(entry)
     this.queues.set(req.targetNodeId, list)
+    const remaining = entry.ttlMs - (this.deps.now() - now)
+    if (remaining <= 0) {
+      await this.expire(req.targetNodeId, entry)
+      return { kind: 'expired', traceId: t.traceId, queuedForMs: this.deps.now() - now }
+    }
+    entry.cancelTimer = this.schedule(remaining, () => void this.expire(req.targetNodeId, entry))
     // Kick the wake for a hibernated target so it starts its resume; the flush waits on the idle
     // event, not on the wake. A busy (non-hibernated) target needs nothing — it will go idle on its
     // own turn end.
-    if (opts.hibernated) this.deps.wake?.(req.targetNodeId)
-    return { kind: 'queued', traceId: t.traceId, position: list.length, ttlMs: this.ttlMs }
+    if (opts.hibernated) this.observe(() => this.deps.wake?.(req.targetNodeId))
+    return { kind: 'queued', traceId: t.traceId, position: list.length, ttlMs: remaining }
   }
 
   /**
@@ -270,6 +289,10 @@ export class DeliveryQueue {
       const list = this.queues.get(nodeId)
       if (!list || list.length === 0) return
       const entry = list[0]
+      if (this.deps.now() >= entry.enqueuedAt + entry.ttlMs) {
+        await this.expire(nodeId, entry)
+        continue
+      }
       // Take it off before delivering: a re-entrant idle event (deliver can await a real round-trip)
       // must not flush the same entry twice. It goes back on failure, at the FRONT, preserving order.
       list.shift()
@@ -277,13 +300,32 @@ export class DeliveryQueue {
       this.inFlight.add(nodeId)
       let outcome: AgentMessageOutcome
       try {
-        outcome = await this.deps.deliver(entry.req)
+        const beforeSend = async (): Promise<AgentMessageOutcome | undefined> => {
+          if (this.deps.now() >= entry.enqueuedAt + entry.ttlMs)
+            return { kind: 'expired', traceId: entry.queuedTraceId, queuedForMs: this.deps.now() - entry.enqueuedAt }
+          return this.messages.guard(entry.req, 'delivery')
+        }
+        const refusal = await beforeSend()
+        outcome = refusal ?? (entry.attempts++ >= 3
+          ? { kind: 'messageRejected', reason: 'retry-limit' }
+          : await this.deps.deliver(entry.req, beforeSend))
+        if (refusal || (outcome.kind === 'messageRejected' && outcome.reason === 'retry-limit'))
+          await this.traceOutcome(entry, outcome.kind)
+      } catch {
+        // A rejected dependency may have already written bytes. Retrying could execute twice.
+        outcome = { kind: 'unknown', reason: 'delivery-exception', traceId: entry.queuedTraceId }
+        await this.traceOutcome(entry, 'unknown')
       } finally {
         this.inFlight.delete(nodeId)
       }
       if (REQUEUE_ON.has(outcome.kind)) {
         // Not ready yet (busy again, still unverified, or rate-limited): keep it, TTL counting from
         // its ORIGINAL enqueue, and stop draining — the target is evidently not idle after all.
+        if (this.deps.now() >= entry.enqueuedAt + entry.ttlMs) {
+          this.requeueFront(nodeId, entry)
+          await this.expire(nodeId, entry)
+          return
+        }
         this.requeueFront(nodeId, entry)
         // An idle target may emit no further hook. Wait out the rate limit, then re-run all
         // delivery permissions and status checks. The original expiry still bounds the wait.
@@ -302,7 +344,8 @@ export class DeliveryQueue {
       // Terminal: delivered, or a refusal waiting will not fix (notPermitted from a revoked grant,
       // targetGone, targetNotAgentPane…). The entry is done; tell the sender and move to the next.
       if (this.queues.get(nodeId)?.length === 0) this.queues.delete(nodeId)
-      this.deps.onFlushed?.(entry.req, outcome)
+      outcome = this.messages.record(entry.req, outcome)
+      this.observe(() => this.deps.onFlushed?.(entry.req, outcome))
     }
   }
 
@@ -334,14 +377,26 @@ export class DeliveryQueue {
     }
     entry.cancelTimer()
     const queuedForMs = this.deps.now() - entry.enqueuedAt
-    const t = await this.deps.trace({
+    this.messages.record(entry.req, { kind: 'expired', traceId: entry.queuedTraceId, queuedForMs })
+    this.observe(() => this.deps.onExpired?.(entry.req, { traceId: entry.queuedTraceId, queuedForMs }))
+    await this.traceOutcome(entry, 'expired')
+  }
+
+  private async traceOutcome(entry: QueueEntry, outcome: AgentMessageOutcome['kind']): Promise<{ traceId: string }> {
+    try { return await this.deps.trace({
       sourceNodeId: entry.req.sourceNodeId,
       sourceTitle: entry.req.sourceTitle,
       targetNodeId: entry.req.targetNodeId,
-      outcome: 'expired',
-      bodyChars: entry.req.body.length
-    })
-    this.deps.onExpired?.(entry.req, { traceId: t.traceId, queuedForMs })
+      outcome,
+      bodyChars: entry.req.body.length,
+      messageId: entry.req.message?.message_id,
+      actionId: entry.req.message?.action_id
+    }) } catch { return { traceId: entry.queuedTraceId || randomUUID() } }
+  }
+
+  private observe(fn: () => void): void {
+    // Observer failure cannot erase the stored disposition or strand the next queued message.
+    try { void Promise.resolve(fn()).catch(() => {}) } catch { /* already recorded */ }
   }
 
   /** Test seam / shutdown: cancel every timer and drop every queue WITHOUT tracing (a teardown is

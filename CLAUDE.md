@@ -43,6 +43,8 @@ means — and what you may assume when writing a feature — is three tiers, not
 
 ## Commands
 
+Messaging queue integrity: `docs/message-delivery-integrity.md` defines the optional assignment-validation callback, logical message receipts, and legacy compatibility boundary. A target turn hook does not establish message-specific work acceptance. Queue expiry must be checked at the send boundary as well as by timers.
+
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall hook)
 npm run dev        # dev mode with renderer HMR

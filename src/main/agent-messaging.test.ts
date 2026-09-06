@@ -24,6 +24,7 @@ import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-tra
 import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
 import { DeliveryQueue } from '../core/agents/delivery-queue'
 import type { MirrorEntry } from '../core/agent-status-mirror'
+import type { MessageIdentity } from '../core/agents/message-integrity'
 
 const idle: MirrorEntry = {
   state: 'done',
@@ -89,6 +90,66 @@ const req = (over: Record<string, unknown> = {}) =>
 beforeEach(() => {
   resetMessageFlow()
   resetAgentMessageTraceForTests()
+})
+
+describe('assignment-aware queue service', () => {
+  const message = (): MessageIdentity => ({
+    message_id: 'm1', action_id: 'a1', task_id: 'task1', assignment_id: 'assignment1', assignment_epoch: 1,
+    actor: { agent_id: 'worker', node: 'b1', pane: '%1', session_id: 'session1', incarnation: 'run1', provider: 'claude' },
+    contract_ref: { uri: '/contract', sha256: 'a'.repeat(64) },
+    policy_ref: { uri: '/policy', sha256: 'b'.repeat(64) }, created_at: 1_000_000, expires_at: 1_001_000
+  })
+  const queuedRequest = () => ({ verb: 'send', sourceNodeId: 'a1', targetNodeId: 'b1',
+    sourceTitle: 'untrusted title', body: 'hello', message: message() })
+
+  it('rejects a reassignment during the pane probe at the actual send boundary', async () => {
+    let epoch = 1
+    const deps = fakeDeps()
+    const paneOwner = deps.paneOwner
+    deps.paneOwner = async (id) => { const result = await paneOwner(id); epoch = 2; return result }
+    const queue = createDeliveryQueue(deps, { schedule: () => () => {},
+      validateAssignment: async (m) => ({ ok: m.assignment_epoch === epoch, code: 'stale_epoch' }) })
+    const req = queuedRequest()
+    await queue.enqueue(req)
+    await queue.onTargetIdle('b1')
+    expect(deps.rec.sent).toEqual([])
+    expect(queue.messages.receipt(req)).toMatchObject({ kind: 'messageRejected', reason: 'stale_epoch' })
+  })
+
+  it('propagates identity into the real envelope without treating a turn hook as acceptance', async () => {
+    const deps = fakeDeps()
+    const queue = createDeliveryQueue(deps, { schedule: () => () => {},
+      validateAssignment: async () => ({ ok: true, code: 'ok' }) })
+    const req = queuedRequest()
+    await queue.enqueue(req)
+    await queue.onTargetIdle('b1')
+    expect(deps.rec.sent).toHaveLength(1)
+    expect(deps.rec.sent[0].payload).toContain('"message_id":"m1"')
+    expect(deps.rec.sent[0].payload).toContain('from: Alpha (a1)')
+    expect(deps.rec.sent[0].payload).not.toContain('untrusted title')
+    expect(queue.messages.receipt(req).message?.status).toBe('delivered')
+  })
+
+  it('keeps creator/project permissions independent from assignment validation', async () => {
+    const deps = fakeDeps({ messagingEnabled: () => false })
+    const queue = createDeliveryQueue(deps, { schedule: () => () => {},
+      validateAssignment: async () => ({ ok: true, code: 'ok' }) })
+    const req = queuedRequest()
+    await queue.enqueue(req)
+    await queue.onTargetIdle('b1')
+    expect(deps.rec.sent).toEqual([])
+    expect(queue.messages.receipt(req)).toMatchObject({ kind: 'notPermitted', reason: 'switch-off' })
+  })
+
+  it('cancels its receipt watcher when sending throws after a possible write', async () => {
+    let watchers = 0
+    const deps = fakeDeps({ sendEnvelope: async () => { throw new Error('partial write') },
+      subscribeReceipts: () => { watchers++; return () => { watchers-- } } })
+    const result = await deliverFromControl(req(), deps)
+    expect(result.outcome.kind).toBe('unknown')
+    expect(result.reply.error).toContain('Do not retry')
+    expect(watchers).toBe(0)
+  })
 })
 
 describe('deliverFromControl', () => {
@@ -268,6 +329,8 @@ describe('deliverFromControl', () => {
 describe('renderMessageOutcome', () => {
   it('is exhaustive over the outcome union and never contradicts RETRYABLE', () => {
     const samples: AgentMessageOutcome[] = [
+      { kind: 'unknown', reason: 'delivery-exception' },
+      { kind: 'messageRejected', reason: 'stale_epoch' },
       { kind: 'delivered', traceId: 't', traced: 'memory', receipt: 'observed', signal: 'newTurn' },
       { kind: 'queued', traceId: 't', position: 1, ttlMs: 5 },
       { kind: 'stalled', traceId: 't', traced: 'memory', waitedMs: 8000 },
