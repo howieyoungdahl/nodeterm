@@ -1513,9 +1513,14 @@ else, and its context links must keep classifying across restarts).
   which process is in charge). It expires (`LAYOUT_LEASE_TTL_MS`, 60 s, re-stamped while held) so
   a crash cannot lock a canvas forever, and **a refusal NAMES the holder** — a second director
   reading "another instance holds this project's layout lease (ui-1f2e…)" stands down knowingly
-  instead of fighting. It fails OPEN (an unreadable file means nobody holds anything): two
-  instances briefly planning one canvas is recoverable and both still refuse the active node,
-  while a wrongly-denied lease is a canvas nothing can organise again.
+  instead of fighting. Grants serialize across cooperating store instances and processes and
+  require persisted, readable token evidence. Unknown storage refuses automation. A leftover
+  `.lock` is never stolen on a timer; recovery requires proving the writer is gone before an
+  operator removes that exact lock. Legacy processes that ignore the lock are not fenced by it.
+  `applyLayoutTransaction` supplies the coordinator's synchronous effect boundary: re-read the
+  project/input revisions, assignment epoch, activity completeness and affected group exclusions
+  under the lease lock. This helper still requires Canvas/store/IPC integration; a plan token
+  alone does not fix the legacy renderer apply or whole-array undo. See `docs/organizer-transactions.md`.
   **The rules split across the two tiers exactly as the rest of the file does.** WHAT the rules
   are is shared (`Project.layoutRules`, `@shared/canvas-layout-rules`, sanitized on both
   boundaries and on the cwd-less inline load path like `sanitizeNodeTriggers`). **WHETHER the

@@ -1,4 +1,5 @@
 import { useSettings } from '../../../state/settings'
+import { withProjectBorder } from '@shared/project-border'
 import { NODE_COLORS } from '../../../state/workspace'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
@@ -18,7 +19,6 @@ import { UI_SCALE_CHOICES, resolveUiScale, uiScaleLabel } from '@shared/ui-scale
 import { SectionReset } from '../SectionReset'
 import { APPEARANCE_RESET_KEYS } from '@renderer/lib/settingsReset'
 import {
-  APPEARANCE_RULES_VERSION,
   sanitizeAppearanceSettings,
   sanitizeBorderAppearance,
   type AppearanceSettings,
@@ -235,15 +235,12 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
   const setProjectLayoutRules = useProjects((s) => s.setProjectLayoutRules)
   const projectRule = sanitizeBorderAppearance(activeProject?.layoutRules?.appearance?.project)
   const setProjectRule = (value: BorderAppearance | undefined): void => {
-    if (!activeProject) return
-    const rules = { ...(activeProject.layoutRules?.appearance ?? {}) }
-    if (value) rules.project = value
-    else delete rules.project
-    const hasRules = Object.keys(rules).length > 0
-    const layoutRules = hasRules
-      ? { ...activeProject.layoutRules, version: APPEARANCE_RULES_VERSION, appearance: rules }
-      : undefined
-    setProjectLayoutRules(activeProject.id, layoutRules)
+    const state = useProjects.getState()
+    if (!activeProject || state.activeProjectId !== activeProject.id) return
+    const project = state.projects.find((p) => p.id === activeProject.id)
+    if (!project) return
+    const layoutRules = withProjectBorder(project.layoutRules, value)
+    setProjectLayoutRules(project.id, layoutRules)
     // The store holds state; the debounced workspace save is Canvas's, reached through this seam.
     markWorkspaceDirty()
   }

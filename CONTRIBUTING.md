@@ -306,6 +306,13 @@ pin, move, or start using a card while its preview is open), and the engine has 
 it can never become a second frame-creator racing the spawn path. Nothing runs on a timer, and
 nothing on this path may reach a PTY.
 
+Organizer lease acquisition serializes and refuses unverifiable persistence. Grants carry tokens;
+plan-time permission is not apply-time permission. `core/canvas-layout/transaction.ts` supplies a
+synchronous apply gate for the project coordinator, including revisions, ownership epochs and
+complete activity evidence. Its Canvas/store/IPC integration remains required; see
+`docs/organizer-transactions.md`. A leftover lease-store lock is never stolen automatically.
+Clearing a border edits only that appearance subtree, preserving unrelated and unknown layout rules.
+
 Layout events received during an asynchronous plan must be coalesced and drained, not discarded.
 Capture their project identity, reject application after a project switch, and release the actual
 held lease on unmount. Messaging likewise serializes admission and delivery per target; a queued
