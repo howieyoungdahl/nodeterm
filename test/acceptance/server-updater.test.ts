@@ -21,6 +21,8 @@ let failStartup: boolean
 let losePane: boolean
 let loseCard: boolean
 let newViewer: boolean
+let busySpawn: boolean
+let newSpawn: boolean
 let memory: number
 
 beforeEach(async () => {
@@ -37,7 +39,7 @@ beforeEach(async () => {
   await fs.writeFile(path.join(config.repo, '.nodeterm/project.json'), JSON.stringify({ nodes: [{ id: 'term-a' }] }))
   await fs.writeFile(path.join(config.dataDir, 'workspace.json'), JSON.stringify({ entries: [{ id: 'p', cwd: config.repo }] }))
   commands = []; restarts = 0; viewers = 0; healthReads = 0; memory = 9000
-  failBuild = false; failStartup = false; losePane = false; loseCard = false; newViewer = false
+  failBuild = false; failStartup = false; losePane = false; loseCard = false; newViewer = false; busySpawn = false; newSpawn = false
   runtime = {
     run(command, args, cwd) {
       commands.push([command, ...args])
@@ -71,8 +73,10 @@ beforeEach(async () => {
       if (route === 'nodes') return { nodes: loseCard && restarts === 1 ? [] : [{ id: 'term-a' }] }
       healthReads++
       if (failStartup && restarts === 1) throw new Error('connection refused')
+      const spawning = busySpawn || (newSpawn && healthReads === 2)
       return { ...healthy, startedAt: 100 + restarts,
-        wsClientCount: viewers || (newViewer && healthReads === 2 ? 1 : 0) }
+        wsClientCount: viewers || (newViewer && healthReads === 2 ? 1 : 0),
+        spawnHandler: spawning ? { state: 'busy', active: 1, queued: 0 } : healthy.spawnHandler }
     },
     sleep: async () => {}, availableMemoryMb: async () => memory,
     runningDirectory: () => fs.realpath(path.join(config.stateDir, 'current'))
@@ -101,13 +105,20 @@ describe('verified browser-server updates', () => {
     expect(restarts).toBe(1)
   })
 
-  it('stages while a browser is open, then deploys the same verified artifact without rebuilding', async () => {
+  it('deploys while a browser is open: viewers reconnect, they do not gate activation', async () => {
     viewers = 1
+    expect((await updater().update(true)).outcome).toBe('deployed')
+    expect(restarts).toBe(1)
+    expect(await current()).toBe(path.join(config.stateDir, 'releases', SHA))
+  })
+
+  it('defers on server activity, then deploys the same verified artifact without rebuilding', async () => {
+    busySpawn = true
     expect((await updater().update(true)).outcome).toBe('deferred')
     expect(restarts).toBe(0)
     expect(await current()).toBe(path.join(root, 'old-live'))
     const builds = commands.filter((c) => c[0] === 'npm').length
-    viewers = 0
+    busySpawn = false
     expect((await updater().update(true)).outcome).toBe('deployed')
     expect(commands.filter((c) => c[0] === 'npm')).toHaveLength(builds)
   })
@@ -118,8 +129,14 @@ describe('verified browser-server updates', () => {
     expect(restarts).toBe(0)
   })
 
-  it('defers if a browser connects during the backup reads', async () => {
+  it('still deploys if a browser connects during the backup reads', async () => {
     newViewer = true
+    expect((await updater().update(true)).outcome).toBe('deployed')
+    expect(restarts).toBe(1)
+  })
+
+  it('defers if a spawn starts during the backup reads', async () => {
+    newSpawn = true
     expect((await updater().update(true)).outcome).toBe('deferred')
     expect(restarts).toBe(0)
     expect(await current()).toBe(path.join(root, 'old-live'))
@@ -180,7 +197,8 @@ describe('updater boundaries', () => {
   })
   it('requires known idle health and original pane pids', () => {
     expect(mayRestart(healthy)).toBe(true)
-    expect(mayRestart({ ...healthy, wsClientCount: 1 })).toBe(false)
+    expect(mayRestart({ ...healthy, wsClientCount: 1 })).toBe(true)
+    expect(mayRestart({ ...healthy, spawnHandler: { state: 'busy', active: 1, queued: 0 } })).toBe(false)
     expect(mayRestart({ ...healthy, spawnHandler: { state: 'idle', active: 0, queued: 1 } })).toBe(false)
     expect(mayRestart({ ...healthy, deliveryQueueDepths: { busy: 1 } })).toBe(false)
     expect(survivingPanes('a\t%1\t123', 'a\t%1\t456')).toBe(false)

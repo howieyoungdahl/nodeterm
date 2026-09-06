@@ -12,10 +12,10 @@ allowlist of basic environment variables rather than provider credentials or nod
 Activation waits until **no browsers are connected** and the server reports no active/queued
 spawns or message deliveries. It backs up the saved workspace/project files and records every
 card id and tmux pane id/PID, then checks inactivity again before switching. Open canvases are not
-reloaded by the updater. Save changes and close browser tabs when you want a staged release to
-activate; reopening later uses the new renderer with the same saved layout and running terminals.
-This is not coordinated hot deployment: a new connection can still race the final check. Updates
-while keeping browser tabs open require a future save/prepare handshake and admission lock.
+reloaded by the updater. Open browser tabs do not delay activation: the renderer shows its
+reconnect overlay for a few seconds and reloads with the same saved layout and running terminals.
+Canvas edits inside the renderer's autosave debounce (under a second) at the moment of restart are
+lost; a spawn in progress or a queued delivery defers activation to the next tick.
 
 The server service must use `KillMode=process`. The updater swaps its `current` release symlink,
 restarts that service, checks a new server startup time and verifies the original panes and cards.
@@ -25,7 +25,7 @@ data with an old snapshot. If continuity also fails after rollback, the update i
 and requires attention. It cannot recreate an agent process a defective release terminated.
 
 One commit that fails validation or deployment is quarantined until a newer commit arrives or
-an explicit retry is requested. Fetch/preflight failures and active viewers defer to the next tick.
+an explicit retry is requested. Fetch/preflight failures and in-flight server work defer to the next tick.
 Three verified releases are retained, plus the current/previous release and any release still used
 as a terminal cwd. Clean generated worktrees alone are removed; edited or failed worktrees and
 workspace snapshots are retained for inspection.
