@@ -55,6 +55,8 @@ means — and what you may assume when writing a feature — is three tiers, not
 
 ## Commands
 
+Messaging queue integrity: `docs/message-delivery-integrity.md` defines the optional assignment-validation callback, logical message receipts, and legacy compatibility boundary. A target turn hook does not establish message-specific work acceptance. Queue expiry must be checked at the send boundary as well as by timers.
+
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall hook)
 npm run dev        # dev mode with renderer HMR
@@ -99,6 +101,11 @@ When a leg's fix lands upstream, delete that leg (and the whole script + test on
 companion server repo isn't checked out). `npm run typecheck` is the fastest correctness gate.
 
 ## Process model (Electron, three contexts)
+
+The Sessions sidebar's Tasks tab uses a bounded, host-configured canonical D15
+reader in both shells. It grants no agent read principal or session control.
+Exact focus remains visibly unavailable pending a trusted shell identity/authority
+adapter; see `docs/remote-task-context.md` for configuration and acceptance limits.
 
 The codebase is split by Electron process boundary — keep code on the correct side:
 
@@ -145,9 +152,23 @@ The codebase is split by Electron process boundary — keep code on the correct 
   channels (`registerTranscriptIpc` — the ⌘M chat view + the find-bar's transcript index; see the
   ⌘M bullet under Agent support). **Canvas control is opt-in**
   (`NODETERM_SERVER_CANVAS_CONTROL=1` / `--canvas-control`): the Server shell installs its own shim
-  and runs a serialized `HeadlessNodeFactory`; disabled remains the default. (The SDK **chat node**
+  and runs a serialized `HeadlessNodeFactory`; disabled remains the default. The Server shell also
+  schedules a 30-minute dead-card pass by default (`NODETERM_DEAD_CARD_REAP_MINUTES`, `0` disables
+  only the timer), using the operator API's shared `ServerNodeOps` engine. It removes a local
+  terminal card only after two definitive absent-session probes; unreadable probes and SSH-project
+  cards are preserved. Global cleanup is never exposed as an agent canvas-control verb. (The SDK
+  **chat node**
   — once listed here as deferred — was removed entirely, 2026-07; see the chat-node note in the
   node-kinds list.)
+  **Operator management is separate from canvas control:** the always-wired `/opsapi/` REST
+  namespace accepts only the `0600` data-dir `ops-token` bearer from a real loopback TCP peer —
+  never the UI password/cookie, trusted-proxy header, or an agent node token. `ServerNodeOps` owns
+  inventory, the single-delete force gate, and the one conservative dead-card sweep engine that
+  the periodic reaper also calls. Operator and agent read/modify/save transactions share one
+  `WorkspaceMutationQueue`, so neither can publish a stale snapshot over the other.
+  `SpawnHandlerState` synchronously observes both serialized preparation and parallel external
+  launches, so health remains readable while its oldest operation is wedged. No operator verb
+  creates, sends, or renames, and the surface is Server-only (Desktop/Mobile N/A).
 - **`src/preload/`** — the only bridge. `index.ts` uses `contextBridge` to expose a
   narrow API on `window.nodeTerminal` (typed in `index.d.ts`). `contextIsolation` is on,
   `nodeIntegration` off.
@@ -169,6 +190,33 @@ remote access / paid tiers can be added without touching the canvas or terminal 
 adding terminal-session features, extend the interface — do not reach around it.
 
 ## State & persistence model
+
+The revision-bound WorkspaceStore/IPC/Canvas integration is described in
+`docs/project-reconciliation.md`, including its explicit rollout blockers. Existing local files
+use retained raw bases, caller enrollment, durable receipts/tombstones, and preserve-then-exclusive
+publication. Never route a refused legacy save around its fence or steal an abandoned writer lock.
+Ordinary workspace reads and coordinator observations guard the publication interval, with at most
+four 25 ms busy retries. Managed gaps refuse instead of hydrating empty/unavailable defaults; an
+initial read failure has an explicit Retry action and cannot enable autosave. Reconciled loads build
+the typed index view from the exact observed raw bytes, never a later revision or shared driver cache.
+The typed entity view must match the actual Flow serializer; omission of an unknown field is not
+deletion. A filesystem replacement rename alone is not external-writer compare-and-swap.
+Workspace saves report partial local-project write failures after saving the remaining projects
+and index. A successful index write alone is not proof that the canvas reached disk. The renderer's
+`useSavePersistence` and `useAutosave` hooks retain failed delivery state and schedule five bounded
+retries, including failures before the first edit. An exhausted schedule leaves a visible Retry
+button; an unresolved external-change conflict pauses saving. Regression tests mount the hooks and
+exercise real timers under fake time, and drive failed project writes through the store IPC handler.
+This protects both desktop and Server Edition; it does not create or restart terminal backends.
+The optional browser-server updater (`core/server-updater.ts`, `server/update-main.ts`) builds
+one configured integration ref in detached release worktrees. It uses an updater-private fetched
+ref because FETCH_HEAD is shared with concurrent worktrees. Activation checks browser/spawn/message
+quiescence twice, backs up saved canvases, retains original tmux pane ids/PIDs, and verifies both
+process and card continuity after switching a stable symlink. A failed activation rolls back the
+release and rechecks continuity. It never restores old workspace data over newer writes. Open
+browsers defer updates; this is not a coordinated browser-save protocol. The install helper only
+sets up user units and a current-build symlink; it does not restart the live service. Details and
+limits: `docs/server-auto-updates.md`.
 
 **React Flow is the single live source of truth** for nodes. There is intentionally no
 separate store mirroring node state — earlier dual-source designs caused sync bugs.
@@ -229,7 +277,21 @@ Persistence has two layers:
   speak an assembled v2-shaped `Workspace`; all fan-out lives in `core/workspace-store.ts` +
   pure `core/workspace-files.ts`. v2 files migrate on first save (backup `workspace.v2.bak`,
   one-time renderer note). Outside edits (git pull/sync) are detected by
-  `core/workspace-watcher.ts` → silent reload, or a Reload/Keep-mine conflict bar when dirty.
+  `core/workspace-watcher.ts` → silent reload, or a Reload/Keep-mine conflict bar when dirty; they
+  ride `workspace:external-change`, and so do the phone's `appendRemoteNode` and the SSH
+  reconcile, which really are "another device".
+  **A write this core made ITSELF rides `workspace:server-change` instead** — today that is Server
+  Edition headless canvas control (`server/canvas-control.ts`) — and the renderer three-way merges
+  it against the store baseline (`renderer/lib/serverChange.ts`: incoming nodes adopted silently,
+  ropes/bridges merged by id with server-added installed, server-removed dropped, local unsaved
+  edits kept, dangling edges pruned), never a bar and never a reload. It used to share the
+  outside-edit channel and that was a data-loss path, not a cosmetic one: `decideExternalChange`
+  compares the project shell, `ropes` included, so the one `ctrl-…` rope an `open-agent` appends
+  read as a conflict whenever the canvas was dirty — which it is throughout a spawn burst (the
+  paired `canvas:mut` marks it, spawns land 60–140 ms apart inside the 800 ms autosave debounce,
+  and **the bar itself suspends autosave**, so once raised it stayed raised). Answering "Keep my
+  version" then wrote the browser's edge state over the file, dropping the ropes the server had
+  just persisted and resurrecting cards it had removed.
   Unreadable refs render as greyed **unavailable** tabs (never dropped); corrupt project files
   are set aside as `project.json.corrupt-<ts>`. "Open folder…" adopts an existing
   `.nodeterm/project.json` — the probe MINTS the project id (node ids — tmux names — kept), and
@@ -588,6 +650,24 @@ Lifecycle, by intent:
   The refusal is **only** in `spawnNew` — a co-attach JOIN to a live session for that node id is
   still correct. An offline node reports itself to `SshReconnector`, so the canvas heals itself;
   `retryNow` (banner Reconnect / node Reconnect) skips the backoff and clears the refuse window.
+- **A shared Codex daemon restart is NOT a terminal-session restart.** tmux survives, and the Codex
+  rollout/thread survives, but every `codex --remote unix://` TUI attached to that account's one
+  app-server socket exits together. `buildCodexLauncherScript` therefore stays in the pane as a
+  bounded transport supervisor after binding a thread instead of `exec`ing the remote TUI. On an
+  abnormal client exit it resumes that exact thread only when `app-server daemon version` no longer
+  reports `status: running` or the known control-socket inode changed; the same healthy generation
+  returns the original status so a deterministic CLI error cannot relaunch forever. A reconnect
+  never replays the launch prompt/options (that would duplicate the user's turn), and three rapid
+  resets stop with a manual `codex resume <thread>` receipt. Preflight probes live protocol health
+  before lifecycle start: Codex's PID ownership record can go stale while the shared process remains
+  responsive, and killing that "orphan" would fan one bookkeeping failure out across every node.
+  The generated-shell tests run the replaced-socket, missing-daemon, healthy-client-error, and
+  responsive-orphan cases under real `/bin/sh`; the healthy-error case is the mutation guard.
+  **Both shells wire this spine.** Electron and Server Edition arm the same signed record secret,
+  thread start/bind handlers, capability refresh, and UI identity events; the server composition is
+  isolated in `server/codex-shared-identity.ts` and behavior-tested. The old Server Edition
+  "deliberate plain Codex" answer bypassed the launcher entirely, so a reconnect implementation in
+  the launcher could be perfectly green while every headless pane still fell back to its shell.
 - **"Restart agent (resume)"** → deliberately NOT a session lifecycle event: `terminal/
   agent-restart.ts` restarts the agent CLI *inside* the pane and leaves the PTY, the tmux session
   and its scrollback untouched. It exists for **new-model pickup** — a freshly released model only
@@ -776,9 +856,10 @@ seed** — the cases are:
   "can't scroll the kanban card-modal terminal until you press a key" bug.
 
 xterm's own `scrollback` (`xtermScrollback(settings.tmuxScrollback)`, floored at 1000, capped at
-`XTERM_SCROLLBACK_MAX` = 10000) is kept for the sessions tmux does *not* back (a plain shell when
+`XTERM_SCROLLBACK_MAX` = 2000) is kept for the sessions tmux does *not* back (a plain shell when
 tmux is unavailable) and for the cold-snapshot replay — it is not what the user scrolls in a tmux
-session.
+session. Keep that cap independent from tmux's 50,000-line history: tmux stores the operator's
+scrollable history outside the browser renderer, while every mounted xterm pays its own cap in RAM.
 
 ## Terminal node lifecycle (gotchas)
 
@@ -788,7 +869,7 @@ session.
   offscreenEpoch])` and torn down on unmount. The component persists across re-renders because
   React Flow keys nodes by `id` — never change a node's id, or you'll respawn its terminal.
   **Third in-place state — "released" (2026-08-11, offscreen dispose):** a node fully offscreen
-  in the canvas viewport for `settings.offscreenTerminalMinutes` (default 10, `0` = never;
+  in the canvas viewport for `settings.offscreenTerminalMinutes` (default 1, `0` = never;
   Settings → tmux) has its xterm + PTY client torn down IN PLACE — node stays mounted showing a
   plate, tmux session untouched — and revives (warm reattach) when it re-approaches the viewport.
   Pure policy: `terminal/offscreen-policy.ts`. Two load-bearing rules a refactor must not undo:
@@ -1474,26 +1555,17 @@ else, and its context links must keep classifying across restarts).
     layout by construction on all three surfaces) and then the well-known data dirs; it is monotone
     — advertised dir first, keyed by node-id filename in every candidate, and a foreign instance's
     dir yields a foreign `kid` = `legacy` = exactly what presenting nothing already gave.
-  - **Every LOCAL generated sh client recovers shared-Codex identity before its env gate.** A tool
-    shell forked by the account-scoped app-server carries `CODEX_THREAD_ID`, not the pane's
-    `NODETERM_*`. Managed hooks, local `nodeterm.sh`, and local `context.sh` therefore prepend
-    `codexThreadIdentityResolverSh(codexThreadIdentityRoot())` before testing
-    `NODETERM_NODE_ID`/`NODETERM_CANVAS_CONTROL`. Before this was shared, status hooks recovered the
-    node while both user-facing shims declared that same first-class Codex session outside
-    nodeterm. The SSH constants remain machine-neutral: the local record root is not valid on a
-    remote host and must never be baked into its copy — enforced by
-    `main/remote-ssh/remote-shim-neutrality.guard.test.ts`, two legs (the exported neutral bodies
-    carry no record root or prelude, and `remote-hooks.ts` cannot even NAME a parameterised
-    builder), because the failure is silent and one-sided: a remote shim carrying the prelude keeps
-    working, and the only symptom is this machine's userData layout sitting in a file on someone
-    else's server. **The prelude is shared; the RECORD it reads is desktop-only.** Those writers are
-    the two hook-server handlers `src/main/index.ts` registers, and
-    `src/server/handlers/index.ts` deliberately registers neither — so on the Server Edition the
-    file is byte-identical, the signing secret is armed, and the resolver still finds nothing and
-    takes its fallback. Coherent rather than missing: that shell answers `shared: false`
-    (`UNKNOWN_CODEX_IDENTITY_CAPS`), so its Codex nodes run their own app-server and no tool shell
-    needs recovering. It turns into a real gap only when that edition grows the shared app-server,
-    and the fix is the two registrations.
+  - **Every LOCAL generated sh client resolves shared-Codex identity before its env gate.** A
+    reused daemon can carry absent, incomplete or complete foreign `NODETERM_*`. Always look up the
+    exact thread/account binding: recover incomplete context, accept matching complete context,
+    preserve complete direct launches only when records are absent, and refuse conflicts or
+    existing invalid/unreadable/ambiguous evidence by name before transport. Complete means a valid
+    node and endpoint plus any nonempty client `NODETERM_CANVAS_CONTROL`; agent-role metadata and
+    `NODETERM_SERVER_CANVAS_CONTROL` are not substitutes. Recovery clears inherited transport and
+    credentials before loading the bound endpoint. Managed hooks pass `'hook'` to the shared
+    prelude so refusal drains stdin and exits 0 with empty stdout; commands exit 1. Shape/scope
+    checking is not HMAC verification. See `docs/shared-codex-node-identity.md` for account semantics
+    and exact comparisons. SSH constants stay machine-neutral; never bake in the local record root.
   - **That prelude EXPORTS WHAT THE RECORD SAYS — it never decides.** `NODETERM_AGENT_ID` and
     `NODETERM_CANVAS_CONTROL` were once constants there (`codex`, granted); both are
     `buildPtyEnv`'s answers about the PANE, which labels a node with its OWN agent id
@@ -1565,6 +1637,61 @@ else, and its context links must keep classifying across restarts).
   Settings (`notifyOnClaudeDone`). Selecting, focusing, dwelling into, or opening a session card
   clears `unread` and ACKs the finish across phone/notch surfaces — existing read-on-view behavior.
   This NEVER changes the workflow bucket: read state is independent from agent state.
+- **The status badge (six states, and where each one may come from)** — `shared/node-status.ts` is
+  the whole model: `working | waiting | blocked | completed | failed | unknown`, rendered by ONE
+  component (`components/StatusBadge.tsx`) on the node header, on a group frame's label pill
+  (rolled up, worst member wins) and on a kanban card. It replaced the header's separate RUNNING and
+  NEEDS YOU chips and the card's own pair — a session seen on two surfaces must not describe itself
+  in two vocabularies, and NEEDS YOU could not tell an approval from a question.
+  **Never infer state from what a terminal looks like.** No output parsing, no "it has not printed
+  in a while so it is stuck". Exactly two sources:
+  - `working | waiting | blocked | completed` come from the hook-fed mirror (`AgentState`, with
+    `stateAt` as the freshness — the clock that was previously documented as never rendered; this
+    badge is the reader it now has). `done` is spelled `completed` on screen.
+  - `failed` comes ONLY from a session fact: the last hook state was `working`, `waiting` or
+    `blocked` (`FAILABLE_STATES`) **and** the pane is PROVEN dead. The proof is
+    `PtyManager.sessionPresence` — the same tri-state primitive `ServerNodeOps`' dead-card sweep
+    asks — served by `core/node-status-service.ts`, which repeats the probe before it will answer
+    `dead` (one miss is a busy tmux, two is a fact). Both shells register that channel from the one
+    core body; `core/node-status-parity.test.ts` pins it, because a shell that stopped calling it
+    would boot fine and simply never say `failed`. **`done` is the one state a dead pane does not
+    change**: a session that finished and then had its terminal closed is a tidied-up success, and
+    failing it would put a red badge on every one of them. That exclusion is the whole reason the
+    original decision named `working` alone; a dead pane is otherwise a fact about the SESSION, not
+    about the turn, so the other two fail with it — which is what stops a node that was `blocked` on
+    a permission request when its session died from reading `BLOCKED` forever, inviting the operator
+    to answer a prompt that no longer exists.
+  Everything else is `unknown`, **which is a word on screen, never silence**: no status event, or a
+  probe that could not tell. A missing prober can never manufacture `failed` — `runFailureProbe`
+  records `unknown` for every candidate on a surface with none, which is what stops a stale
+  `working` from quietly reading as healthy.
+  Three more rules the code depends on:
+  - **Nothing status-derived touches disk.** The badge is computed at render time; `reason`,
+    `askKind`, `pane` and the latched `failure` are all excluded from the agentStatus localStorage
+    allow-list, and none of it reaches `project.json`. That is what keeps a fact that changes every
+    few seconds from re-raising the Reload/Keep-mine conflict bar (pinned in
+    `agentStatus.persist.test.ts`).
+  - **Never colour alone.** Every state carries a distinct glyph AND a distinct word (and `stale` is
+    a word too), asserted in `node-status.test.ts`. Do not add a state whose only difference is a
+    CSS class.
+  - **The failure LATCHES, and only a live hook event clears it.** `sweepStaleWorking` blanks a
+    stale `working` entry, so without the latch a proven failure would decay back to `unknown`
+    minutes after it was proven. `markFailed` re-asks eligibility at write time (the probe is
+    async), and a node carrying a latch is deliberately excluded from `setState`'s same-state fast
+    path so the self-heal actually re-renders.
+  Probing is lazy: `paneProbeCandidates` picks only `FAILABLE_STATES` entries past
+  `NODE_STATUS_STALE_MS` (10 min — half the mirror's 20-minute presumed-gone window, and just past
+  the longest legitimate gap between hook events) whose pane has not been asked about within
+  `PANE_RECHECK_MS`, so a canvas of healthy agents makes zero probes. That second bound is
+  load-bearing since `waiting`/`blocked` joined: unlike `working` they never decay out of the
+  candidate set on their own, so an overnight parked approval would otherwise be re-probed on every
+  pass. Only `working` is downgraded to `unknown` by an INCONCLUSIVE probe — it claims something is
+  happening now, while `waiting`/`blocked` claim a standing request that does not become less true
+  by sitting still, and those are exactly the states an operator parks. Freshness is rendered
+  by one shared 15 s ticker (`lib/statusClock.ts`), not a timer per node. Desktop and Server Edition
+  both have the whole surface (the bridge member is real, and a relay tab asks the remote core its
+  nodes actually live on); the sessions sidebar keeps its own coarser `StatusKind` buckets and does
+  not yet show `failed`.
 - **Status-grouped sessions** — three always-visible sections: **Waiting for your response** maps
   internal `done`, `waiting`, and `blocked` together (a completed turn, question, or approval all
   need the user); **Running** maps `working`; **Unknown** means no live hook state is available.
@@ -1733,17 +1860,164 @@ else, and its context links must keep classifying across restarts).
   (which sets `NODETERM_CANVAS_CONTROL`) is the whole wiring. That premise rests on grok's shipped
   docs and is **unverified** (`grok inspect --json` never run); if it does not hold, grok takes the
   marker-block route instead — see docs/grok-agent.md.
-  **Server creator ownership (2026-08 incident hardening):** enabled Server control accepts only
-  verified node identity. `HeadlessNodeFactory` records which source node opened each new node in a
-  process-local ledger; link/group/rename/color/sticky-update, message delivery, and close validate
-  the whole target set as current-run creations before writing or killing anything. Queued messages
-  revalidate creator ownership before flush. The ledger is intentionally empty after restart —
-  project JSON, titles, hook history and tmux names are not creator proof — so
-  boot neither attaches/creates backends nor sends persisted queued commands. A live backend with a
-  durable arm remains untouched until an explicit owner action or browser view. `open-terminal` and
+  **Server creator ownership (2026-08 incident hardening; ledger made DURABLE 2026-09):** enabled
+  Server control accepts only verified node identity. `HeadlessNodeFactory` records which source
+  node opened each new node; link/group/rename/resize/color/sticky-update, message delivery, and close validate
+  the whole target set as creations of THIS Server before writing or killing anything. Queued
+  messages revalidate creator ownership before flush. The ledger now SURVIVES a restart:
+  `createPersistentHeadlessNodeOwnership` (`server/node-ownership-store.ts`) publishes it 0600 to
+  `<dataDir>/node-ownership.json` behind a 300 ms debounce, loads it synchronously at boot, and
+  drops entries whose node id the persisted workspace no longer has. Without it a director loop
+  lost control of every child it had spawned the moment the service was upgraded.
+  This is NOT a relaxation of the rule it replaces. Project JSON, titles, hook history and tmux
+  names are still not creator proof and are still never read back as ownership; what changed is
+  that a **server-authored 0600 file in the Server's own data dir** is a different trust class —
+  the same one as the `node-tokens/` and `node-auth-key.bin` beside it, which already carry node
+  identity across restarts. An attacker who can rewrite it can mint identity directly next door.
+  A missing, unreadable or wrong-shaped file loads EMPTY (unknown ownership still fails closed) and
+  every id is re-validated with `isSafeNodeId` on the way in and out. Durable ownership grants no
+  extra SPAWN authority — whether a persisted node may fresh-spawn is `PtyManager.bootPersisted`'s
+  decision, below, not the ledger's — and the delivery queue is memory-only, so
+  boot still sends no persisted queued command. Before the Server starts listening,
+  `PtyManager.protectPersistedSessionsAtBoot` classifies every saved local terminal id: a missing
+  backend becomes an inert `deadCard`, while a surviving or unreadable backend is attach-only
+  (`tmux attach-session` / session-host attach-existing). Neither path can create a context-free
+  shell, including if the backend disappears between boot and browser mount. Only node ids created
+  during the current Server run retain the normal fresh-spawn path. `open-terminal` and
   `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
   node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
   identity never defaults to Claude.
+  **Orphan adoption is the mirror image of that classification, not an exception to it (2026-09):**
+  right after `protectPersistedSessionsAtBoot`, and on demand via `POST /opsapi/adopt-orphans`,
+  `ServerNodeOps.adoptOrphans` lists live `nt-<id>` tmux sessions whose id NO local project still
+  carries, resolves each pane's cwd (`list-panes -a`, through `PtyManager.listNodetermPaneCwds` —
+  one tmux dialect, in the manager that owns it) and appends a terminal card to the project whose
+  `cwd` is that pane's NEAREST ancestor. The planning is pure (`src/core/orphan-adoption.ts`): the
+  session list, pane cwds, workspace and agent-status mirror all arrive as data. It creates,
+  attaches, kills and types NOTHING — it adds a CARD for a backend it just proved exists, and every
+  adopted id is then run through `protectPersistedSessionsAtBoot` itself, so it is attach-only for
+  the rest of the run exactly like a persisted card. The evidence bar is the reaper's, inverted: the
+  reaper removes on two DEFINITE absences, adoption adds on one definite PRESENCE (a live session
+  AND a pane cwd inside a project); a pane whose cwd matches no project is logged once and left
+  alone, and an SSH project is never a target (local tmux says nothing about another host). This
+  exists because the card can be lost while the pane is fine — see the local save rescue below.
+  **Local save rescue (2026-09-01 incident):** `workspace:save` is a WHOLE-workspace,
+  last-writer-wins write and local projects have NO conflict machinery (the ssh path's
+  `rescuableNodes`/`clearedNodes` pair is the only one that exists). One client republishing a stale
+  node list therefore deletes every card created since its snapshot, silently, for every other
+  client — measured: eight cards (four Claude sessions, four shells) fell out of `project.json` over
+  four hours while all eleven tmux sessions kept running, and the next restart rendered two
+  terminals. `WorkspaceStore` now keeps a node an incoming LOCAL save omitted when
+  `hasLiveBackend(id)` is true AND `wasDeleted(id)` is false, logging one line per save with the ids
+  and the calling UI (`workspace:save` moved to `handleWithSender` for exactly that attribution).
+  Both predicates are injected (`WorkspaceBackendGuards`) and DEFAULT TO NO RESCUE, so core keeps no
+  PtyManager dependency; both shells wire `PtyManager.sessionExists` (true on an unreadable probe —
+  a card kept by mistake is one click, a card lost takes its session's address with it) and
+  `PtyManager.wasDeleted` (the × tombstone: a deletion must always travel). ssh projects never enter
+  this path — `splitWorkspace` puts them in `cache`, not `files`.
+  **Creation liveness (2026-08 incident hardening):** the serialized section of
+  `HeadlessNodeFactory.open` ends after the card is saved/published. PTY creation and initial-command
+  delivery run outside it behind one 15s deadline, so an unresponsive tmux/session-host operation
+  answers `launch-timeout` without wedging later workspace mutations. The backend call cannot be
+  cancelled; its card stays durable and the response says not to repeat because it may finish late.
+  Its health ticket stays active until that underlying call actually settles, even after the
+  timeout response; parallel launches have separate tickets and health names the oldest one.
+  A concurrent close, operator removal, or Server stop marks an in-flight node cancelled; if the
+  non-cancellable create resolves after the first destroy already found nothing, launch cleanup
+  destroys the exact backend again. Keep this two-pass guard when moving work outside the lock or
+  removed cards leak tmux husks.
+  Capability preflight is separately bounded at 5s. Server boot now refreshes the real shared-Codex
+  capability after arming its identity secret, and canvas control consumes that boot-populated
+  answer behind the bound. A missing or failed refresh degrades only that launch to bare Codex;
+  neither an unbounded unresolved getter nor a hardcoded `shared:false` production answer is valid.
+  **Do not widen this for operators.** The Server operator plane is a separate loopback bearer
+  principal in `src/server/ops-api.ts`; its ability to inventory or remove any persisted card is
+  not authority an agent `/control/*` request inherits. Pane probe errors remain `unknown`, and
+  only two definitive misses enter the shared sweep deletion set. A forced live delete confirms
+  local PTY teardown before the durable card is removed. The health read snapshots the factory's
+  tracker directly and must never enqueue behind it.
+  **Server message submit verification:** `sendSettledEnvelope` first waits until pane capture sees
+  the pasted envelope, then sends Enter and captures again. A fresh Claude composer can render a
+  paste before it is ready to consume Enter; an unchanged composed snapshot therefore gets exactly
+  one more Enter plus re-capture. The boolean still means only "bytes reached the pane" — the
+  target's verified `newTurn`/`working` hook remains the receipt that permits `delivered`; a retry
+  that produces no receipt becomes `stalled`. Keep the retry bounded: repeating Enter can submit a
+  human draft after the intended envelope has already moved.
+  Session presence includes detached tmux backends: an absent browser PTY is not `targetGone`.
+  The bounded tri-state probe runs after the free authorization/status gates; unknown stays
+  `targetPaneUnreadable`. Queued admissions (including trace I/O) and flushes serialize per target.
+  A rate-limited flush retries after its advertised delay, rerunning the full gate chain without
+  extending the original TTL. Other retryable outcomes still wait for a fresh idle event.
+  **Claude Remote Control launches (2026-08):** Server `open-agent --agent claude` accepts
+  `--remote-control[=NAME]`. `claudeCliCaps()` detects the exact option token in the installed
+  CLI's `--help`; absence is a named `remote-control-unsupported` refusal before node persistence,
+  never a guessed version floor or a launch with an unknown flag. The optional name is normalized
+  to one line and shell-quoted by the shared command assembler. Desktop canvas control refuses the
+  Server-only flag explicitly; `/rc [name]` inside an ordinary Claude session is the manual path.
+  **Automatic layout is a SEPARATE authority from creator ownership, and it is a narrower one**
+  (`src/core/canvas-layout/`, opt-in, default off). Creator ownership answers "may this caller
+  mutate that node"; the layout engine additionally asks "should anything automatic move it at
+  all", and the second question has more ways to answer no. `plan(input) -> {ops, skipped}` is
+  pure — no clock, no store, no filesystem — and every node it declines is reported with a reason
+  (`@shared/canvas-layout`): `pinned`, `manual-placement`, `active`, `loop-owned`,
+  `foreign-authority`, `primary-role`, in that order, first match wins. **The refusals are the
+  feature**, so a skip is never silent: the preview table renders them beside the changes, and
+  `plan.test.ts` pins each row. `primary-role` is the widest and the most load-bearing — a node
+  with no `role` reads as `primary`, so every canvas saved before PR-A, and every manual UI open,
+  is structurally untouchable.
+  Marked spawn trays (`kind: group`, `taskFrame: true`) may lack a role because the spawn path
+  predates group roles. They remain layout subjects, but an explicit `role: primary` still wins;
+  unmarked legacy groups never inherit worker status. Tray collapse uses the same refusal table.
+  Two rules that are easy to undo by accident. **Every refusal is re-asked at APPLY time**
+  (`gateLayoutPlan`), never taken from the plan-time verdict — a plan is previewed, read and then
+  approved, and the operator can pin, move, or click into any card in between; this is the same fire-time re-ask
+  discipline agent hibernation uses. And **the engine cannot CREATE a frame**: the op set is
+  `place | resize | reparent | collapse | label`, so the tray is minted only by the spawn path
+  (`@shared/worker-frame`, with its "no frame around a single card" rule) and the engine only ever
+  files into one. A second frame-creator is the frame churn this design was written to avoid.
+  **Nothing runs on a timer.** The triggers are `node-created` (placement happens once, at birth),
+  `status-changed` (which emits ops only for `tray.floatOnAttention` — a blocked or failed member
+  leaves a closed tray so its approval stays reachable), `rules-changed`, and an explicit
+  `organize`. Automatic triggers apply straight away, narrow by construction, reversible by ONE
+  ⌘Z (`commitAsSingleUndoEntry` pushes the pre-apply array itself, because the history stack is
+  debounced and a burst would otherwise cost two undos); the two explicit triggers preview first.
+  `LayoutTriggerQueue` coalesces triggers received during a plan instead of dropping them. Each
+  request carries its project identity; a late plan or preview cannot apply to a different project.
+  Cleanup reads the lease actually held at unmount, not a stale effect-time snapshot.
+  **Single authority per project is a lease** (`LayoutLeaseStore`, 0600 in the shell's own data
+  dir beside `node-tokens/` — never in `project.json`, which would git-merge a statement about
+  which process is in charge). It expires (`LAYOUT_LEASE_TTL_MS`, 60 s, re-stamped while held) so
+  a crash cannot lock a canvas forever, and **a refusal NAMES the holder** — a second director
+  reading "another instance holds this project's layout lease (ui-1f2e…)" stands down knowingly
+  instead of fighting. Grants serialize across cooperating store instances and processes and
+  require persisted, readable token evidence. Unknown storage refuses automation. A leftover
+  `.lock` is never stolen on a timer; recovery requires proving the writer is gone before an
+  operator removes that exact lock. Legacy processes that ignore the lock are not fenced by it.
+  `applyLayoutTransaction` supplies the coordinator's synchronous effect boundary: re-read the
+  project/input revisions, assignment epoch, activity completeness and affected group exclusions
+  under the lease lock. This helper still requires Canvas/store/IPC integration; a plan token
+  alone does not fix the legacy renderer apply or whole-array undo. See `docs/organizer-transactions.md`.
+  **The rules split across the two tiers exactly as the rest of the file does.** WHAT the rules
+  are is shared (`Project.layoutRules`, `@shared/canvas-layout-rules`, sanitized on both
+  boundaries and on the cwd-less inline load path like `sanitizeNodeTriggers`). **WHETHER the
+  engine runs is machine-local and lives nowhere else** (`Settings.canvasLayout.enabled`, default
+  false): a repository must not be able to switch on automatic rearrangement for everyone who
+  clones it, which is the same rule reduced-motion follows. The sanitizer **preserves keys it does
+  not recognise** (`unknown`), because two machines on different builds rewrite this one file and
+  dropping is how an older build silently deletes a newer one's rules — the appearance branch's
+  `layoutRules.appearance` is exactly that case today. Registered in both shells from one core
+  body (`registerCanvasLayoutIpc`), pinned by `core/canvas-layout-parity.test.ts`.
+  Surfaces — Desktop: full. Server Edition: full (the engine is core; the ws bridge member is
+  real). Mobile: N/A — it attaches to tmux sessions over the transport protocol and has no canvas,
+  frames or geometry to arrange.
+  **Control-spawn geometry:** persisted `CanvasNodeState.size` is authoritative, not renderer CSS.
+  Canvas-control agent opens default to 440×320 (half the area of 640×440); `--size normal` restores
+  the configured manual-open dimensions, and manual UI opens stay unchanged. The `resize` verb
+  changes that persisted rectangle without restarting the PTY and is creator-owned on Server.
+  A refreshed renderer also recognizes a NEW source-less/unmarked headless agent upsert from the
+  pre-size Server process and stamps it compact before save. Client/manual upserts have a `src`, and
+  new-server explicit-normal upserts have `controlSize: 'normal'`, so neither is rewritten. This is
+  the no-service-restart bridge for the next connected spawn while static assets roll ahead of main.
   **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
   the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
   `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim
@@ -3373,6 +3647,13 @@ sessions is a hazard whatever kills it; this removes the hazard, not a proven ca
 
 ## Conventions
 
+Remote task metadata never grants control. The navigator preserves mechanical and
+declared bindings, assignment actor/epoch/supervisor, creator ancestry and conflicts
+as distinct facts. Absolute observations age at read time; query/publication time
+cannot renew them. Browser focus must independently revalidate host, boot, project,
+account, provider and session, then use the existing attach-only authorization gate.
+The schema and bounded page seam are documented in `docs/remote-task-context.md`.
+
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their
   reasoning and measurements; it is dense on purpose and is loaded automatically by coding agents.
   **`CONTRIBUTING.md` is the short human door**: setup, the process-boundary rules, the house rules
@@ -3443,3 +3724,36 @@ sessions is a hazard whatever kills it; this removes the hazard, not a proven ca
     follow-up note rather than same-PR work — but flag it so it isn't forgotten.
   When a change is genuinely desktop-only (native menus, auto-update, Keychain), say so; the
   point is to make the call consciously, not to leave the other surfaces to rot.
+
+## Combined fork recovery prototype (2026-09-05)
+
+`docs/project-reconciliation.md` records the combined-source limits. Preserve fork worker,
+appearance and geometry fields through actual Flow serialization, and keep Canvas save retry
+on the reconciler (no legacy fallback). Public organizer lease release requires the exact
+acquisition token so delayed same-holder cleanup cannot revoke a successor. This release
+protection alone does not implement conditional host layout apply/inverse; the coordinator
+consumer now does, but actual shells still lack its trusted runtime adapter. Canonical message
+validation and identified host routes exist, but qualified issuer/recipient/durable-intent
+adapters remain unavailable; new-file, legacy migration and SSH persistence remain refused.
+Source containment and disposable fixture success are not live rollout or device acceptance.
+
+Browser startup license/saved-SSH hydration catches rejected reads into explicit `readError`
+state. It does not manufacture successful bridge responses or entitlement; last good data is
+retained and the management panels show unavailable instead of actions. Canvas shows both
+read errors. Only a successful read/status event clears its warning. The mobile launch card
+is a legitimate dismissible announcement, not a workspace-load failure or test bypass target.
+
+Organizer consumer integration: plan/apply/inverse IPC binds the transport sender and a retained
+candidate to the D07 project coordinator, exact lease and input revision. Canvas organizer undo
+is a conditional inverse, never a whole-array restore. Post-publication guard failure is UNKNOWN;
+the retry affordance reads the same receipt without initiating publication. Both real shells
+deliberately lack OrganizerRuntime and visibly refuse until complete trusted cross-client
+activity/assignment evidence and canonical host presentation are available. Do not turn operator
+browser authentication into agent ownership or treat injected-runtime tests as live acceptance.
+
+Message consumer integration uses explicitly pinned D15 public validation, never ambient authority
+paths. Identified routes stay host-side and verified-only; separate actor credentials never reach
+renderer forwarding, envelopes or the validator. Exact-recipient ACK and an existing durable issued
+attempt claim are required. Both actual shells still lack MessageControlRuntime and visibly refuse;
+node tokens/operator sessions cannot stand in for it. Legacy sends remain uncorrelated and reject
+identity claims. See `docs/message-delivery-integrity.md`; UNKNOWN never authorizes replay.

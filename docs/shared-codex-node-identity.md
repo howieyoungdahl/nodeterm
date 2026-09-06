@@ -53,6 +53,39 @@ collide; a remote host has one home root, so the remote digest is over `accountI
 pre-migration long home (`<userData>/codex-accounts/<id>`) is moved to its short home at boot,
 fail-closed (no-op if absent, if the target exists, or on an invalid id).
 
+## Shared-daemon restart continuity
+
+The control socket is not one process per canvas node. Every `codex --remote unix://` TUI for an
+account scope rides one persistent app-server, so an app-server upgrade, repair, or crash severs all
+of them at once. Their tmux panes and Codex rollouts remain intact, but without a client supervisor
+each pane drops back to its shell and looks like a reset.
+
+The generated launcher therefore owns the remote client for the lifetime of the bound thread:
+
+1. It records the app-server control socket's inode before launching the TUI.
+2. A normal exit or terminal signal returns unchanged.
+3. After any other exit, it retries only when `codex app-server daemon version` does not report
+   `status: running`, or when a known pre-launch socket inode changed. A failed inode read alone is
+   unknown, not proof of a reset; an unrelated Codex failure against the same healthy generation
+   returns its original status.
+4. It starts a missing daemon through the same scrubbed environment used at preflight, then resumes
+   the exact already-bound thread. Only the first launch receives the caller's prompt/options;
+   recovery never replays them because that could submit the same user turn twice.
+5. Three rapid resets stop the loop and print the exact manual `codex resume <thread>` command.
+
+Protocol health is checked before lifecycle start. Codex's PID ownership record can become stale
+while the socket remains responsive; that bookkeeping failure must not trigger a kill of live,
+shared infrastructure. The behavior is failure-injection tested under real `/bin/sh` in
+`src/core/codex-launcher-sh.test.ts`, including a mutation guard proving that a healthy
+same-generation client error is not relaunched.
+
+Desktop and Server Edition both wire this same core spine. The headless shell arms the
+restart-stable record secret, registers thread start/bind handlers against its persisted canvas,
+refreshes the launcher capability, and broadcasts identity mode through its normal browser RPC.
+Mobile needs no separate implementation: it attaches to the Server Edition's existing tmux
+session. Managed Codex account administration remains desktop-only; that is separate from
+supervising the system account's shared app-server on the server host.
+
 ## The signing secret (both shells — Decision 1)
 
 Every ownership record is HMAC-signed by the **one** restart-stable 32-byte node-auth secret
@@ -154,40 +187,66 @@ Ownership resolution reuses the merged fail-closed posture (`pane-ownership.ts`,
 
 ## The POSIX-sh resolver
 
-`codexThreadIdentityResolverSh(root)` is prepended to every managed hook script and to both LOCAL
-agent shims (`nodeterm.sh` and `context.sh`) before their early environment gates. A
-shared-app-server tool shell inherits `CODEX_THREAD_ID` but not the pane's `NODETERM_*` (see probe
-U5, `docs/superpowers/probes/2026-08-codex-tool-shell-env.md`), so this prelude recovers the binding.
-Without it, Codex hook status worked while canvas control and linked-context reads misdiagnosed the
-same first-class node as being outside nodeterm. The machine-neutral shim constants copied to SSH
-hosts deliberately omit the local record path; each local installer builds its own copy with its
-own `codexThreadIdentityRoot()`.
+`codexThreadIdentityResolverSh(root)` runs before either local command's environment gate;
+`buildManagedScript` passes the additional `'hook'` caller mode before its own node gate. A tool
+shell carries `CODEX_THREAD_ID`, but a reused app-server can supply absent, incomplete **or complete
+foreign** `NODETERM_*`. Launch-time environment scrubbing cannot repair an already running daemon.
+The resolver therefore always evaluates the exact thread/account binding when a thread id is
+present. Without a thread id, all consumers retain their existing non-Codex behavior.
 
-**The shim half is shared; the RECORD half is desktop-only until the Server Edition registers the
-handlers.** Both statements matter, and reading only the first overstates what that edition has.
-The prelude reaches it byte-for-byte — `context-link.ts`'s `writeCliFiles` is core, and both shells
-arm the signing secret (above) — but `src/server/handlers/index.ts` deliberately registers no
-`setCodexThreadStartHandler` / `setCodexThreadBindHandler`, and `src/main/index.ts` is the only
-non-test caller of `writeCodexThreadIdentity` / `bindCodexThreadIdentity`. **No ownership record is
-ever written on that shell**, so the resolver always finds none and takes its fallback: it exports
-nothing, and the shims stay gated exactly as they were before this prelude existed. That is
-coherent rather than merely missing — the same file answers `UNKNOWN_CODEX_IDENTITY_CAPS`
-(`shared: false`), so a Codex node there launches the bare `codex` with its own app-server, and a
-tool shell whose identity would need recovering does not exist. It becomes a real gap the day the
-Server Edition grows the shared app-server, and what closes it is those two registrations — not a
-second copy of the prelude.
+The launch contracts are `HookServer.buildPtyEnv` (`src/core/agents/hook-server.ts`) and
+`codexSessionEnv`/`resolveCodexSessionScope` (`src/core/codex-accounts-core.ts`). Complete ambient
+context means a safe node id, a shape-valid absolute endpoint path, and **any nonempty** client
+`NODETERM_CANVAS_CONTROL` (including `0`, which the existing command gate treats as enabled).
+`NODETERM_AGENT_ID` is optional metadata, and `NODETERM_SERVER_CANVAS_CONTROL` is a separate server
+setting. Neither supplies identity or substitutes for the client capability. Endpoint readability
+and token validity are not inferred from completeness; the existing consumers/server still check
+those boundaries.
 
-The resolver:
+| Exact lookup result | Ambient context | Result |
+| --- | --- | --- |
+| One shape/scope-valid binding | Empty or incomplete | Recover node, endpoint, Codex role and client capability |
+| One shape/scope-valid binding | Complete, same node and endpoint | Accept and reload transport from that endpoint |
+| One shape/scope-valid binding | Complete, different node or endpoint | Refuse `complete-context-conflict` before transport |
+| No record exists in the selected scope(s) | Complete | Preserve direct in-process `codex exec` context unchanged |
+| No record exists in the selected scope(s) | Empty or incomplete | Refuse `missing-binding` |
+| Existing malformed/unreadable evidence or multiple bindings | Any | Refuse by name; never retain ambient authority |
 
-- reads `NODETERM_CODEX_ACCOUNT_ID` from the daemon env to pick the scope;
-- a known safe account id ⇒ reads **only** that account's record, and requires the record's
-  `accountId=` line to **agree with the daemon scope**;
-- an **empty** account id ⇒ scans every scope (bare-root system + each managed subdir) and binds
-  **only when exactly one candidate matches** (`nt_codex_matches -eq 1`) — two accounts holding the
-  same thread id change nothing;
-- it cannot verify the HMAC (no key in an agent's shell), so it re-validates every recovered field's
-  charset and the account-line/scope agreement before exporting. Its behaviour is proven under real
-  `/bin/sh` against a real on-disk scope tree in `codex-thread-identity-sh.test.ts`.
+Node and endpoint comparisons are byte-for-byte. The endpoint string is part of the signed
+preimage: neither symlink resolution nor normalization of `/./`, trailing separators or aliases
+hides a disagreement. Recovery, including the matching complete case, clears inherited socket,
+port, hook token/version, node-token directory and legacy Codex node-token fields before the
+consumer sources the selected endpoint. Otherwise an inherited socket can override the recovered
+endpoint's port. It also replaces stale agent-role metadata with `codex`. A complete no-record
+direct launch keeps its original transport and optional metadata.
+
+`NODETERM_CODEX_ACCOUNT_ID` distinguishes three cases. **Unset** means unknown: inspect the bare
+system record and each safe managed scope, requiring exactly one valid candidate and no invalid or
+unreadable candidate evidence. **Explicitly empty** means system only, matching the launcher's
+deliberate empty export that clears an inherited managed account. A **safe nonempty managed id**
+restricts lookup to that directory. The literal `system` is reserved and refused as an environment
+account id; a bare-root record may use `accountId=` empty, `accountId=system`, or the legacy omitted
+line. Managed record account lines must agree with their directory. A missing record in an explicit
+scope never borrows another scope's record; the supplied account hint is not rewritten on recovery.
+
+Records are parsed as data with `awk`, never sourced. Node/endpoint/signature fields must each
+occur once, account at most once; unknown or duplicate fields, unsafe field shapes, nonregular or
+symlinked record files, unreadable records/directories and scope disagreements refuse by name.
+Legacy records without an account line remain supported in the system scope. These are protected
+record **shape/scope checks, not HMAC verification**: the shell has no signing key. Server identity,
+per-node-token validation and child-ownership authorization remain authoritative and unchanged.
+
+Refusals print only `Nodeterm Codex identity refused: <fixed-reason>.` to stderr. Commands exit 1.
+Hooks drain stdin to EOF, print nothing to stdout and exit 0, preserving the telemetry contract
+without EPIPEing a caller writing more than a pipe buffer. No endpoint is sourced and no transport
+runs on refusal. Real `/bin/sh` tests cover all three consumers with isolated homes/endpoints and
+fake curl; raw 2 MB stdin writes discriminate safe draining from an early exit.
+
+Local desktop and Server Edition generators use their own `codexThreadIdentityRoot()`. The SSH
+command constants deliberately omit a local record root. Client refresh is separate from daemon or
+server lifecycle work: generated files can be overwritten at app boot or SSH reconnect, so a
+client-only refresh must account for that reversion boundary until the durable bundle contains the
+same source. Per-launch launchers are not part of this resolver change.
 
 **It exports what the record says; it does not decide.** `NODETERM_AGENT_ID` comes from the record's
 `agentId`, and `NODETERM_CANVAS_CONTROL=1` is exported **only** when the record's `canvasControl` says

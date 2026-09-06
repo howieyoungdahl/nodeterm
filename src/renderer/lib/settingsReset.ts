@@ -39,7 +39,12 @@ export const APPEARANCE_RESET_KEYS = [
   'hiddenNodeMenuItems',
   'hiddenHeaderButtons',
   'showResumeCard',
-  'windowTitleActiveSession'
+  'windowTitleActiveSession',
+  // The whole visual-preference block: window edge, the global node/group border defaults, and the
+  // two accessibility switches. Resetting to the default means REMOVING the key (it is absent from
+  // DEFAULT_SETTINGS on purpose — absent is "built-in defaults"), which `resetPatch` does by
+  // reading `undefined` out of DEFAULT_SETTINGS.
+  'appearance'
 ] as const satisfies readonly (keyof Settings)[]
 
 /** The defaults for `keys`, as a patch for `useSettings.update`. */

@@ -1,7 +1,6 @@
-// Capability probe for the LOCAL Claude CLI. Today it answers exactly one question — does this
-// CLI accept `--permission-mode auto`? (Claude Code >= 2.1.71; older CLIs exit 1 on the value, see
-// AUTO_PERMISSION_MODE_MIN_VERSION) — but it is shaped as a caps bag so the next version-gated
-// flag lands here instead of growing another probe.
+// Capability probe for the LOCAL Claude CLI. Version-gated behavior (`--permission-mode auto`,
+// fullscreen TUI hooks) and help-advertised launch flags (`--session-id`, `--remote-control`) live
+// in one memoized caps bag so callers never guess whether the installed binary accepts an option.
 //
 // Lives in core (not main) so the Server Edition boots it through the same CorePlatform seam.
 // The remote (SSH) CLI is probed separately on its own host — see SshProjectManager.
@@ -47,7 +46,8 @@ export function claudeCliCapsFrom(
     //   `  -n, --name <name>                     Set a display name for this session`
     // The anchor is what keeps `--remote-control-session-name-prefix` (which contains `-name-`,
     // not `--name`) and any future `--names` from answering yes for a flag the CLI would exit on.
-    nameFlag: /(^|\s)--name(\s|=|$)/m.test(helpOutput ?? '')
+    nameFlag: /(^|\s)--name(\s|=|$)/m.test(helpOutput ?? ''),
+    remoteControlFlag: /(^|\s)--remote-control(\s|=|$)/m.test(helpOutput ?? '')
   }
 }
 
@@ -62,7 +62,7 @@ async function probe(): Promise<ClaudeCliCaps> {
     const { stdout } = await execFileP(bin, ['--version'], { timeout: PROBE_TIMEOUT_MS })
     // `--help` is a second spawn, paid once per process (this whole probe is memoized). Its
     // failure must not cost us the version answer, so it degrades on its own: no help text just
-    // means no minted session ids.
+    // means no help-advertised optional launch flags.
     const help = await execFileP(bin, ['--help'], { timeout: PROBE_TIMEOUT_MS })
       .then((r) => r.stdout)
       .catch(() => null)

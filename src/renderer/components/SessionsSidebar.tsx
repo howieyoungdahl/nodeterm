@@ -27,6 +27,7 @@ import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSession } from '../session/session'
+import { TaskContextSidebar } from './TaskContextSidebar'
 
 const HISTORY_COLLAPSE_KEY = 'history'
 
@@ -88,9 +89,16 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const statusById = useAgentStatus((s) => s.byId)
   const namingById = useSessionNaming((s) => s.byId)
   // This sidebar's core api (a stable context read — the branch lookups run on the session's git).
-  const { api } = useSession()
+  const { api, id: sessionId } = useSession()
 
   const [filter, setFilter] = useState('')
+  const [taskView, setTaskView] = useState(() => {
+    try { return window.localStorage.getItem('nodeterm.sidebar.taskView') === 'true' } catch { return false }
+  })
+  const selectTaskView = (on: boolean): void => {
+    setTaskView(on)
+    try { window.localStorage.setItem('nodeterm.sidebar.taskView', String(on)) } catch { /* local view */ }
+  }
   const [statusNow, setStatusNow] = useState(() => Date.now())
   const [branches, setBranches] = useState<Record<string, string>>({})
   // Drag-to-group: the object being dragged, and the current drop target for highlighting.
@@ -506,22 +514,28 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
       <div className="ss-tabs" role="tablist" aria-label="Group sessions by">
         <button
           role="tab"
-          aria-selected={grouping === 'project'}
-          className={`ss-tab${grouping === 'project' ? ' is-active' : ''}`}
-          onClick={() => updateSettings({ sidebarGrouping: 'project' })}
+          aria-selected={!taskView && grouping === 'project'}
+          className={`ss-tab${!taskView && grouping === 'project' ? ' is-active' : ''}`}
+          onClick={() => { selectTaskView(false); updateSettings({ sidebarGrouping: 'project' }) }}
         >
           Project
         </button>
         <button
           role="tab"
-          aria-selected={grouping === 'status'}
-          className={`ss-tab${grouping === 'status' ? ' is-active' : ''}`}
-          onClick={() => updateSettings({ sidebarGrouping: 'status' })}
+          aria-selected={!taskView && grouping === 'status'}
+          className={`ss-tab${!taskView && grouping === 'status' ? ' is-active' : ''}`}
+          onClick={() => { selectTaskView(false); updateSettings({ sidebarGrouping: 'status' }) }}
         >
           Status
         </button>
+        <button role="tab" aria-selected={taskView} className={`ss-tab${taskView ? ' is-active' : ''}`} onClick={() => selectTaskView(true)}>Tasks</button>
       </div>
 
+      {taskView ? <div className="sessions-sidebar__body">
+        {activeProjectId
+          ? <TaskContextSidebar key={`${sessionId}:${activeProjectId}`} api={api.taskContext} projectId={activeProjectId} />
+          : <p role="status">Select a project to read task context.</p>}
+      </div> : <>
       <div className="sessions-sidebar__search">
         <input
           placeholder="Filter sessions…"
@@ -761,6 +775,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
         onDiscardSession={props.onDiscardClosedSession}
         onOpenTranscript={props.onOpenClosedTranscript}
       />
+      </>}
     </aside>
   )
 }

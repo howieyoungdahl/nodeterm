@@ -57,6 +57,7 @@ function recorder(over: Partial<DeliveryDeps> = {}, entry: MirrorEntry | undefin
     locked: false,
     emit: (e) => listeners.forEach((l) => l(e)),
     deps: {
+      sessionPresence: undefined,
       paneOwner: async (id) => {
         order.push(`paneOwner:${id}`)
         return claudePane
@@ -119,6 +120,34 @@ async function deliverWithReceipt(
 }
 
 describe('deliverAgentMessage — sequencing', () => {
+  it('delivers to a proven live detached session', async () => {
+    const presence = vi.fn(async () => 'alive' as const)
+    const r = recorder({ sessionPresence: presence })
+    expect((await deliverWithReceipt(r)).kind).toBe('delivered')
+    expect(presence).toHaveBeenCalledExactlyOnceWith('n-dst')
+    expect(r.sends).toHaveLength(1)
+  })
+
+  it.each([
+    ['dead', 'targetGone'],
+    ['unknown', 'targetPaneUnreadable']
+  ] as const)('refuses %s session presence without writing or probing a pane', async (presence, kind) => {
+    const r = recorder({ sessionPresence: async () => presence })
+    expect(await deliverAgentMessage(req(), r.deps)).toEqual({ kind })
+    expect(r.sends).toEqual([])
+    expect(r.order.filter((o) => o.startsWith('paneOwner'))).toEqual([])
+  })
+
+  it('does not probe detached sessions before permission and busy gates', async () => {
+    const presence = vi.fn(async () => 'alive' as const)
+    const unauthorized = recorder({ sessionPresence: presence })
+    expect((await deliverAgentMessage(req({ notPermitted: 'switch-off' }), unauthorized.deps)).kind)
+      .toBe('notPermitted')
+    const busy = recorder({ sessionPresence: presence }, { ...idle, state: 'working' })
+    expect((await deliverAgentMessage(req(), busy.deps)).kind).toBe('targetBusy')
+    expect(presence).not.toHaveBeenCalled()
+  })
+
   it('takes the lock for the WHOLE run: pre-flight probe and post-write probe are both inside', async () => {
     const r = recorder()
     await deliverWithReceipt(r)

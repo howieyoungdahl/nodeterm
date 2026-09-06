@@ -32,6 +32,9 @@ import { IPC } from './ipc'
 export const HOST_ONLY_CHANNEL_PREFIXES: readonly string[] = ['githubControl:']
 
 export const HOST_ONLY_CHANNELS: ReadonlySet<string> = new Set([
+  // Task context has operator read scope. A relay guest has no authenticated task assignment.
+  IPC.taskContextRead,
+  IPC.taskContextFocus,
   IPC.projectSetupRun,
   IPC.projectSetupCancel,
   IPC.projectSetupConsentSubmit,

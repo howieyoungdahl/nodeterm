@@ -71,6 +71,8 @@ import {
   type AgentMessagingDeps
 } from '../core/agents/agent-messaging'
 import type { RemoteLogExec } from '../core/board-log'
+import { assignmentConfig, canonicalAssignmentValidator } from '../core/agents/canonical-assignment'
+import { createMessageControl, IDENTIFIED_MESSAGE_VERBS } from '../core/agents/message-control'
 import { boardLogRemotePath } from '../core/board-log'
 import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
@@ -150,6 +152,7 @@ import {
   flush as flushAgentStatusMirror,
   recordAgentEvent,
   ackDone,
+  registerAgentStatusSnapshotIpc,
   recordRawToolEvent,
   recordContextUsage,
   setMirrorSettingsProvider,
@@ -176,6 +179,9 @@ import { createSessionReaper } from '../core/session-budget'
 import { initKeepAwake } from './keep-awake'
 import type { KeepAwakeTracker } from '../core/keep-awake'
 import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
+import { registerNodeStatusIpc } from '../core/node-status-service'
+import { registerTaskContextIpc } from '../core/task-context-service'
+import { registerCanvasLayoutIpc } from '../core/canvas-layout'
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { registerPtmxLimitHandler } from './ptmx-limit'
@@ -478,7 +484,18 @@ const remoteWorkspaceIO = makeRemoteWorkspaceIO(
   // next save retries instead of believing the server file landed.
   (projectId) => workspaceStore.markUnmirrored(projectId)
 )
-const workspaceStore = new WorkspaceStore(remoteWorkspaceIO)
+// Both shells, same rescue. `workspace:save` is a whole-workspace last-writer-wins write and local
+// projects have no conflict machinery, so a stale saver silently deletes every card created since
+// its snapshot (2026-09-01: eight cards lost over four hours with every tmux session still alive).
+// The desktop is single-window today, so the stale-tab shape is rarer here — but the same store,
+// the same save, and the same tmux-backed notion of "live" (this IS the process that owns those
+// sessions), and a hydrate race or a crashed renderer's replay is the same loss. `sessionExists`
+// answers live-session-first and falls back to `tmux has-session`, answering TRUE on an unreadable
+// probe: a card kept by mistake is one click away, a card lost takes its session's address with it.
+const workspaceStore = new WorkspaceStore(remoteWorkspaceIO, {
+  hasLiveBackend: (nodeId) => ptyManager.sessionExists(nodeId),
+  wasDeleted: (nodeId) => ptyManager.wasDeleted(nodeId)
+})
 // Watch each local ref's project.json for outside edits (git pull, a teammate's commit).
 // Self-writes match the store's last-written cache and are ignored. Re-synced after every
 // store load/save via onPersist; disposed on quit next to ptyManager.killAll().
@@ -1719,7 +1736,10 @@ app.whenReady().then(async () => {
   // RENDERER state (Eco lives in `useAgentStatus`, the wake registry in the renderer's
   // agent-restart) with no main-side signal today: the BUSY-target leg is fully wired here, and the
   // hibernated leg's renderer→main wake is an explicitly-recorded residual (see the PR body).
-  messagingDeps.queue = createDeliveryQueue(messagingDeps)
+  messagingDeps.queue = createDeliveryQueue(messagingDeps, {
+    validateAssignment: canonicalAssignmentValidator(assignmentConfig(process.env))
+  })
+  const identifiedMessageControl = createMessageControl(messagingDeps.queue)
   setDeliveryQueue(messagingDeps.queue)
   ipcMain.handle(IPC.agentMessageDeliver, async (_e, raw: unknown) => {
     if (!isDeliverRequest(raw))
@@ -2508,6 +2528,21 @@ app.whenReady().then(async () => {
   corePlatform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
   })
+  // Last-known status for every node the mirror can still speak for — a PULL seed so a freshly
+  // (re)loaded renderer paints badges before the next hook event. The mirror restores its map at
+  // boot but only ever pushes on a live event, so without this the canvas showed every pane idle
+  // after a restart. Registered in both shells (see src/server/index.ts) from one core body.
+  registerAgentStatusSnapshotIpc()
+  // The one input that may produce a `failed` badge: prove whether a node's tmux/session-host
+  // backend is still there. Same primitive the operator API's dead-card sweep uses, double-checked
+  // in core before it answers `dead`. Registered in both shells (see src/server/index.ts).
+  registerNodeStatusIpc({ panePresence: (nodeId) => ptyManager.sessionPresence(nodeId) })
+  registerTaskContextIpc()
+  // Automatic canvas layout (`core/canvas-layout/`): the ONE way in. Nothing here polls — a plan
+  // is built only when the renderer asks, on a node-created / status-changed / rules-changed /
+  // organize trigger. Off unless `settings.canvasLayout.enabled` says otherwise, read at call
+  // time so the switch takes effect without a restart. Registered in both shells (see src/server/index.ts).
+  registerCanvasLayoutIpc({ settings: () => settingsStore.get().canvasLayout, store: workspaceStore.organizerCoordinator() })
   // Phone→host read-acks (this feature, the other direction): the phone drops
   // `~/.nodeterm/acks/<nodeId>.seen` on the SESSION host when it READS a finished session. For each
   // ack: `ackDone` (mirror resolves the done event → phone Inbox archives it + the paired phone's
@@ -3257,7 +3292,9 @@ app.whenReady().then(async () => {
   // node inside the save debounce, or an id main never saved): the project gates fail closed.
   const projectIdOfNode = (id: string): string | undefined =>
     workspaceStore.persistedCanvases().find((c) => c.nodes.some((n) => n.id === id))?.id
-  hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
+  hookServer.setControlHandler(async ({ verb, nodeId, args, verified, messageCredential }) => {
+    if (IDENTIFIED_MESSAGE_VERBS.has(verb))
+      return identifiedMessageControl({ verb, nodeId, args, verified, messageCredential })
     // `--dry-run` (issue #532) is honoured by the spawn verbs only, and this gate runs FIRST —
     // before the browser intercept, the open-project gates and the renderer forward — because a
     // verb that cannot dry-run must REFUSE rather than silently perform: a `close --dry-run`

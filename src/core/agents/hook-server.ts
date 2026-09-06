@@ -221,6 +221,9 @@ export interface HookEventMeta {
  * of every hatch and is the test that fails if either half of this comment stops being true.
  */
 export const requiresVerified: ReadonlySet<string> = new Set([
+  'message-deliver',
+  'message-receipt',
+  'message-ack',
   'send',
   'reply',
   'notify',
@@ -297,6 +300,8 @@ class HookServer {
         // claims a node ONLY when this is true — a `legacy`/warned caller opens a browser but owns
         // nothing, so it can drive nothing. `browser-ownership-source.test.ts` guards the source.
         verified: boolean
+        /** Dedicated message authenticator only; never forwarded to renderer/legacy verbs. */
+        messageCredential?: string
       }) => Promise<{
         ok: boolean
         message?: string
@@ -635,7 +640,10 @@ class HookServer {
             return
           }
           const result = this.controlHandler
-            ? await this.controlHandler({ verb, nodeId, args, verified: verdict === 'verified' })
+            ? await this.controlHandler({ verb, nodeId, args, verified: verdict === 'verified',
+              ...(['message-deliver', 'message-receipt', 'message-ack'].includes(verb) &&
+                typeof req.headers['x-nodeterm-message-credential'] === 'string'
+                ? { messageCredential: req.headers['x-nodeterm-message-credential'] } : {}) })
             : { ok: false, error: 'control unavailable' }
           // Which note, not whether: an unmintable node warned with the restart line is sent round
           // the same loop the refusal path already knows better than to send it round.

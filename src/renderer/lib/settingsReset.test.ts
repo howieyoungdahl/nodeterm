@@ -8,11 +8,37 @@ import {
 } from './settingsReset'
 
 describe('reset key lists', () => {
+  /**
+   * Settings whose shipped default is ABSENCE, so they are legitimately missing from
+   * `DEFAULT_SETTINGS`. Resetting one means REMOVING the key, which is what `resetPatch` does by
+   * reading `undefined` out of `DEFAULT_SETTINGS` — see the case below.
+   *
+   * Kept as an explicit list rather than relaxing the check for every optional key: the assertion
+   * underneath is a typo guard, and "absent from the defaults" is exactly what a typo looks like.
+   */
+  const DEFAULT_IS_ABSENT: readonly string[] = ['appearance']
+
   it.each([
     ['terminal', TERMINAL_RESET_KEYS],
     ['appearance', APPEARANCE_RESET_KEYS]
-  ])('%s keys all exist in DEFAULT_SETTINGS', (_name, keys) => {
-    for (const k of keys) expect(DEFAULT_SETTINGS).toHaveProperty(k)
+  ])('%s keys all exist in DEFAULT_SETTINGS (or default to absence)', (_name, keys) => {
+    for (const k of keys) {
+      if (DEFAULT_IS_ABSENT.includes(k)) expect(DEFAULT_SETTINGS).not.toHaveProperty(k)
+      else expect(DEFAULT_SETTINGS).toHaveProperty(k)
+    }
+  })
+
+  // The visual preferences (@shared/appearance) are the whole block, so "Reset appearance" has to
+  // clear them — and clearing means the key is GONE, not set to an empty object a later read would
+  // treat as "configured".
+  it('resets the visual preferences by removing the key, not by storing an empty block', () => {
+    expect(APPEARANCE_RESET_KEYS).toContain('appearance')
+    const patch = resetPatch(['appearance'] as const)
+    expect('appearance' in patch).toBe(true)
+    expect(patch.appearance).toBeUndefined()
+    // And a user who set one is correctly reported as no longer pristine.
+    expect(isPristine(['appearance'] as const, { appearance: { effectsOff: true } })).toBe(false)
+    expect(isPristine(['appearance'] as const, {})).toBe(true)
   })
 
   it.each([

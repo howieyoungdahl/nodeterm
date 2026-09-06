@@ -1,0 +1,67 @@
+<!doctype html>
+<!--
+  Disposable xterm heap benchmark for renderer-memory changes. Example:
+
+  google-chrome --headless=new --disable-gpu --no-sandbox --disable-dev-shm-usage \
+    --enable-precise-memory-info --js-flags=--expose-gc --allow-file-access-from-files \
+    --virtual-time-budget=120000 --dump-dom \
+    'file:///ABSOLUTE/REPO/scripts/renderer-memory-benchmark.html?count=24&cap=2000&keep=4'
+
+  `filledBytes` is the JS heap with every xterm retained. `disposedBytes` is the heap after all
+  but `keep` terminals are disposed, mirroring TerminalNode's offscreen-release teardown.
+-->
+<meta charset="utf-8" />
+<title>xterm renderer memory benchmark</title>
+<style>
+  body { margin: 0; background: #111; }
+  .term { width: 640px; height: 440px; }
+</style>
+<pre id="result">running</pre>
+<script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script type="module">
+  const params = new URLSearchParams(location.search)
+  const count = Number(params.get('count') || 24)
+  const cap = Number(params.get('cap') || 2000)
+  const keep = Number(params.get('keep') || 4)
+  const payload = Array.from(
+    { length: cap + 1000 },
+    (_, i) => `${String(i).padStart(6, '0')} ${'renderer-memory-line '.repeat(4)}\r\n`
+  ).join('')
+  const terms = []
+
+  const settle = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    if (typeof gc === 'function') {
+      for (let i = 0; i < 4; i++) gc()
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+
+  for (let i = 0; i < count; i++) {
+    const host = document.createElement('div')
+    host.className = 'term'
+    document.body.append(host)
+    const term = new Terminal({ cols: 80, rows: 24, scrollback: cap })
+    term.open(host)
+    terms.push({ term, host })
+    await new Promise((resolve) => term.write(payload, resolve))
+  }
+  await settle()
+  const filled = performance.memory?.usedJSHeapSize ?? null
+
+  for (const { term, host } of terms.splice(keep)) {
+    term.dispose()
+    host.remove()
+  }
+  await settle()
+  const disposed = performance.memory?.usedJSHeapSize ?? null
+
+  document.querySelector('#result').textContent = JSON.stringify({
+    count,
+    cap,
+    kept: terms.length,
+    filledBytes: filled,
+    disposedBytes: disposed,
+    reclaimedBytes: filled === null || disposed === null ? null : filled - disposed
+  })
+</script>

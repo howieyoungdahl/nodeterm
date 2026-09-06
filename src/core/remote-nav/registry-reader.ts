@@ -22,25 +22,17 @@
  * READ-ONLY on the registry. nodeterm is a consumer: pins and task closure are the registry's own
  * shared state and are written by the registry's own writer, never here. The one file this module
  * DOES write is `view-prefs.json` (sort direction, collapsed workers, which view is open) — display
- * state for one device, kept beside the registry rather than inside it, and published through
+ * state for one local client, kept beside the registry rather than inside it, and published through
  * `writeFileAtomic` like every other store in this repo (a bare `fs.rename` is banned and
  * guard-tested).
  *
- * THREE SURFACES, decided rather than defaulted:
- *   - **Desktop** — full. This reader lives in `src/core` behind `CorePlatform`, so the Electron
- *     shell boots it unchanged. No `electron`, no `../main/*` (enforced by
- *     `src/core/no-electron.test.ts`).
- *   - **Server Edition** — full, and by construction rather than by a second implementation: the
- *     Server shell boots the same core. There is deliberately NO WS-RPC member and no HTTP route
- *     yet — this change stops at the model, the reader and the CLI, and a route that serves this
- *     document to a browser is a separate change with its own authentication story (the document
- *     is authenticated like every other Server route, and a convenience route is not an exemption).
- *   - **Mobile** — N/A for now. The mobile companion attaches to tmux sessions over the transport
- *     protocol and carries no task, project or registry concept; surfacing one means extending that
- *     protocol, which is work in the mobile repository rather than a degrade to arrange here.
+ * Desktop and Server can share this core reader once wired. This module does not establish an
+ * HTTP/WS route or a browser consumer. Browser preferences must be per client, never this sibling
+ * file shared by a Server's viewers. Mobile needs an equivalent authenticated protocol.
+ * See docs/remote-task-context.md for the exact adapter and integration requirements.
  */
 
-import { promises as fs } from 'fs'
+import { promises as fs, constants } from 'fs'
 import path from 'path'
 import { writeFileAtomic } from '../fs-atomic'
 import {
@@ -64,6 +56,26 @@ export interface RegistryReaderDeps {
   writeFile?: (file: string, data: string) => Promise<void>
   /** Milliseconds. A parameter, never `Date.now()` inside the pure decision. */
   now?: () => number
+  maxReadBytes?: number
+}
+
+export const MAX_REGISTRY_READ_BYTES = 1024 * 1024
+
+/** Read at most the ceiling plus one sentinel byte, even if the file grows after open. */
+async function readBounded(file: string, limit: number): Promise<string> {
+  const handle = await fs.open(file, constants.O_RDONLY | constants.O_NONBLOCK)
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error('Registry source must be a regular file')
+    const buffer = Buffer.alloc(limit + 1)
+    let offset = 0
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+      if (!bytesRead) break
+      offset += bytesRead
+    }
+    if (offset > limit) throw new Error(`Registry exceeds ${limit} byte read limit; use the bounded context API`)
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, offset))
+  } finally { await handle.close() }
 }
 
 const defaults = {
@@ -75,7 +87,8 @@ const defaults = {
 /** Read and classify the registry. Never throws: every failure is one of the four refusals. */
 export async function readTaskRegistry(deps: RegistryReaderDeps = {}): Promise<RegistryRead> {
   const env = deps.env ?? process.env
-  const readFile = deps.readFile ?? defaults.readFile
+  const limit = deps.maxReadBytes ?? MAX_REGISTRY_READ_BYTES
+  const readFile = deps.readFile ?? ((file: string) => readBounded(file, limit))
   const now = deps.now ?? defaults.now
 
   const resolved = resolveRegistryPath(env)
@@ -90,7 +103,10 @@ export async function readTaskRegistry(deps: RegistryReaderDeps = {}): Promise<R
 
   let source: RegistrySource
   try {
-    source = { kind: 'text', path: resolved.path, text: await readFile(resolved.path) }
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_REGISTRY_READ_BYTES) throw new Error('Invalid registry read limit')
+    const text = await readFile(resolved.path)
+    if (Buffer.byteLength(text, 'utf8') > limit) throw new Error(`Registry exceeds ${limit} byte read limit`)
+    source = { kind: 'text', path: resolved.path, text }
   } catch (e) {
     const code = (e as NodeJS.ErrnoException)?.code
     const detail = e instanceof Error ? e.message : String(e)

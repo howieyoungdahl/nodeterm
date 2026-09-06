@@ -2,7 +2,9 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState } from '@shared/agents/normalize'
-import type { NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
+import { FAILABLE_STATES } from '@shared/node-status'
+import type { NodeFailureFact, PaneEvidence } from '@shared/node-status'
+import type { AgentStatusSnapshot, NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
 
 /**
  * Transient per-node status for agent (e.g. Claude Code) sessions, driven by the agent's hooks.
@@ -14,6 +16,7 @@ import type { NodeTerminalApi, ObservedClaudeAccount } from '@shared/types'
  * plain terminal is only known here, and its context links must keep classifying across
  * restarts (tmux keeps the session — and the agent — alive through them). `account` is durable
  * for exactly that reason too — see its field comment.
+
  *
  * ONE STORE PER CORE (stage 4): `createAgentStatusSession(persistKey?)` builds an isolated
  * instance — node ids are per-core, so status tables from two cores must never mix. The module
@@ -137,6 +140,56 @@ export interface AgentNodeStatus {
    * A LABEL, never a gate — see `ObservedClaudeAccount` in shared/types.
    */
   account?: ObservedClaudeAccount
+  /**
+   * The reason the hook event itself carried for the CURRENT state — Claude's permission-prompt
+   * text, a question, the last assistant message (`NormalizedAgentEvent.lastMessage`). Rendered
+   * beside the badge so "why does this need me?" is answerable without opening the terminal.
+   *
+   * TRANSIENT, deliberately excluded from `save()`'s allow-list: it describes one live edge, and a
+   * reason restored from disk would explain a state this run has never seen. Absent = the event
+   * carried none, and the badge then shows the state alone — it never invents one.
+   */
+  reason?: string
+  /**
+   * How the shell classified a needs-you edge (`NormalizedAgentEvent.askKind` — 'question' for an
+   * AskUserQuestion picker, 'approval' for a genuine permission request). Transient, same rule as
+   * `reason`; it only ever refines the badge's wording.
+   */
+  askKind?: 'question' | 'approval'
+  /**
+   * The last thing a session probe PROVED about this node's pane (`core/node-status-service.ts`).
+   *
+   * Absent means nobody asked, which is a different badge from `'unknown'` (asked, could not tell)
+   * — see `deriveNodeStatus`. Only ever written by `setPaneEvidence`, and cleared by any hook event
+   * for this node: a live event is fresher evidence than any probe, and a `'dead'` left standing
+   * after the node started reporting again would re-derive `failed` the moment the latch cleared.
+   *
+   * TRANSIENT — never persisted, for the same reason as `failure`.
+   */
+  pane?: PaneEvidence
+  /**
+   * When `pane` was last written. Not rendered — it is what stops a parked approval from being
+   * re-probed on every pass (`paneProbeCandidates` / `PANE_RECHECK_MS`): a `blocked` state never
+   * decays out of the candidate set on its own, unlike `working`. Refreshed in place on a repeat
+   * answer, exactly like `stateAt`, so a re-confirmation costs no re-render.
+   */
+  paneAt?: number
+  /**
+   * A PROVEN failure: this node was `working` and its terminal session was then proven gone
+   * (`shared/node-status.ts`, decision D3 of the auto-organizer plan). Never a guess — the only
+   * writer is `markFailed`, which is only ever called with a double-checked `dead` answer from
+   * `core/node-status-service.ts`.
+   *
+   * It LATCHES on purpose. `sweepStaleWorking` blanks a stale `working` entry to `undefined` after
+   * its window, so without a latch a proven failure would decay back into "unknown" a few minutes
+   * after it was proven — and "keep failures discoverable" is the requirement this whole badge
+   * exists for. It is cleared by the one thing that disproves it: a live hook state (below), the
+   * same self-heal `hibernated` gets.
+   *
+   * TRANSIENT — never persisted. A relaunch has proven nothing this run, and a restored failure
+   * would be an accusation about a pane that has since been re-adopted or replaced.
+   */
+  failure?: NodeFailureFact
   /** A turn finished / needs attention while the user wasn't looking. */
   unread: boolean
   /** Claude's own session name/title (from the terminal title), shown beside the title. */
@@ -196,6 +249,18 @@ export interface AgentNodeStatus {
   }
 }
 
+/**
+ * What a hook event says ABOUT the state it carries, as opposed to the state itself. Trailing and
+ * optional so every existing caller keeps its exact behaviour: a caller that omits it asserts
+ * nothing, and the fields are cleared rather than carried forward (see `setState`).
+ */
+export interface StateEvidence {
+  /** `NormalizedAgentEvent.lastMessage` — the reason the agent gave, verbatim and untruncated. */
+  reason?: string
+  /** `NormalizedAgentEvent.askKind` — how the shell classified a needs-you edge. */
+  askKind?: 'question' | 'approval'
+}
+
 export interface AgentStatusStore {
   byId: Record<string, AgentNodeStatus>
   /** The terminal node the user is currently focused in (for unread decisions). */
@@ -215,10 +280,30 @@ export interface AgentStatusStore {
     newTurn?: boolean,
     pendingId?: string,
     verified?: boolean,
-    errored?: boolean
+    erroredOrEvidence?: boolean | StateEvidence,
+    extraEvidence?: StateEvidence
   ): void
+  /**
+   * Latch a PROVEN failure (see `failure`). Refuses unless the node is in a `FAILABLE_STATES` state
+   * right now: the probe that produced the proof is asynchronous, so eligibility is re-asked at
+   * write time rather than trusted from when the probe was planned — the same fire-time re-ask rule
+   * agent hibernation uses. A node that finished (`done`) in the meantime is never failed. The
+   * state that was standing is recorded on the fact, because it is what the badge's tooltip
+   * explains. Writes nothing to localStorage.
+   */
+  markFailed(id: string, at: number, reason?: string): void
+  /** Record what a pane probe proved, per node id (see `pane`). Writes nothing to localStorage. */
+  setPaneEvidence(evidence: Record<string, PaneEvidence>): void
   /** Clear `working` entries whose last event is older than `staleMs` (lost-Stop safety net). */
   sweepStaleWorking(staleMs?: number): void
+  /**
+   * Paint badges from the shell's status mirror after a reload/restart (`AgentStatusSnapshot`).
+   * DISPLAY ONLY, and deliberately not routed through `setState`: that path is the alert /
+   * loop-count / Eco edge, and a seed is not an event — nothing chirps, nothing is marked unread,
+   * no turn is counted. Entries past the freshness cut are dropped and a LIVE state is never
+   * clobbered; `now` is injected so the cut is testable. Writes nothing to localStorage.
+   */
+  seedFromSnapshot(snapshot: AgentStatusSnapshot, now?: number): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
   /** Record the Claude account a hook event says this node is running under. Persisted; see
@@ -280,6 +365,12 @@ export const DONE_HOLDOFF_MS = 3000
 // the decider (it fires a synthetic end edge). This local sweeper stays as the renderer's own
 // safety net for a badge whose events never reached the mirror.
 export const STALE_WORKING_MS = WORKING_STALE_MS
+// Freshness cut for a mirror SEED in a state other than `working` (which uses the shared
+// WORKING_STALE_MS instead — anything older than that window is swept the moment it lands, so
+// seeding it would only paint a badge for one sweep interval). A `done` or `waiting` from hours
+// ago is not something the user is still waiting on: it would put a stale green dot on a canvas
+// the user just reloaded, and there is no event coming to correct it.
+export const SEED_MAX_AGE_MS = 30 * 60_000
 // Esc/Ctrl-C interrupt inference: how long to wait for a hook event before concluding the
 // turn was cancelled without a final Stop.
 export const INTERRUPT_SETTLE_MS = 1500
@@ -439,8 +530,10 @@ export function createAgentStatusSession(
         return s.activeId === id ? { activeId: null } : s
       }),
 
-    setState: (id, state, agentId, newTurn, pendingId, verified, errored) =>
+    setState: (id, state, agentId, newTurn, pendingId, verified, erroredOrEvidence, extraEvidence) =>
       set((s) => {
+        const errored = typeof erroredOrEvidence === 'boolean' && erroredOrEvidence
+        const evidence = typeof erroredOrEvidence === 'object' ? erroredOrEvidence : extraEvidence
         const prev = s.byId[id] ?? EMPTY
         const now = Date.now()
         // Does this event change the last-turn verdict (issue #521)? Read up front because the
@@ -464,8 +557,13 @@ export function createAgentStatusSession(
         // a freshness-only refresh.
         const samePendingWhileBlocked =
           state !== 'blocked' || (pendingId ?? prev.pendingId) === prev.pendingId
+        // A node carrying a latched failure must NOT take the fast path, even for the same state:
+        // the fast path mutates in place and notifies nothing, so the badge would keep saying
+        // FAILED about a session that has demonstrably started reporting again. Clearing a latch
+        // is a visible change and needs a real update — see the self-heal below.
         if (
           prev.state === state &&
+          !prev.failure &&
           (agentId === undefined || prev.agentId === agentId) &&
           samePendingWhileBlocked &&
           !turnErrorMoves
@@ -478,6 +576,15 @@ export function createAgentStatusSession(
             // state by a legacy POST must not leave an earlier `true` standing, or this copy would
             // disagree with the mirror the gate actually reads.
             s.byId[id].stateVerified = verified === true
+            // Same rule for the badge's reason: a re-asserted state carries its own explanation,
+            // and keeping the previous one would caption the current ask with an older one. In
+            // place, like the two above — a mid-turn tool event must not re-render every header.
+            s.byId[id].reason = evidence?.reason
+            s.byId[id].askKind = evidence?.askKind
+            // Same reason as on the transition path: this node just spoke, so whatever an earlier
+            // probe concluded about its pane is superseded.
+            s.byId[id].pane = undefined
+            s.byId[id].paneAt = undefined
           }
           return s
         }
@@ -488,6 +595,11 @@ export function createAgentStatusSession(
         // Written on the same edge the state is — the evidence describes THIS transition, and an
         // absent argument is not evidence.
         next.stateVerified = verified === true
+        // Same edge, same rule: the reason explains the state it arrived with. Assigned rather
+        // than merged, so a state that carries no reason clears the previous one instead of
+        // captioning a new ask with an old explanation.
+        next.reason = evidence?.reason
+        next.askKind = evidence?.askKind
         if (agentId !== undefined) next.agentId = agentId
         // Retain the approval ticket only while blocked; any other state clears it (transient).
         next.pendingId = state === 'blocked' ? (pendingId ?? prev.pendingId) : undefined
@@ -535,6 +647,14 @@ export function createAgentStatusSession(
         // flagged as one (see normalizeClaude), so the intended clear would never fire.
         if (state === 'working' && prev.state === 'done') next.backgroundTaskAt = undefined
         const alive = state === 'working' || state === 'blocked' || state === 'waiting'
+        // A live state is proof the session is running, which disproves the failure we latched —
+        // the same self-heal `hibernated` gets below, and the only way out of `failed`. `done` is
+        // deliberately included: a turn that ENDED is also proof the pane was there to end it.
+        if (state && prev.failure) next.failure = undefined
+        // A hook event is fresher than any probe, so the probe's answer is dropped with it — and
+        // its re-check clock with it, so a node that just spoke is asked again on the next pass.
+        next.pane = undefined
+        next.paneAt = undefined
         if (alive && prev.hibernated) {
           next.hibernated = undefined
           next.hibernatedPane = undefined // goes with the flag, always
@@ -565,6 +685,47 @@ export function createAgentStatusSession(
         return { byId }
       }),
 
+    setPaneEvidence: (evidence) =>
+      set((s) => {
+        const now = Date.now()
+        let changed = false
+        const byId = { ...s.byId }
+        for (const [id, pane] of Object.entries(evidence)) {
+          const prev = byId[id]
+          // Only for nodes the table already knows: a probe answer for a node with no status entry
+          // has nothing to qualify, and inventing an entry would put an UNKNOWN badge on a node
+          // this store has never heard of.
+          if (!prev) continue
+          if (prev.pane === pane) {
+            // Same answer as last time: stamp the re-check clock in place. It is never rendered,
+            // and allocating here would re-render the badge on every confirmation that nothing
+            // changed — the same reasoning as `stateAt` on the same-state fast path.
+            prev.paneAt = now
+            continue
+          }
+          byId[id] = { ...prev, pane, paneAt: now }
+          changed = true
+        }
+        return changed ? { byId } : s
+      }),
+
+    markFailed: (id, at, reason) =>
+      set((s) => {
+        const prev = s.byId[id]
+        // FIRE-TIME RE-ASK, not a plan-time verdict. Between planning the probe and its answer the
+        // node may have posted a new turn, been answered, or finished — and a `failed` badge on a
+        // node that is demonstrably running is the expensive error this whole derivation is
+        // careful about (plan §8). `done` is refused here for the same reason it is refused in
+        // `resolveKind`: a session that finished and then had its terminal closed is a tidied-up
+        // success, and re-asking at write time is what catches the one that finished DURING the
+        // probe.
+        if (!prev?.state || !FAILABLE_STATES.has(prev.state)) return s
+        if (prev.failure) return s
+        return {
+          byId: { ...s.byId, [id]: { ...prev, failure: { at, from: prev.state, reason } } }
+        }
+      }),
+
     sweepStaleWorking: (staleMs = STALE_WORKING_MS) =>
       set((s) => {
         const now = Date.now()
@@ -574,11 +735,70 @@ export function createAgentStatusSession(
           if (v.state === 'working' && now - (v.stateAt ?? 0) > staleMs) {
             // This is a real transition to Unknown, even though it did not arrive through a hook.
             // Stamp both clocks so the sidebar age and Eco idle clock begin at the transition.
+            // The spread deliberately KEEPS a latched `failure`: a proven failure outlives the
+            // working state it was derived from, or the badge would decay back to "unknown" a few
+            // minutes after proving the session is gone. Only a live hook event clears it.
             byId[id] = { ...v, state: undefined, stateAt: now, lastEventAt: now }
             changed = true
           }
         }
         return changed ? { byId } : s
+      }),
+
+    seedFromSnapshot: (snapshot, now = Date.now()) =>
+      set((s) => {
+        // Built lazily and only when something actually changes: a snapshot whose every entry is
+        // stale or already live must return the SAME byId, or a bootstrap seed would re-render
+        // every node header for nothing (and seeding twice would never settle).
+        let byId: Record<string, AgentNodeStatus> | null = null
+        for (const [id, entry] of Object.entries(snapshot?.nodes ?? {})) {
+          // No state = nothing to paint. The mirror also holds identity-only rows.
+          if (!entry?.state) continue
+          // A `working` past the shared stale window would be swept back to idle by the very next
+          // sweepStaleWorking (60 s), so seeding it only flickers; everything else uses the
+          // shorter cut above.
+          const cut = entry.state === 'working' ? STALE_WORKING_MS : SEED_MAX_AGE_MS
+          if (now - entry.updatedAt > cut) continue
+          const prev = (byId ?? s.byId)[id]
+          // Never clobber a LIVE state. The snapshot is one async round-trip old by the time it
+          // lands, so a hook event for this node may already have arrived on this run — and the
+          // mirror's copy is then strictly the older fact. `>=` (not `>`) is what makes a second
+          // seed a no-op: an entry we just seeded carries exactly `updatedAt` on both clocks.
+          if (
+            prev?.state !== undefined &&
+            Math.max(prev.stateAt ?? 0, prev.lastEventAt ?? 0) >= entry.updatedAt
+          ) {
+            continue
+          }
+          // Both clocks get the mirror's stamp, not `now`: the sidebar age and the Eco idle clock
+          // must read "quiet since the last real event", not "since the page reloaded" — the
+          // latter would hide a long-idle session from the hibernation sweep for a full window.
+          const next: AgentNodeStatus = {
+            ...(prev ?? EMPTY),
+            state: entry.state,
+            stateAt: entry.updatedAt,
+            lastEventAt: entry.updatedAt,
+            // A seed presents no per-node token, so it asserts nothing — and a `true` left over
+            // from an earlier, now-overwritten state would claim proof for a transition we did
+            // not witness (same rule as `stateVerified`'s field comment).
+            stateVerified: undefined,
+            // Same rule as setState: the approval ticket is retained only while blocked, so a
+            // seeded `done` cannot leave the header's Approve/Deny buttons pointing at a dead
+            // answer file.
+            pendingId: entry.state === 'blocked' ? prev?.pendingId : undefined
+          }
+          // Fill identity only when we have none: a hand-launched agent's `agentId`/`sessionId`
+          // hydrate from localStorage and are the LOCAL truth (the mirror may lag a pane that was
+          // relaunched under a different agent while the app was down).
+          if (next.agentId === undefined && entry.agentId) next.agentId = entry.agentId
+          if (next.sessionId === undefined && entry.sessionId) next.sessionId = entry.sessionId
+          byId = byId ?? { ...s.byId }
+          byId[id] = next
+        }
+        // No save(): `state` and its clocks stay transient (see the module docblock). The seed's
+        // source — the mirror — is what survives a restart; a copy on disk here would be a second,
+        // staler one.
+        return byId ? { byId } : s
       }),
 
     setSession: (id, session) =>

@@ -57,6 +57,10 @@ npm run server:start  # node out/server/main.cjs
 
 ## Configuration
 
+For automatic updates to an existing browser-server user service, see
+[Automatic browser-server updates](server-auto-updates.md). It builds merged changes separately
+and waits for browser viewers to disconnect before activating a verified release.
+
 Precedence: **CLI flag > environment variable > default.**
 
 | Flag | Env var | Default | Meaning |
@@ -67,6 +71,8 @@ Precedence: **CLI flag > environment variable > default.**
 | `--renderer-dir <path>` | `NODETERM_RENDERER_DIR` | `out/renderer` (resolved from cwd) | Directory of the built renderer (`index.html` + hashed assets). |
 | `--insecure-http` | — | off | Acknowledge serving plain HTTP directly on a non-loopback interface (see below). |
 | — | `NODETERM_SERVER_PASSWORD` | — | Seed the password headlessly on first boot (see above). |
+| `--canvas-control` | `NODETERM_SERVER_CANVAS_CONTROL` | off | Enable the bounded Server-local `/control/*` surface. |
+| `--dead-card-reap-minutes <n>` | `NODETERM_DEAD_CARD_REAP_MINUTES` | `30` | Interval for conservative local dead-card cleanup; `0` disables the timer but leaves `/opsapi/sweep` available. |
 | `--trust-proxy-header <name>` | `NODETERM_TRUST_PROXY_HEADER` | — (off) | Reverse-proxy SSO trust: identity header asserted by your proxy (see [Reverse-proxy SSO](#reverse-proxy-sso-header-trust)). |
 | `--trust-proxy-nets <list>` | `NODETERM_TRUST_PROXY_NETS` | `127.0.0.0/8, ::1/128` | Comma-separated IPs/CIDRs (IPv4+IPv6) whose requests may use the trust header. Only meaningful with the header set. |
 
@@ -241,8 +247,79 @@ Single-user auth. There is one password; sessions are per-browser.
   present a valid cookie.)
 - **Login rate limit / lockout:** 5 failed password attempts trip a 60-second lockout
   (further attempts get `429 too_many_attempts`); a success resets the counter.
-- **Auth gate:** every route except the login/setup pages and their POST handlers
-  requires a valid session — HTML navigations redirect to `/login`, API/WS get `401`.
+- **Auth gate:** browser routes other than the login/setup pages and their POST handlers
+  require a valid session — HTML navigations redirect to `/login`, API/WS get `401`. The
+  `/opsapi/` namespace below is intentionally outside this principal and accepts only its own
+  loopback bearer.
+
+### Operator management plane (`/opsapi/`)
+
+The Server Edition has a second, operator-only principal for inspecting and cleaning its durable
+canvas state without weakening agent canvas-control ownership. On boot it loads or creates
+`ops-token` in the Server data dir (default: `~/.nodeterm-server/ops-token`) and enforces mode
+`0600`. The token is restart-stable, never printed, never derived from the browser password, and
+never accepted as `nt_session`. With a custom `NODETERM_DATA_DIR`, the token follows that data dir.
+
+Every `/opsapi/*` request must satisfy both gates:
+
+1. the actual TCP peer is loopback (`127.0.0.0/8` or `::1`) — forwarded headers and proxy trust do
+   not widen this;
+2. `Authorization: Bearer <contents-of-ops-token>` is present.
+
+Keep the bearer out of argv. This shell helper feeds curl's header through stdin:
+
+```bash
+ops_curl() {
+  token_file=${NODETERM_DATA_DIR:-"$HOME/.nodeterm-server"}/ops-token
+  { printf 'header = "Authorization: Bearer '; tr -d '\n' < "$token_file"; printf '"\n'; } |
+    curl --silent --show-error --config - "$@"
+}
+
+ops_curl http://127.0.0.1:8443/opsapi/nodes
+ops_curl -X POST -H 'Content-Type: application/json' \
+  --data '{"dryRun":true}' http://127.0.0.1:8443/opsapi/sweep
+ops_curl -X DELETE http://127.0.0.1:8443/opsapi/nodes/term-example
+ops_curl -X DELETE 'http://127.0.0.1:8443/opsapi/nodes/term-example?force=1'
+ops_curl -X POST http://127.0.0.1:8443/opsapi/adopt-orphans
+ops_curl http://127.0.0.1:8443/opsapi/health
+```
+
+The v1 contract is deliberately narrow:
+
+- `GET /opsapi/nodes` returns `{nodes:[...]}` for every persisted card across every loaded project.
+  Each row includes `id`, `kind`, `title`, `projectId`, `groupId`, `createdAt` (epoch ms recovered
+  from nodeterm's timestamped id, otherwise `null`), `paneState`, `agentStatus`, `lastActivityAt`,
+  and the current-run creator `ownerSession`. Terminal pane state is `alive`, `dead`, or `unknown`;
+  non-terminal cards say `none`. Agent state is normalized to `working`, `idle`, or `blocked` when
+  the hook mirror knows it.
+- `POST /opsapi/sweep` requires exactly `{ "dryRun": true|false }` and returns
+  `{dryRun, affectedIds, scanned}`. It considers local terminal cards only, requires two definitive
+  absent-pane probes, and treats every failed/unreachable probe as `unknown`. Dry-run and the
+  periodic reaper use this same mutation engine.
+- `DELETE /opsapi/nodes/<id>` removes one card. A live pane returns `409 pane_alive`, and an
+  unreadable pane returns `503 pane_state_unknown`; `?force=1` is the explicit operator gate. A
+  forced local terminal deletion confirms backend teardown before saving the card removal. Agents
+  using this operator API by convention must never force a live or unknown target.
+- `POST /opsapi/adopt-orphans` takes no body and returns `{adopted, skipped, live}`. It is the
+  sweep's mirror image: it gives a card back to every live local `nt-<id>` tmux session that no
+  project still lists, placing each into the project whose folder is that pane's nearest ancestor.
+  `adopted` rows carry `id`, `projectId`, `projectName`, `title` and `sessionName`; `skipped` rows
+  carry `id`, `sessionName`, `cwd` and a `reason` (`unmatched-cwd`, `no-pane-cwd`, `unsafe-node-id`).
+  `live:false` adds a `note` telling the caller to reload, because no attached browser received the
+  insertion. It creates, attaches, kills and types nothing, never touches SSH projects, and runs on
+  the same workspace transaction queue as the sweep. Where the sweep needs two definitive absent
+  probes to REMOVE a card, this needs one definite presence — a live session and a pane cwd inside a
+  project — to ADD one; anything it cannot place is reported, never guessed at.
+- `GET /opsapi/health` returns boot time/uptime, attached WS client count, whether canvas control
+  initialized, the non-blocking spawn handler snapshot (`idle`/`running`/`wedged`, oldest
+  operation, age, active count, queue), per-target delivery queue depths, and the loaded project
+  list. Health does not enter the handler queue or await the external launches it observes, so a
+  wedged node creation cannot wedge its diagnosis too.
+
+There are no create, send, rename, remote-exposure, or UI verbs here. **Surfaces:** Server Edition:
+full; Desktop: N/A (its operator is the local app/main process); Mobile companion: N/A (the bearer
+namespace is not routed remotely). Shipping this code does not alter a running service; activation
+happens only on a later operator-approved Server restart.
 
 ### Reverse-proxy SSO (header trust)
 
@@ -494,8 +571,9 @@ Consequences worth knowing:
   it needs Electron's `<webview>` + CDP, which this edition has none of, so there is no
   browser driving here at all. See `src/server/control-unsupported.ts`.
   The agent-messaging verbs (`send`/`reply`/`notify`) are verified-only. When Server control is
-  enabled they additionally require process-local proof that the caller spawned the target in this
-  run; with control disabled they receive `control-unsupported-on-this-edition`.
+  enabled they additionally require ledger proof that the caller spawned the target through this
+  Server — durable across a restart, see below; with control disabled they receive
+  `control-unsupported-on-this-edition`.
 - The **`ptyDestroy` tail-teardown** — *resolved in Phase 3c.* Phase 3b left this skipped
   (agent tails self-cleared only on `SessionEnd`, so a node closed *without* one left an
   idle file-tail); the server now untracks agent tails on node close, at desktop parity.
@@ -537,21 +615,153 @@ gates below decide *which* agent may ask, not *what* may be asked for, so the su
 opens is the host, not the canvas. Enable it on a host where you would be content to hand those
 agents a shell.
 
+#### The read-only pair: `list` and `board`
+
+`list` and `board` are the only v1 verbs that write nothing, and the only ones whose subject has to
+be *defined* rather than observed: the desktop answers both against the canvas the user is looking
+at, and this edition has no current view. Both therefore act on **the project that owns the calling
+node**, and both say so in a header line — an unqualified node list would be a claim with no
+subject.
+
+- `list` prints desktop's `<id> [<kind>] <title>` line plus a `|`-separated tail carrying
+  `group=` (the parent group frame id), `agent=`, `status=` and `opened-by-you=`. `status` is the
+  agent-status mirror's own vocabulary (`working` / `waiting` / `blocked` / `done`), `unknown` for
+  an agent node the mirror has never seen, and `-` for a node that runs no agent — "could not
+  measure" and "does not apply" must not render the same way. `opened-by-you` is the creator
+  ledger, **reported, not enforced**: a read that hid the nodes a caller did not open would leave a
+  restarted orchestrator unable to see the canvas it is standing on.
+- `board` reads the project's persisted `kanban` assignments and derives its cards from the canvas
+  live, exactly as the desktop board does (terminal / sticky / browser nodes are cards; frames and
+  editors are not). A project whose file carries no board gets one virtual `Ungrouped` column and a
+  line saying Server Edition v1 has no columns yet — the renderer's lazy default three columns are
+  deliberately *not* invented here, because their ids would exist nowhere and `assign` is not
+  implemented on this edition.
+
+Both take the same verified-node-identity gate as every other enabled verb. Desktop's identity
+policy lists `list` as tolerant (`TOLERANT_CONTROL_VERBS`) so a legacy client can still orient
+itself; this edition has no legacy population to strand, and "every enabled request requires
+verified node identity" stays a whole-edition rule with no exceptions. Neither read takes the
+workspace mutation lock: `list` is what an agent runs when it suspects a spawn is stuck, and
+queueing it behind that spawn would make the diagnosis wait on the thing being diagnosed.
+
 Ownership is intentionally narrower than the desktop confirmation UI: an agent may mutate, message,
-or close only a node it opened during the current Server process run. Link, group, rename, color,
+or close only a node it opened through this Server. Link, group, rename, resize, color,
 sticky updates, dependency targets, message delivery, and close validate their complete target set
 before any write or PTY kill; an unowned member refuses the whole operation. Queued messages repeat
 the creator check at flush time in addition to the existing verified and per-project switch gates.
 
-The creator ledger is memory-only and is never reconstructed from a project file, title, hook
-record, or tmux session name. After a service restart it is empty, and boot performs no canvas-node
-or terminal-session adoption: it does not attach-or-create missing backends and does not send a
-persisted queued command even when a tmux backend survived. A later explicit owner open or browser
-view is the only cold-spawn path. Plain terminals carry no agent identity or canvas-control grant;
-missing `agentId` never means Claude.
+Node geometry is durable canvas state: Server control writes `CanvasNodeState.size`, the browser
+hydrates that exact rectangle into React Flow, and later saves measured geometry back. Consequently,
+`open-agent` defaults to the compact 440×320 control size (exactly half the stock 640×440 area),
+while `--size normal` uses the configured `defaultNodeWidth`/`defaultNodeHeight`. Manual UI opens and
+`open-terminal` retain the normal default. `resize --node <id> --size compact|normal` updates the same
+persisted record without killing or respawning its terminal, subject to current-run creator ownership.
+During a staged static-renderer update, the still-running pre-size Server emits a new headless agent
+as a source-less, unmarked canvas upsert. A connected refreshed renderer recognizes only that exact
+legacy shape, stamps it compact, and persists the result. Browser/manual creations carry a client
+source and are never rewritten; new-server explicit `normal` creations carry the marker and are also
+preserved. This lets the next connected control spawn compact before the Server process restart.
+
+The creator ledger is never reconstructed from a project file, title, hook record, or tmux session
+name — every one of those is writable or stale. It is instead written by the Server itself to
+`<dataDir>/node-ownership.json`, mode `0600`, atomically, behind a 300 ms debounce, and read back
+synchronously at boot (`src/server/node-ownership-store.ts`). That file is the same trust class as
+the `node-tokens/` directory and `node-auth-key.bin` beside it, which already carry node identity
+across restarts, so an orchestrator keeps control of the children it spawned across a service
+restart or upgrade. Entries whose node id the persisted workspace no longer contains are dropped
+and the file rewritten; a workspace that could not be read prunes nothing, because a failed read is
+not evidence of absence. A missing, unreadable, or wrong-shaped file yields an EMPTY ledger —
+unknown ownership still fails closed — and each id is re-validated against the same `isSafeNodeId`
+predicate the node-token derivation uses. Delete the file to revoke every grant.
+
+**Shutting the Server down is not a revocation.** Its stop path stops canvas control and then
+flushes the ledger, precisely so a grant recorded inside the 300 ms debounce still lands, which
+means nothing on that path may empty the map first. A `clear()` in `HeadlessNodeFactory.stop()`
+did, and turned that flush into the write that published `{"v":1,"owners":{}}`: after the
+2026-09-02 service restart every `list` row read `opened-by-you=no` while the nodes and their
+tmux backends were all still alive, and the ledger's mtime sat in the SIGTERM second rather than
+the boot second. `HeadlessNodeOwnership.clear()` remains the explicit revoke-everything
+primitive; only an operator action or a node's removal may reach it.
+
+Durable ownership grants no additional spawn authority, and the headless factory still performs no
+session adoption or persisted queued-command delivery (the delivery queue is in memory only).
+Before the HTTP listener opens, Server
+boot separately classifies every saved local terminal id. A definitively missing backend is marked
+as an inert dead card; the browser shows that state and never asks for a replacement shell. A
+surviving or unreadable backend is guarded by an attach-only primitive (`tmux attach-session` or
+session-host attach-existing), so even a backend that disappears between the boot probe and browser
+mount cannot fall through to attach-or-create. Only node ids created during the current Server run
+may take the normal fresh-spawn path. Plain terminals carry no agent identity or canvas-control
+grant; missing `agentId` never means Claude.
+
+Immediately after that classification, boot runs the same orphan adoption the operator endpoint
+exposes. It lists live local `nt-<id>` sessions whose id no project still carries, resolves each
+pane's working directory, and appends a terminal card to the project whose folder is the pane's
+nearest ancestor — titled from the agent-status mirror when that knows the session, otherwise
+`Terminal (recovered)`. This is consistent with the inert-boot rule rather than an exception to it:
+adoption adds a CARD for a backend it has just proved exists and creates, attaches, kills and types
+nothing, and each adopted id then goes through the same boot classification, so the browser reaches
+the pane on mount through the attach-only path and a session that dies in between yields a dead card
+rather than a fresh shell. A pane whose directory matches no project is logged once and left alone.
+The repair exists because the card can be lost while the pane is fine: `workspace:save` is a
+whole-workspace, last-writer-wins write with no conflict machinery for local projects, so a client
+holding a stale node list silently deletes every card created since its snapshot. The store now
+refuses that — a node an incoming local save omits is kept when its backend is still live and it was
+not deleted here — and logs one line per save naming the ids and the browser that dropped them.
+
+Dead-card cleanup is not an agent creator-ownership exception. The separately authenticated
+operator endpoint `POST /opsapi/sweep` and the 30-minute periodic pass call the same
+`ServerNodeOps.sweep` engine. It scans only local terminal cards and removes one only after the PTY
+layer twice proves its session absent. Unreadable or failed probes preserve the card, SSH-project
+cards are never probed, and cleanup does not kill a session. Set
+`NODETERM_DEAD_CARD_REAP_MINUTES=0` (or pass `--dead-card-reap-minutes 0`) to disable only the
+periodic trigger; the operator endpoint remains available.
+
+Server message delivery verifies submission in two stages. It waits until the complete framed
+message is visible in the target pane, sends Enter, then re-captures the pane. If the composer did
+not advance, it retries Enter once and verifies again. A verified target next-turn hook is still
+required before the control reply says `delivered`; otherwise the existing `stalled` result tells
+the caller the text may remain composed and must not be sent twice.
+
+A canvas-control write is not an outside edit. The factory mutates the project, saves it, and
+broadcasts the whole thing on **`workspace:server-change`** — a channel of its own, separate from
+the `workspace:external-change` the workspace watcher uses for a git pull or a hand edit. It shared
+that channel until it was measured: the renderer classifies an outside edit by comparing the
+project shell, `ropes` included, so the single `ctrl-…` rope every `open-agent` appends read as a
+conflict whenever the canvas was dirty — which it is right through a spawn burst, because the
+paired `canvas:mut` marks it dirty, spawns arrive inside the autosave debounce, and the conflict
+bar suspends autosave, so the first one latched the bar on and every later write re-raised it.
+"Keep my version" then serialized the browser's own edges over the file and dropped the ropes this
+factory had just persisted. On the new channel the browser three-way merges instead
+(`renderer/lib/serverChange.ts`): nodes the server opened are adopted silently, ropes and bridges
+are merged against the last-known disk copy, and unsaved local edits survive. Nothing is asked of
+the user, because both sides of this merge are the same application.
 
 Validate upgrades with a disposable `NODETERM_DATA_DIR` and port. Restarting a shared live Server
 service is an explicit operator action; it is not part of a test, repair, or boot-rescue flow.
+
+Node creation persists and publishes the card under the serialized workspace transaction, then
+releases that transaction before starting its PTY or typing the initial command. Those external
+steps have a 15-second total deadline. `launch-timeout` means the durable card remains but startup
+did not settle; the underlying operation cannot be cancelled and may still finish, so do not repeat
+the request. Its `/opsapi/health` ticket remains active until the underlying operation actually
+settles, and parallel launches are counted separately while the oldest is named. Other creation
+calls remain available immediately. If the card is explicitly closed or removed through the
+operator API while creation is unresolved, the factory remembers that cancellation and destroys an
+eventual late backend a second time, so releasing the transaction lock cannot create an orphan
+session.
+Claude CLI capability discovery is bounded at five seconds and degrades to no optional flags.
+Server Codex shared-identity lookup is bounded by the same preflight policy and consumes the
+capability refreshed during Server boot; a missing or failed answer degrades that launch to the
+ordinary `codex` CLI without blocking later creation calls.
+
+`open-agent --agent claude --remote-control[=NAME]` starts a Claude session with Remote Control so
+it can be continued from claude.ai. Server Edition checks the installed CLI's own `--help` output
+before adding the launch flag; if the option is absent, it returns
+`remote-control-unsupported` before persisting a node. The option is Claude-only and requires the
+normal Claude.ai subscription and authentication. As a manual fallback, open Claude normally and
+run `/rc [name]` inside the session. Do not exercise this path in automated tests: command assembly
+and capability detection are testable without creating an external Remote Control session.
 
 ### Managed Claude accounts
 

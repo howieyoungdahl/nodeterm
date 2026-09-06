@@ -14,9 +14,10 @@
  * `shouldDeferReleaseForLiveWork`.
  */
 import { wouldKillLiveWork, type LiveWorkInput } from './live-work'
+import { OFFSCREEN_TERMINAL_MINUTES_DEFAULT } from '@shared/types'
 import type { SessionSource } from '../session/session'
 
-export const OFFSCREEN_DISPOSE_MS_DEFAULT = 10 * 60_000
+export const OFFSCREEN_DISPOSE_MS_DEFAULT = OFFSCREEN_TERMINAL_MINUTES_DEFAULT * 60_000
 
 /**
  * Does this node's CORE live on another machine? That — not the node's own fields — is what decides

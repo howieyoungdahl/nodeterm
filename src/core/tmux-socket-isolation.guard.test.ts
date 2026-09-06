@@ -97,6 +97,14 @@ describe('the run cannot reach a live nodeterm tmux server', () => {
  */
 const REAL_SOCKET_ALLOWED = new Map<string, string>([
   [
+    'test/server/canvas-control-spawn-liveness-e2e.test.ts',
+    'boots the real Server factory inside the asserted run sandbox; cleanup names only fixture-created node sessions'
+  ],
+  [
+    'test/server/update-continuity.test.ts',
+    'boots twice with installHooks:false and its own mkdtemp TMUX_TMPDIR; its kill-server reaches only that fixture socket'
+  ],
+  [
     'src/core/agents/pane-owner.test.ts',
     'the production bytes hardcode `-L nodeterm-rmt`; re-spelling it would judge different bytes'
   ],

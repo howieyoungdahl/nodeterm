@@ -10,6 +10,7 @@ describe('resolveConfig', () => {
     expect(c.host).toBe('127.0.0.1')
     expect(c.dataDir).toBe(path.join(os.homedir(), '.nodeterm-server'))
     expect(c.insecureHttp).toBe(false)
+    expect(c.deadCardReapMinutes).toBe(30)
   })
   it('env overrides defaults; argv overrides env', () => {
     const c = resolveConfig(
@@ -52,6 +53,29 @@ describe('resolveConfig', () => {
     ).toBe(false)
     // The per-session discovery bit is not the server's authority switch.
     expect(resolveConfig({ NODETERM_CANVAS_CONTROL: '1' }, []).canvasControl).toBe(false)
+  })
+
+  it('dead-card reap defaults to 30 minutes, is configurable, and zero disables only the timer', () => {
+    expect(resolveConfig({}, []).deadCardReapMinutes).toBe(30)
+    expect(
+      resolveConfig({ NODETERM_DEAD_CARD_REAP_MINUTES: '45' }, []).deadCardReapMinutes
+    ).toBe(45)
+    expect(
+      resolveConfig(
+        { NODETERM_DEAD_CARD_REAP_MINUTES: '45' },
+        ['--dead-card-reap-minutes', '5']
+      ).deadCardReapMinutes
+    ).toBe(5)
+    expect(resolveConfig({ NODETERM_DEAD_CARD_REAP_MINUTES: '0' }, []).deadCardReapMinutes).toBe(0)
+  })
+
+  it('dead-card reap rejects malformed/negative edits and bounds an accidental huge interval', () => {
+    for (const value of ['', 'nope', '-1', 'NaN', 'Infinity']) {
+      expect(resolveConfig({ NODETERM_DEAD_CARD_REAP_MINUTES: value }, []).deadCardReapMinutes)
+        .toBe(30)
+    }
+    expect(resolveConfig({ NODETERM_DEAD_CARD_REAP_MINUTES: '999999' }, []).deadCardReapMinutes)
+      .toBe(7 * 24 * 60)
   })
 
   it('proxy trust: off by default', () => {

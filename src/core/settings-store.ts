@@ -3,7 +3,13 @@ import path from "path";
 import { writeFileAtomic } from "./fs-atomic";
 import { IPC } from "../shared/ipc";
 import { platform } from "./platform";
-import { DEFAULT_SETTINGS, type Settings } from "../shared/types";
+import { sanitizeCanvasLayoutSettings } from "../shared/canvas-layout-rules";
+import {
+  applyRendererMemoryPolicyMigration,
+  DEFAULT_SETTINGS,
+  type Settings,
+} from "../shared/types";
+import { sanitizeAppearanceSettings } from "../shared/appearance";
 
 /**
  * Merge a possibly-partial/legacy `Settings` object over `DEFAULT_SETTINGS`. A plain
@@ -57,6 +63,22 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
     merged.openMarkdownPreview = true;
     merged.openMarkdownPreviewMigrated = true;
   }
+  // One-shot renderer-memory policy migration. Full-snapshot settings writes materialized the old
+  // 10-minute offscreen default into every existing file, so changing DEFAULT_SETTINGS alone would
+  // miss the exact population with dozens of live xterms. Only the old default is moved: 0 and
+  // every other value are evidence of a user choice and survive. The marker makes a post-migration
+  // choice of 10 permanent too. tmuxScrollback deliberately stays at 50k — tmux owns that history
+  // outside the renderer process, while xterm has its own much smaller cap.
+  // Visual preferences are hand-editable and end up in CSS custom properties, so what comes back
+  // out of settings.json is input, not state we wrote (same stance as `sanitizeProjectLayoutRules`
+  // for the shared half). An unusable block becomes ABSENT rather than empty: absent is precisely
+  // "built-in defaults", i.e. the look of the release before the setting existed. Deliberately not
+  // a one-level spread like `speech` above — `appearance` has no entry in DEFAULT_SETTINGS to
+  // merge over, because every one of its fields means "inherit" when it is missing.
+  const appearance = sanitizeAppearanceSettings(saved?.appearance);
+  if (appearance) merged.appearance = appearance;
+  else delete merged.appearance;
+  applyRendererMemoryPolicyMigration(saved, merged);
   // Legacy `terminalGpuRendering` was a boolean whose default (true) was merged into every saved
   // file — so a stored `true` is indistinguishable from "never touched" and maps to the new
   // 'auto' (platform-aware) default, while a stored `false` was always an explicit escape-hatch
@@ -70,6 +92,13 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   if (gpu === false) merged.terminalGpuRendering = "off";
   else if (gpu !== "on" && gpu !== "off" && gpu !== "auto" && gpu !== "shared")
     merged.terminalGpuRendering = "auto";
+  // settings.json is hand-editable, and this block decides whether the app is allowed to move the
+  // operator's canvas — so it is validated at the READ boundary rather than trusted at the point
+  // of use. Every shape this build does not recognise (including the whole key being a string, a
+  // number, or absent) resolves to `undefined`, which `layoutEngineEnabled` reads as OFF.
+  merged.canvasLayout = sanitizeCanvasLayoutSettings(saved?.canvasLayout) ?? {
+    enabled: false,
+  };
   return merged;
 }
 

@@ -146,7 +146,7 @@ export function shouldApplyResync(screen: string | null | undefined): screen is 
 }
 
 /** Hard cap on xterm's in-memory scrollback: the cost is per node and one canvas holds many. */
-export const XTERM_SCROLLBACK_MAX = 10000
+export const XTERM_SCROLLBACK_MAX = 2000
 
 /**
  * Floor, mirroring the tmux conf's own `history-limit ${Math.max(1000, scrollback)}`, so the two

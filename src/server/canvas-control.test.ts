@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -12,6 +13,14 @@ import { resetMessageFlow } from '../core/agents/agent-message-flow'
 import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-trace'
 import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
 import {
+  refreshCodexIdentityCaps,
+  resetCodexIdentityCapsForTests
+} from '../core/codex-identity-caps'
+import {
+  resetCodexThreadIdentityAuthSecret,
+  setCodexThreadIdentityAuthSecret
+} from '../core/codex-identity-proxy'
+import {
   resetNodeTokenFilesForTests,
   writeNodeTokenFile
 } from '../core/agents/node-token-files'
@@ -19,26 +28,31 @@ import {
   recordFreshSpawnOwner,
   resetPaneOwnershipForTests
 } from '../core/agents/pane-ownership'
-import { fakePlatform } from '../core/platform-fake'
+import { fakePlatform, type FakePlatform } from '../core/platform-fake'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
 import type { PtyManager } from '../core/pty-manager'
 import type { WorkspaceStore } from '../core/workspace-store'
-import { DEFAULT_SETTINGS, type Settings, type Workspace } from '../shared/types'
+import { IPC } from '../shared/ipc'
+import { DEFAULT_SETTINGS, type Project, type Settings, type Workspace } from '../shared/types'
 import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
 
 describe('initServerCanvasControl', () => {
   let dataDir = ''
   let runtime: ServerCanvasControl | null = null
+  let fake: FakePlatform
 
   beforeEach(() => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-server-control-'))
     resetPlatformForTests()
-    initPlatform(fakePlatform({ userDataDir: dataDir }))
+    fake = fakePlatform({ userDataDir: dataDir })
+    initPlatform(fake)
     resetPaneOwnershipForTests()
     resetMessageFlow()
     resetAgentMessageTraceForTests()
     resetAgentStatusMirrorForTests()
     resetNodeTokenFilesForTests()
+    resetCodexIdentityCapsForTests()
+    resetCodexThreadIdentityAuthSecret()
   })
 
   afterEach(() => {
@@ -47,11 +61,13 @@ describe('initServerCanvasControl', () => {
     resetPaneOwnershipForTests()
     resetAgentStatusMirrorForTests()
     resetNodeTokenFilesForTests()
+    resetCodexIdentityCapsForTests()
+    resetCodexThreadIdentityAuthSecret()
     resetPlatformForTests()
     fs.rmSync(dataDir, { recursive: true, force: true })
   })
 
-  it('installs only under temp data when integrations are gated, and enforces messaging switch off', async () => {
+  it('gates installs/messaging and consumes the boot-populated Server Codex capability', async () => {
     const workspace: Workspace = {
       version: 2,
       activeProjectId: 'p1',
@@ -116,12 +132,19 @@ describe('initServerCanvasControl', () => {
         autoPermissionMode: false,
         fullscreenTui: false,
         sessionIdFlag: false,
-        nameFlag: false
+        nameFlag: false,
+        remoteControlFlag: false
       }),
       codexSharedIdentity: async () => true,
       installAgentIntegrations: false
     })
 
+    for (const verb of ['message-deliver', 'message-receipt', 'message-ack']) {
+      expect(await runtime.handler({ verb, nodeId: 'source', verified: true, args: {},
+        messageCredential: 'not-an-issuer' })).toMatchObject({ ok: false,
+        error: expect.stringContaining('message-principal-and-issuer-adapter-unavailable') })
+    }
+    expect(sendEnvelope).not.toHaveBeenCalled()
     const shim = path.join(dataDir, 'canvas-control', 'nodeterm.sh')
     const shimBody = fs.readFileSync(shim, 'utf8')
     expect(shimBody).toContain('NODETERM_CANVAS_CONTROL')
@@ -173,6 +196,45 @@ describe('initServerCanvasControl', () => {
     })
     expect(paneOwner).not.toHaveBeenCalled()
     expect(sendEnvelope).not.toHaveBeenCalled()
+
+    // Production Server refreshes this shared capability after arming its identity secret. Drive
+    // that same core answer, then use the default (non-injected) canvas-control dependency. The
+    // bounded factory await must both avoid the old wedge and retain the managed launcher.
+    runtime.stop()
+    setCodexThreadIdentityAuthSecret(randomBytes(32))
+    await refreshCodexIdentityCaps(async () => true, async () => true)
+    runtime = await initServerCanvasControl({
+      workspaceStore: store,
+      ptyManager: pty,
+      settings,
+      boardLog: { append: async () => false },
+      cliCaps: async () => ({
+        version: null,
+        autoPermissionMode: false,
+        fullscreenTui: false,
+        nameFlag: false,
+    sessionIdFlag: false,
+        remoteControlFlag: false
+      }),
+      installAgentIntegrations: false
+    })
+    sendText.mockClear()
+    const deadline = Symbol('Server Codex capability did not settle')
+    const managedOpen = runtime.handler({
+      verb: 'open-agent',
+      nodeId: 'source',
+      args: { agent: 'codex', prompt: 'must not wedge' },
+      verified: true
+    })
+    const managedReply = await Promise.race([
+      managedOpen,
+      new Promise<typeof deadline>((resolve) => setTimeout(() => resolve(deadline), 1_000))
+    ])
+    expect(managedReply).not.toBe(deadline)
+    expect(managedReply).toMatchObject({ ok: true })
+    expect(sendText.mock.calls.at(-1)?.[1]).toBe(
+      "nodeterm-codex 'must not wedge' --ask-for-approval on-request"
+    )
   })
 
   it('wires permitted delivery through paste-settle-submit on the first fresh pane message', async () => {
@@ -221,23 +283,29 @@ describe('initServerCanvasControl', () => {
     } as unknown as WorkspaceStore
     const writes: Array<{ text: string; enter: boolean | undefined }> = []
     let pasted = ''
+    let submitted = false
     const legacySendEnvelope = vi.fn(async () => true)
     const pty = {
       createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
       captureSession: vi.fn(async () =>
-        pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer'),
+        submitted
+          ? 'Claude working'
+          : pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer'),
       sendText: vi.fn(async (nodeId: string, text: string, opts?: { enter?: boolean }) => {
         writes.push({ text, enter: opts?.enter })
         if (text) pasted = text
-        else queueMicrotask(() => runtime?.onAgentEvent({
-          nodeId,
-          agentId: 'claude',
-          kind: 'state',
-          state: 'working',
-          newTurn: true,
-          verified: true,
-          clientRevision: MANAGED_SCRIPT_REVISION
-        } as never))
+        else {
+          submitted = true
+          queueMicrotask(() => runtime?.onAgentEvent({
+            nodeId,
+            agentId: 'claude',
+            kind: 'state',
+            state: 'working',
+            newTurn: true,
+            verified: true,
+            clientRevision: MANAGED_SCRIPT_REVISION
+          } as never))
+        }
         return true
       }),
       destroySession: vi.fn(async () => undefined),
@@ -250,7 +318,9 @@ describe('initServerCanvasControl', () => {
         pids: [200]
       })),
       sendEnvelope: legacySendEnvelope,
-      hasLiveSession: () => true
+      // The renderer has detached, but tmux and the agent still exist.
+      hasLiveSession: () => false,
+      sessionPresence: vi.fn(async () => 'alive' as const)
     } as unknown as PtyManager
 
     runtime = await initServerCanvasControl({
@@ -271,6 +341,7 @@ describe('initServerCanvasControl', () => {
     const targetId = (opened.result as { id: string }).id
     writes.length = 0
     pasted = ''
+    submitted = false
     recordFreshSpawnOwner(targetId, 'p1')
     expect(writeNodeTokenFile(targetId, 'token')).toBe(true)
     recordAgentEvent({
@@ -293,5 +364,77 @@ describe('initServerCanvasControl', () => {
     expect(writes[0]).toMatchObject({ enter: false })
     expect(writes[1]).toEqual({ text: '', enter: true })
     expect(legacySendEnvelope).not.toHaveBeenCalled()
+  })
+
+  it('publishes its own writes on server-change, never on the outside-edit channel', async () => {
+    // The defect this pins: `open-agent` appends a `ctrl-…` rope to `project.ropes`, and while
+    // that rode `workspace:external-change` the renderer ran it through `decideExternalChange`,
+    // which reads a changed `ropes` array as a CONFLICT whenever the canvas is dirty. The bar it
+    // raised suspends autosave, so a burst of spawns latched it on, and "Keep my version" then
+    // wrote the browser's edges over the ropes this factory had just persisted.
+    const workspace: Workspace = {
+      version: 2,
+      activeProjectId: 'p1',
+      projects: [
+        {
+          id: 'p1',
+          name: 'Project',
+          color: '#0a84ff',
+          viewport: { x: 0, y: 0, zoom: 1 },
+          nodes: [
+            {
+              id: 'source',
+              kind: 'terminal',
+              position: { x: 0, y: 0 },
+              size: { width: 640, height: 440 },
+              title: 'Source',
+              color: '#d97757',
+              group: null,
+              agentId: 'claude'
+            }
+          ]
+        }
+      ]
+    }
+    const store = {
+      load: vi.fn(async () => workspace),
+      save: vi.fn(async () => undefined),
+      persistedCanvases: () => [{ id: 'p1', nodes: workspace.projects[0].nodes }],
+      capabilityProjectFor: () => ({ agentMessaging: false, capabilityAck: {} })
+    } as unknown as WorkspaceStore
+    const pty = {
+      createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
+      sendText: vi.fn(async () => true),
+      destroySession: vi.fn(async () => undefined),
+      paneOwner: vi.fn(async () => null),
+      sendEnvelope: vi.fn(async () => true),
+      hasLiveSession: () => true
+    } as unknown as PtyManager
+
+    runtime = await initServerCanvasControl({
+      workspaceStore: store,
+      ptyManager: pty,
+      settings: () => ({ ...DEFAULT_SETTINGS }),
+      boardLog: { append: async () => false },
+      installAgentIntegrations: false
+    })
+    fake.sent.length = 0
+
+    const opened = await runtime.handler({
+      verb: 'open-agent',
+      nodeId: 'source',
+      args: { agent: 'claude', prompt: 'spawn me' },
+      verified: true
+    })
+    expect(opened).toMatchObject({ ok: true })
+    const openedId = (opened.result as { id: string }).id
+
+    const server = fake.sent.filter((e) => e.channel === IPC.workspaceServerChange)
+    expect(server.length).toBeGreaterThan(0)
+    const published = server.at(-1)!.args[0] as Project
+    expect(published.id).toBe('p1')
+    expect(published.nodes.map((n) => n.id)).toContain(openedId)
+    // The one that must NOT happen: nothing this factory writes is an "another device" edit.
+    expect(fake.sent.filter((e) => e.channel === IPC.workspaceExternalChange)).toEqual([])
   })
 })

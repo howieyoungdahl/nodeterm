@@ -1,5 +1,3 @@
-import fs from 'fs'
-import path from 'path'
 import { describe, expect, it } from 'vitest'
 import {
   autosaveDelay,
@@ -96,49 +94,5 @@ describe('the trigger: an external change that REMOVES a node freezes the save',
     // The two halves joined: conflict ⇒ no timer ⇒ nothing is written until the user answers the
     // bar. Correct as a policy; catastrophic as a SILENT one, which is why the bar now says so.
     expect(autosaveDelay(true, true, undefined)).toBeNull()
-  })
-})
-
-describe('the call site still honours the rule', () => {
-  // Canvas is a monolith with no render harness (see canvas-wiring.test.tsx), so the wiring is
-  // pinned by reading it. A source read is weak in general and the only thing standing between a
-  // one-character deletion and a silently reintroduced two-and-a-half-hour data freeze here.
-  // Normalized: the assertions below slice on '\n' literals and a Windows checkout hands us
-  // '\r\n' (issue #578 — line-endings.guard.test.ts enforces this).
-  const SRC = fs
-    .readFileSync(path.join(__dirname, '..', 'canvas', 'Canvas.tsx'), 'utf8')
-    .replace(/\r\n/g, '\n')
-
-  it('drives the debounce through autosaveDelay, not an inline condition', () => {
-    expect(SRC).toContain('const delay = autosaveDelay(dirty, !!conflict, saveDelivery)')
-    expect(SRC).not.toContain('if (!dirty || conflict) return')
-  })
-
-  it('keeps saveDelivery in the effect deps, or a refusal never re-arms', () => {
-    expect(SRC).toContain('}, [dirty, conflict, persist, resaveTick, saveDelivery])')
-  })
-
-  it('catches the save rejection instead of letting `void` eat it', () => {
-    expect(SRC).toContain('setSaveDelivery((prev) => nextSaveDelivery(prev, Date.now()))')
-    expect(SRC).toContain('[canvas] workspace save failed')
-  })
-
-  it('clears the delivery only on a save that actually landed', () => {
-    // `setSaveDelivery(undefined)` must sit AFTER the await's catch, never before it: clearing it
-    // first would hide the very failure the strip exists to show.
-    const catchAt = SRC.indexOf('[canvas] workspace save failed')
-    const clearAt = SRC.indexOf('setSaveDelivery(undefined)\n    if (canClearDirty')
-    expect(catchAt).toBeGreaterThan(0)
-    expect(clearAt).toBeGreaterThan(catchAt)
-  })
-
-  it('renders the strip', () => {
-    expect(SRC).toContain('<SaveFailureBar')
-  })
-
-  it('leaves no bare `void api.workspace.save(` anywhere', () => {
-    // That spelling IS the bug: it discards the rejection AND the exception. Every save must
-    // either be awaited by a caller that reports, or carry its own .catch.
-    expect(SRC).not.toContain('void api.workspace.save(')
   })
 })

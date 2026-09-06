@@ -53,8 +53,11 @@ import {
   type TmuxStatus,
   type TranscriptLine,
   type Workspace,
-  type WorkspaceApi
-} from '../../shared/types'
+  type WorkspaceApi,
+  AgentStatusSnapshot,
+  type PaneEvidence
+} from '@shared/types'
+import type { LayoutPlan } from '@shared/canvas-layout'
 import type { PeerIdentity } from '../../shared/presence'
 import { buildStubApi } from './stubs'
 import { mountPickerRoot, openDirectoryPicker } from './dialog-picker'
@@ -280,6 +283,8 @@ export function buildRealApi(
   }
 
   const workspace: WorkspaceApi = {
+    loadReconciled: (clientId?: string) => client.request(IPC.workspaceLoadReconciled, clientId) as Promise<import('@shared/workspace-reconciliation').WorkspaceRevisionView>,
+    saveReconciled: (request) => client.request(IPC.workspaceSaveReconciled, request) as Promise<import('@shared/workspace-reconciliation').WorkspaceRevisionOutcome>,
     load: () => client.request(IPC.workspaceLoad) as Promise<Workspace>,
     save: (ws: Workspace) => client.request(IPC.workspaceSave, ws) as Promise<void>,
     // REAL: WorkspaceStore (core) registers IPC.workspaceProbeFolder, so the server serves it.
@@ -299,10 +304,13 @@ export function buildRealApi(
     // REAL: core broadcasts IPC.workspaceCorruptRecovered from the load path (workspace-store.ts).
     onCorruptRecovered: (cb) => client.subscribe(IPC.workspaceCorruptRecovered, cb as Listener),
     // Server Edition runs the shared WorkspaceWatcher and broadcasts outside file edits here.
-    // Core-originated mutations use the same channel: remote-node adoption already did, and Server
-    // Edition canvas control uses it for persisted bridge/rope changes that are wider than the
-    // node-only canvas:mut vocabulary.
-    onExternalChange: (cb) => client.subscribe(IPC.workspaceExternalChange, cb as Listener)
+    // Remote-node adoption (the phone appending a session it started) rides it too: that IS
+    // "another device", which is what this channel means.
+    onExternalChange: (cb) => client.subscribe(IPC.workspaceExternalChange, cb as Listener),
+    // REAL: Server Edition canvas control broadcasts its own persisted bridge/rope changes here —
+    // wider than the node-only canvas:mut vocabulary, but ours, so they must not travel the
+    // outside-edit channel and end up behind the conflict bar (see server/canvas-control.ts).
+    onServerChange: (cb) => client.subscribe(IPC.workspaceServerChange, cb as Listener)
   }
 
   // REAL: WorkspaceStore (core) registers the project-settings:* channels too — same
@@ -632,6 +640,10 @@ export function buildAgentApi(
 ): Pick<
   NodeTerminalApi,
   | 'onAgentStatus'
+  | 'agentStatusSnapshot'
+  | 'nodePaneEvidence'
+  | 'taskContext'
+  | 'canvasLayout'
   | 'onSubagentActivity'
   | 'onUnreadClear'
   | 'answerPermission'
@@ -656,6 +668,28 @@ export function buildAgentApi(
     onRemoteViewers: () => () => undefined,
     onAgentRefreshNode: () => () => undefined,
     onAgentRenameNode: () => () => undefined,
+    agentStatusSnapshot: () =>
+      client.request(IPC.agentStatusSnapshot) as Promise<AgentStatusSnapshot>,
+    // REAL over the bridge, not a stub: this is the only input to the `failed` badge, and a stub
+    // would answer nothing forever — leaving every browser-side status stuck on a stale `working`
+    // that reads as healthy. The Server Edition runs ON the host whose panes these are, and a
+    // relay tab's nodes live on the remote core it is talking to, so in both cases the core that
+    // owns the sessions is the one being asked. See shared/node-status.ts.
+    nodePaneEvidence: (nodeIds) =>
+      client.request(IPC.nodeStatusPanes, nodeIds) as Promise<Record<string, PaneEvidence>>,
+    taskContext: {
+      read: (query) => client.request(IPC.taskContextRead, query) as ReturnType<NodeTerminalApi['taskContext']['read']>,
+      focus: (target) => client.request(IPC.taskContextFocus, target) as ReturnType<NodeTerminalApi['taskContext']['focus']>
+    },
+    // REAL over the bridge. The engine lives in core, so the Server Edition already has it; a stub
+    // here would leave the browser canvas with a feature that silently never plans anything.
+    canvasLayout: {
+      plan: (request) => client.request(IPC.canvasLayoutPlan, request) as Promise<LayoutPlan>,
+      apply: (request) => client.request(IPC.canvasLayoutApply, request) as Promise<import('@shared/canvas-layout').LayoutCommitOutcome>,
+      inverse: (request) => client.request(IPC.canvasLayoutInverse, request) as Promise<import('@shared/canvas-layout').LayoutCommitOutcome>,
+      release: (projectId, holder, leaseToken) =>
+        client.request(IPC.canvasLayoutRelease, { projectId, holder, leaseToken }) as Promise<boolean>
+    },
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>

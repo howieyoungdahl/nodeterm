@@ -114,7 +114,16 @@ describe('PtyManager session-host contracts', () => {
     backend.hasSession.mockResolvedValue(true)
 
     await expect(m.sessionExists('node-a')).resolves.toBe(true)
+    await expect(m.sessionPresence('node-a')).resolves.toBe('alive')
     expect(backend.hasSession).toHaveBeenCalledWith('nt-node-a')
+  })
+
+  it('reports a definitive session-host miss as dead', async () => {
+    const m = await makeManager()
+    backend.hasSession.mockResolvedValue(false)
+
+    await expect(m.sessionPresence('node-a')).resolves.toBe('dead')
+    await expect(m.sessionExists('node-a')).resolves.toBe(false)
   })
 
   it('treats an unprobeable session host as possibly warm instead of cold-restoring on a guess', async () => {
@@ -122,6 +131,7 @@ describe('PtyManager session-host contracts', () => {
     backend.hasSession.mockRejectedValue(new Error('host connection unavailable'))
 
     await expect(m.sessionExists('node-a')).resolves.toBe(true)
+    await expect(m.sessionPresence('node-a')).resolves.toBe('unknown')
   })
 
   it('captures a relay snapshot from the session host when tmux is absent', async () => {

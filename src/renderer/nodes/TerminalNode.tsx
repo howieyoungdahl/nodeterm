@@ -23,6 +23,9 @@ import type { TerminalTransport } from '../terminal/transport'
 import { guardMiddleClickPaste } from '../terminal/middle-click'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { focusedNodeId, subscribeFocusedNode, focusSurfaceEl } from '../state/focusNode'
+import { appearanceAttrs, useNodeAppearance } from '../state/appearance'
+import { AppearanceGlow } from '../components/AppearanceGlow'
+import { NodeBorderPicker } from '../components/NodeBorderPicker'
 import { parseOsc52 } from '../terminal/osc52'
 import { activateUnicode11 } from '../terminal/unicode-width'
 import {
@@ -151,6 +154,8 @@ import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../sta
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useLaunchDelivery } from '../state/launchDelivery'
 import { erroredDeps, launchTooltip } from '../lib/pendingLaunch'
+import { NodeStatusBadge } from './NodeStatusBadge'
+import { statusViewFor } from '../lib/nodeStatusView'
 import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
@@ -200,12 +205,12 @@ import { matchesShortcut } from '@shared/shortcut'
 import { hintLabel, isWindowsPlatform, isMacPlatform } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
-import { AgentMascot } from './AgentMascot'
 import { MaximizeButton } from './MaximizeButton'
 import { NodeIconView } from '../components/NodeIcon'
 import { nodeIconDialog } from '../components/NodeIconPicker'
 import { applyIconChoice } from '../lib/nodeIconChoice'
 import type { NodeIcon } from '@shared/node-icon'
+import { CompactButton } from './CompactButton'
 import { connectHostAttachment } from '../lib/sshAttachments'
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
@@ -788,6 +793,11 @@ interface CoState {
    */
   ended: boolean
   /**
+   * Server boot proved that this persisted card has no backend. It stays inert and reap-eligible;
+   * remounts must not call create again because that would turn restart recovery into resurrection.
+   */
+  deadCard: boolean
+  /**
    * This is an SSH-project terminal and its host is UNREACHABLE, so no session was spawned —
    * neither here nor, crucially, locally (see `PtyCreateOptions.requireRemote`).
    *
@@ -827,6 +837,7 @@ const NO_CO: CoState = {
   letterbox: false,
   closed: null,
   ended: false,
+  deadCard: false,
   offline: false,
   spawnError: null,
   staleCwd: false
@@ -1035,6 +1046,7 @@ function setCo(key: string, patch: Partial<CoState>): void {
     next.letterbox === prev.letterbox &&
     next.closed === prev.closed &&
     next.ended === prev.ended &&
+    next.deadCard === prev.deadCard &&
     next.offline === prev.offline &&
     next.spawnError === prev.spawnError &&
     next.staleCwd === prev.staleCwd
@@ -1279,6 +1291,17 @@ export function TerminalNode({
   // for the same ordering reason: the `glyphOff` term computed this render must agree with the
   // reparent this same commit performs, or the shared-glyph teardown runs a pass behind the DOM.
   const [, bumpFocused] = useState(0)
+  // Persistent visual preference for THIS node — the one resolver, against the environment Canvas
+  // publishes (@shared/appearance). Nothing status-derived reaches it: the resolver has no status
+  // parameter, so a border can never become the only channel a state is communicated on.
+  const resolvedAppearance = useNodeAppearance({
+    nodeId: id,
+    kind: 'node',
+    override: data.appearance,
+    provider: data.agentId,
+    parentId
+  })
+  const appearance = appearanceAttrs(resolvedAppearance, 'term-node')
   const focused = focusedNodeId() === id
   const focusedRef = useRef(focused)
   focusedRef.current = focused
@@ -1527,8 +1550,14 @@ export function TerminalNode({
     !remoteSession &&
     (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
+  // The node's own glow (`working` / `attention`), off the same derivation the badge shows. No
+  // clock subscription here on purpose: the class is a coarse cue and this component already
+  // re-renders on every status change, so the one transition a clock would add — a stale
+  // `working` we could not verify becoming `unknown` — simply lands on the next render. The BADGE
+  // owns the ticker (NodeStatusBadge), and only for the nodes that show one.
+  const statusView = statusViewFor(status, Date.now())
   /**
-   * Which Claude account this node is ACTUALLY on. `data.accountId` is what nodeterm launched
+   * Which Claude account this node is ACTUALLY on (D5). `data.accountId` is what nodeterm launched
    * it as and is immutable; `status.account` is what the session's hooks reported — the only
    * identity a plain terminal running `CLAUDE_CONFIG_DIR=~/.claude-2 claude` ever has.
    *
@@ -2892,7 +2921,7 @@ export function TerminalNode({
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
-    const noSpawn = !!getCo(termKey).closed || getCo(termKey).ended
+    const noSpawn = !!getCo(termKey).closed || getCo(termKey).ended || getCo(termKey).deadCard
     const scrollbackPromise =
       parked || noSpawn
         ? Promise.resolve('')
@@ -2974,12 +3003,23 @@ export function TerminalNode({
           accountFallback: fellBack,
           staleCwd,
           closed,
+          deadCard,
           screen,
           cursor,
           coAttachMouse,
           persistent,
           unavailable
         }) => {
+        // REFUSED: this card predates the Server process and its backend was definitively absent.
+        // Keep it inert and reap-eligible; a remount must not turn it into a context-free shell.
+        if (deadCard) {
+          setCo(termKey, { deadCard: true })
+          if (!disposed)
+            term.write(
+              '\r\n\x1b[90m[session backend did not survive the server restart — this dead card was not respawned]\x1b[0m\r\n'
+            )
+          return
+        }
         // REFUSED: `requireRemote` and core could not spawn remotely (the master died inside our
         // round-trip, or `ssh` is missing). Nothing was spawned — land in the same offline state
         // the near-side guard above produces, retry included.
@@ -4822,14 +4862,25 @@ export function TerminalNode({
     <>
     {/* Sibling of the root: .term-node is overflow:hidden and would clip the half-pill. */}
     <ColumnPill nodeId={id} />
+    {resolvedAppearance.glow && (
+      <AppearanceGlow style={appearance.style} variant="node" />
+    )}
     <div
       className={`term-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}${
         isUnread ? ' unread' : ''
-      }${status?.state === 'working' ? ' working' : ''}${
-        status?.state === 'waiting' || status?.state === 'blocked' ? ' attention' : ''
-      }${glyphMounted ? ' term-node--glyphgrid' : ''}${focused ? ' term-node--focused' : ''}`}
+      }${statusView.kind === 'working' ? ' working' : ''}${
+        statusView.kind === 'waiting' ||
+        statusView.kind === 'blocked' ||
+        statusView.kind === 'failed'
+          ? ' attention'
+          : ''
+      }${glyphMounted ? ' term-node--glyphgrid' : ''}${focused ? ' term-node--focused' : ''}${
+        appearance.className ? ` ${appearance.className}` : ''
+      }`}
       ref={rootRef}
-      style={{ borderTopColor: data.color }}
+      // The appearance vars are custom properties only (never `borderTopColor` or another key this
+      // element already sets), so the spread can add to the inline style without fighting it.
+      style={{ borderTopColor: data.color, ...appearance.style }}
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
     >
@@ -4898,6 +4949,14 @@ export function TerminalNode({
                 }}
               />
             ))}
+            {/* The explicit per-node border override. It stays OPEN after a pick, unlike the node
+                colour above: choosing a border is a comparison ("is that the one?"), and closing
+                the popover on every click would mean reopening it to try the next swatch. */}
+            <NodeBorderPicker
+              override={data.appearance}
+              resolved={resolvedAppearance}
+              onChange={(next) => updateNodeData(id, { appearance: next })}
+            />
           </div>
         )}
         {data.icon ? (
@@ -4999,11 +5058,15 @@ export function TerminalNode({
         {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
         {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
         <PresenceChips nodeId={id} />
-        {status?.state === 'working' && (
-          <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
-            <AgentMascot agentId={agentId} />
-            RUNNING
-          </span>
+        {/* ONE badge for the whole state model — working / waiting / blocked / failed / completed
+            / unknown, with the freshness of the fact beside it and a stale mark past the window.
+            It replaces the old RUNNING and NEEDS YOU chips rather than sitting next to them: one
+            session must not describe itself in two voices, and NEEDS YOU could not tell an
+            approval from a question. `unknown` is rendered as a word, so a hook-capable node this
+            surface has heard nothing about says so instead of looking idle. See
+            shared/node-status.ts; nothing here is written to disk (plan decision D4). */}
+        {showStatus && (
+          <NodeStatusBadge nodeId={id} agentId={agentId} agentLabel={agentLabel} />
         )}
         {/* Eco: this node's CLI was exited to reclaim its RAM while nobody was looking. The tmux
             session, the pane and the scrollback are untouched — only the process is gone — and
@@ -5281,6 +5344,7 @@ export function TerminalNode({
               </button>
             </Tooltip>
           )}
+        {!collapsed && !isHidden('compact', hiddenHeaderButtons) && <CompactButton id={id} />}
         {!collapsed && !isHidden('maximize', hiddenHeaderButtons) && (
           <MaximizeButton id={id} maximized={!!data.premaxRect} />
         )}
@@ -5372,7 +5436,12 @@ export function TerminalNode({
             </button>
           </div>
         )}
-        {!co.closed && !co.ended && co.spawnError && (
+        {!co.closed && !co.ended && co.deadCard && (
+          <div className="term-node__closed nodrag">
+            <span>Session backend did not survive the server restart. This dead card was not respawned.</span>
+          </div>
+        )}
+        {!co.closed && !co.ended && !co.deadCard && co.spawnError && (
           <div className="term-node__closed nodrag">
             <span>This terminal could not be started. {co.spawnError}</span>
             <button className="term-node__reopen" onClick={retrySpawn}>
@@ -5380,7 +5449,7 @@ export function TerminalNode({
             </button>
           </div>
         )}
-        {!co.closed && !co.ended && !co.spawnError && co.offline && (
+        {!co.closed && !co.ended && !co.deadCard && !co.spawnError && co.offline && (
           <div className="term-node__closed nodrag">
             <span>
               Not connected to {data.ssh ? `${(data.ssh as SshConnection).user}@${(data.ssh as SshConnection).host}` : 'the host'} — this session was not started
@@ -5395,7 +5464,7 @@ export function TerminalNode({
             terminal underneath is alive and may be mid-work. Top edge on purpose: every shell
             and agent CLI writes its input line at the BOTTOM, and covering the prompt would be
             worse than covering the oldest visible output row. */}
-        {!co.closed && !co.ended && !co.spawnError && !co.offline && co.staleCwd && !offscreenDown && (
+        {!co.closed && !co.ended && !co.deadCard && !co.spawnError && !co.offline && co.staleCwd && !offscreenDown && (
           <div className="term-node__stalecwd nodrag">
             <span className="term-node__stalecwd-text">
               This terminal&apos;s folder was deleted (or replaced) — the shell&apos;s working

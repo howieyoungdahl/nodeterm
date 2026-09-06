@@ -17,6 +17,7 @@ import { resolveTerminalRenderer } from '../shared/webgl'
 import { resolveTerminalTheme } from './terminal/themes'
 import { resolveUiScale } from '../shared/ui-scale'
 import { useAppTheme } from './state/useAppTheme'
+import { AppearanceLayer } from './components/AppearanceLayer'
 
 export default function App() {
   // Apply the terminal-rendering setting to the two GPU coordinators, live. 'auto' is
@@ -79,6 +80,10 @@ export default function App() {
         {/* The node-icon picker, opened from the node menu, a node header and the kanban card
             modal — one dialog for all three, driven by nodeIconDialog(). */}
         <NodeIconDialogHost />
+        {/* Publishes the appearance environment every node resolves against, and paints the
+            window/app edge over everything (pointer-events: none, so it blocks nothing). Renders
+            null until the user configures an edge. */}
+        <AppearanceLayer />
       </ReactFlowProvider>
     </SessionProvider>
   )

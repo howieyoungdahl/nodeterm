@@ -71,7 +71,8 @@ export const ATTENTION_CLASSES: readonly NodeClass[] = [
   'PERMISSION',
   'QUESTION',
   'NEEDS-OPERATOR',
-  'DEAD'
+  'DEAD',
+  'GONE'
 ]
 
 /** Contract §6 — the band at which nothing may type into a session. */
@@ -90,15 +91,7 @@ export function navSessionName(nodeId: string): string {
  *  Pinned against `resumeCommand`'s own guard in `model.test.ts`. */
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
-/** Resume grammar per provider. Pinned against `shared/agents/config.ts` `resumeCommandWith`. */
-const RESUME_GRAMMAR: Record<string, (sessionId: string) => string> = {
-  claude: (s) => `claude --resume ${s}`,
-  codex: (s) => `codex resume ${s}`,
-  gemini: (s) => `gemini --resume ${s}`,
-  grok: (s) => `grok --resume ${s}`,
-  opencode: (s) => `opencode --session ${s}`,
-  copilot: (s) => `copilot --resume=${s}`
-}
+const KNOWN_PROVIDERS = ['claude', 'codex', 'gemini', 'grok', 'opencode', 'copilot']
 
 // ---------------------------------------------------------------------------
 // Reading the registry — four distinguishable failures, never an empty list
@@ -116,6 +109,8 @@ export type RegistrySource =
   | { kind: 'text'; path: string; text: string }
 
 export interface RegistryStaleness {
+  hostBootId: string | null
+  bootIdentityState: 'matched' | 'mismatch' | 'unknown' | 'legacy'
   generatedAtEpoch: number | null
   hostBootEpoch: number | null
   /** The registry was generated before the host last booted: nothing in it is current. */
@@ -183,7 +178,7 @@ export function resolveRegistryPath(env: Record<string, string | undefined>): {
  * consumers must not validate strictly, so only the two structures this model indexes on are
  * checked (`tasks[]`, `nodes{}`); everything else is passed through untouched.
  */
-export function classifyRegistryPayload(source: RegistrySource, nowMs: number): RegistryRead {
+export function classifyRegistryPayload(source: RegistrySource, nowMs: number, currentBootId?: string | null): RegistryRead {
   if (source.kind === 'unset') {
     return {
       ok: false,
@@ -235,7 +230,15 @@ export function classifyRegistryPayload(source: RegistrySource, nowMs: number): 
     }
   }
   const doc = parsed as Partial<TaskRegistry>
-  if (!Array.isArray(doc.tasks) || !doc.nodes || typeof doc.nodes !== 'object') {
+  if (!Array.isArray(doc.tasks) || !doc.nodes || typeof doc.nodes !== 'object' ||
+      Array.isArray(doc.nodes) ||
+      doc.tasks.some((t) => !t || typeof t !== 'object' || typeof t.task_id !== 'string' ||
+        !t.task_id || ['workers', 'blockers', 'dependencies', 'retired_nodes', 'session_lineage']
+          .some((key) => t[key] != null && !Array.isArray(t[key])) ||
+        ['workers', 'blockers', 'retired_nodes'].some((key) => Array.isArray(t[key]) &&
+          (t[key] as unknown[]).some((v) => !v || typeof v !== 'object' || Array.isArray(v)))) ||
+      new Set(doc.tasks.map((t) => t.task_id)).size !== doc.tasks.length ||
+      Object.values(doc.nodes).some((n) => !n || typeof n !== 'object' || Array.isArray(n))) {
     return {
       ok: false,
       kind: 'registry-unparseable',
@@ -246,7 +249,7 @@ export function classifyRegistryPayload(source: RegistrySource, nowMs: number): 
   }
 
   const registry = parsed as TaskRegistry
-  const staleness = registryStaleness(registry, nowMs)
+  const staleness = registryStaleness(registry, nowMs, currentBootId)
   return {
     ok: true,
     kind: 'registry',
@@ -262,12 +265,16 @@ export function classifyRegistryPayload(source: RegistrySource, nowMs: number): 
  * machine that no longer exists. It is shown, loudly marked — hiding it would lose the only record
  * of what was running, and rendering it as current is the failure the mark exists to prevent.
  */
-export function registryStaleness(registry: TaskRegistry, nowMs: number): RegistryStaleness {
+export function registryStaleness(registry: TaskRegistry, nowMs: number, currentBootId?: string | null): RegistryStaleness {
   const generated = numberOrNull(registry.generated_at_epoch)
   const boot = numberOrNull(registry.host_boot_epoch)
-  const before = generated !== null && boot !== null && generated < boot
+  const bootId = textOrNull(registry.host_boot_id)
+  const identity = bootId ? (currentBootId ? (bootId === currentBootId ? 'matched' : 'mismatch') : 'unknown') : 'legacy'
+  const before = identity === 'mismatch' || (identity === 'legacy' && generated !== null && boot !== null && generated < boot)
   const ageS = generated === null ? null : Math.max(0, Math.round(nowMs / 1000 - generated))
   return {
+    hostBootId: bootId,
+    bootIdentityState: identity,
     generatedAtEpoch: generated,
     hostBootEpoch: boot,
     generatedBeforeHostBoot: before,
@@ -283,7 +290,8 @@ export function registryStaleness(registry: TaskRegistry, nowMs: number): Regist
 // ---------------------------------------------------------------------------
 
 export interface FreshnessView {
-  /** Verbatim from the registry. Never summed with the registry's own age (§4 reply R3.1). */
+  reportedObservationAgeS?: number | null
+  /** Derived from the absolute observation at nowMs. The producer's age is retained separately. */
   observationAgeS: number | null
   band: WarmBand
   lastObserved: string | null
@@ -298,7 +306,9 @@ export interface FreshnessView {
 /** Freshness for one node. `null` node = the registry has no record of it at all. */
 export function nodeFreshness(
   node: RegistryNode | null | undefined,
-  hostBootEpoch: number | null
+  hostBootEpoch: number | null,
+  nowMs?: number,
+  hostBootId?: string | null
 ): FreshnessView {
   if (!node) {
     return {
@@ -312,22 +322,28 @@ export function nodeFreshness(
     }
   }
   const observedEpoch = isoToEpoch(node.last_observed)
-  const beforeBoot =
-    observedEpoch !== null && hostBootEpoch !== null && observedEpoch < hostBootEpoch
-  const ageS = numberOrNull(node.observation_age_s)
-  const reason = beforeBoot ? 'no observation since the host restarted' : null
+  const beforeBoot = hostBootId && node.host_boot_id
+    ? hostBootId !== node.host_boot_id
+    : !hostBootId && observedEpoch !== null && hostBootEpoch !== null && observedEpoch < hostBootEpoch
+  const reportedAge = numberOrNull(node.observation_age_s)
+  const ageS = nowMs === undefined ? reportedAge : observedEpoch === null ? null : Math.max(0, Math.round(nowMs / 1000 - observedEpoch))
+  const reason = beforeBoot ? 'no observation since the host restarted'
+    : observedEpoch === null || node.observation_state === 'unavailable' ? 'observation unavailable'
+    : nowMs !== undefined && observedEpoch > nowMs / 1000 ? 'observation time is in the future'
+    : ageS !== null && ageS > 300 ? 'observation older than 300 seconds' : null
   return {
     observationAgeS: ageS,
+    reportedObservationAgeS: reportedAge,
     band: node.band,
     lastObserved: node.last_observed ?? null,
     observedBeforeHostBoot: beforeBoot,
-    mayBeStale: beforeBoot,
+    mayBeStale: reason !== null,
     staleReason: reason,
     // Short on purpose: it prints inside a fixed column on a phone-width row, and a label that
     // needs truncating is a label whose last word — which here is `pre-boot`, the one that says
     // the reading predates the restart — is the first thing lost.
     label: `${node.band} ${ageS === null ? 'age unknown' : `${formatAge(ageS)} ago`}${
-      beforeBoot ? ' · pre-boot' : ''
+      beforeBoot ? ' · pre-boot' : reason ? ' · stale' : ''
     }`
   }
 }
@@ -353,33 +369,27 @@ export function taskFreshness(task: RegistryTask, hostBootEpoch: number | null):
 }
 
 // ---------------------------------------------------------------------------
-// Opening a session — printed always, typed never at COLD
+// Read-only navigation hints. Actual focus is independently revalidated by the consumer.
 // ---------------------------------------------------------------------------
 
 export interface OpenAction {
-  /** The exact line to paste. `null` only when nothing addressable is known. */
+  /** A read-only, exact tmux hint. Null for absent, unknown, stale or conflicting targets. */
   command: string | null
   kind: 'tmux-attach' | 'resume' | 'none'
-  /** Attaching is read-write on the pane, so it is refused at COLD like any other typing action. */
+  /** Registry reads never grant typing permission. Retained for consumer compatibility. */
   typingAllowed: boolean
   /** Set when `typingAllowed` is false: the code the contract names, plus the reason to show. */
-  refusal: { code: 'STALE-REFUSED'; reason: string } | null
+  refusal: { code: 'STALE-REFUSED' | 'CONTROL-NOT-GRANTED'; reason: string } | null
   /** True when the caller must ask for an explicit override before running the command. */
   requiresOverride: boolean
   note: string | null
 }
 
 /**
- * How to reach the session behind a task, as one copy-pasteable line.
- *
- * A LIVE node's session is a tmux session on the host, so the line attaches to it — that is the
- * shortest path from an SSH prompt to the actual work. A node the registry classes DEAD has no
- * pane left, so the line is the provider's own resume, built from the session uuid.
- *
- * §6: nothing may type into a session at `COLD`. Printing is not typing, so the command is always
- * shown; what changes is that it is marked as requiring an explicit override, with the reason. A
- * navigator that silently hid the line would leave the operator with no way to reach a cold session
- * at all, and one that offered it unmarked would invite the write §6 forbids.
+ * Describe an exact read-only attachment on the recorded host. No command is executed.
+ * Unknown presence never becomes a live pane. Bare provider resume commands cannot preserve
+ * the recorded account, so reopening belongs to an independently authorized provider action.
+ * The browser uses validateOpenTarget and its existing attach-only gate, never this string.
  */
 export function openActionFor(
   nodeId: string,
@@ -395,25 +405,25 @@ export function openActionFor(
           node && node.warm_min !== null ? `${node.warm_min} min since its last request` : 'no recent request'
         }); do not type into it without checking it first`
       }
-    : null
+    : { code: 'CONTROL-NOT-GRANTED' as const, reason: 'Navigation metadata grants no control. Verify the exact host, project, account and session before opening.' }
 
-  if (node && node.class !== 'DEAD' && nodeId) {
+  if (node && nodeIsLive(node) && /^[A-Za-z0-9_-]+$/.test(nodeId)) {
     // `-t =` is an EXACT target: without the `=`, tmux falls back to fnmatch and then to PREFIX
     // matching on a miss, and `nt-…-1` is a prefix of `nt-…-12`, so a typo could attach to a
     // different session than the one on screen.
     return {
-      command: `tmux -L ${NAV_TMUX_SOCKET} attach -t =${navSessionName(nodeId)}`,
+      command: `tmux -L ${NAV_TMUX_SOCKET} attach -r -t =${navSessionName(nodeId)}`,
       kind: 'tmux-attach',
-      typingAllowed: !cold,
+      typingAllowed: false,
       refusal,
-      requiresOverride: cold,
-      note: null
+      requiresOverride: true,
+      note: 'Read-only hint for the recorded host. Revalidate the target before use; this is not an open authorization.'
     }
   }
 
-  const session = (node?.session ?? fallbackSession ?? '').trim()
-  const provider = (node?.provider ?? fallbackProvider ?? '').trim()
-  const grammar = RESUME_GRAMMAR[provider]
+  const session = textOrNull(node?.session) ?? fallbackSession ?? ''
+  const provider = textOrNull(node?.provider) ?? fallbackProvider ?? ''
+  const grammar = KNOWN_PROVIDERS.includes(provider)
   if (!grammar || !session || !SAFE_SESSION_ID.test(session)) {
     return {
       command: null,
@@ -429,13 +439,22 @@ export function openActionFor(
     }
   }
   return {
-    command: grammar(session),
-    kind: 'resume',
-    typingAllowed: !cold,
+    command: null,
+    kind: 'none',
+    typingAllowed: false,
     refusal,
-    requiresOverride: cold,
-    note: node ? 'the pane is gone; this starts a fresh one on the recorded session' : null
+    requiresOverride: false,
+    note: 'Session presence is absent or unknown. Reopening requires an explicit host/account-aware provider action.'
   }
+}
+
+function textOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+function nodeIsLive(node: RegistryNode): boolean {
+  return ['LIMIT', 'PERMISSION', 'QUESTION', 'NEEDS-OPERATOR', 'DONE', 'STALLED', 'BUSY', 'IDLE'].includes(node.class) &&
+    node.observation_state !== 'unavailable'
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +525,15 @@ export interface OwnerView {
 }
 
 export interface TaskView {
+  binding: {
+    mechanicalNode: string | null
+    declaredNode: string | null
+    assignment: RegistryTask['assignment']
+    supervisorTaskId: string | null
+    creatorNode: string | null
+    conflicts: string[]
+    controlGranted: false
+  }
   taskId: string
   title: string
   project: string
@@ -609,6 +637,7 @@ export interface NavigatorInput {
   unregistered?: readonly UnregisteredSession[]
   path?: string | null
   nowMs: number
+  currentHostBootId?: string | null
 }
 
 /**
@@ -639,9 +668,15 @@ export function buildNavigator(input: NavigatorInput): NavigatorModel {
   const registryWorkersByTask = views.workers_by_task ?? {}
 
   const taskViews: TaskView[] = tasks.map((task) =>
-    buildTaskView(task, nodes, nodesByTask, registryWorkersByTask, hostBoot)
+    buildTaskView(task, nodes, nodesByTask, registryWorkersByTask, hostBoot, nowMs, textOrNull(registry.host_boot_id))
   )
-  const tasksById: Record<string, TaskView> = {}
+  if (registryStaleness(registry, nowMs, input.currentHostBootId).generatedBeforeHostBoot) {
+    for (const row of taskViews) {
+      row.open = { ...row.open, command: null, kind: 'none', note: 'Registry predates this host boot' }
+      row.owner.freshness = { ...row.owner.freshness, mayBeStale: true, staleReason: 'host boot changed' }
+    }
+  }
+  const tasksById: Record<string, TaskView> = Object.create(null)
   for (const t of taskViews) tasksById[t.taskId] = t
 
   // Projects, in first-seen order so the output is stable across runs.
@@ -674,7 +709,7 @@ export function buildNavigator(input: NavigatorInput): NavigatorModel {
   return {
     path: input.path ?? null,
     generatedAt: registry.generated_at ?? null,
-    staleness: registryStaleness(registry, nowMs),
+    staleness: registryStaleness(registry, nowMs, input.currentHostBootId),
     hostBootEpoch: hostBoot,
     sourceGeneration: numberOrNull(registry.source?.generation),
     tasks: taskViews,
@@ -688,7 +723,7 @@ export function buildNavigator(input: NavigatorInput): NavigatorModel {
       needsAttention: resolveView(registry, taskViews, 'needs_attention').taskIds.length,
       nodes: numberOrNull(counts.nodes) ?? nodeValues.length,
       workers: numberOrNull(counts.workers) ?? nodeValues.filter((n) => n?.role === 'worker').length,
-      deadNodes: numberOrNull(counts.dead_nodes) ?? nodeValues.filter((n) => n?.class === 'DEAD').length,
+      deadNodes: numberOrNull(counts.dead_nodes) ?? nodeValues.filter((n) => n?.class === 'DEAD' || n?.class === 'GONE').length,
       unregistered: unregistered.length
     }
   }
@@ -699,18 +734,42 @@ function buildTaskView(
   nodes: Record<string, RegistryNode>,
   nodesByTask: Map<string, string[]>,
   registryWorkersByTask: Record<string, string[]>,
-  hostBoot: number | null
+  hostBoot: number | null,
+  nowMs: number,
+  hostBootId: string | null
 ): TaskView {
-  const ownerNodeId = task.owner?.node ?? ''
-  const ownerNode = nodes[ownerNodeId]
-  const ownerFreshness = nodeFreshness(ownerNode, hostBoot)
+  const mechanical = textOrNull(task.node)
+  const declared = textOrNull(task.owner?.node)
+  const assignment = task.assignment
+  const actorNode = textOrNull(assignment?.actor?.node)
+  const ownerNodeId = actorNode ?? mechanical ?? declared ?? ''
+  const ownerNode = Object.hasOwn(nodes, ownerNodeId) ? nodes[ownerNodeId] : undefined
+  const ownerFreshness = nodeFreshness(ownerNode, hostBoot, nowMs, hostBootId)
+  const conflicts: string[] = []
+  if (new Set([actorNode, mechanical, declared].filter(Boolean)).size > 1) conflicts.push('owner binding disagreement')
+  if (ownerNode?.conflicts?.length) conflicts.push('node claimed by multiple tasks')
+  if (ownerNode?.task_id && ownerNode.task_id !== task.task_id) conflicts.push('node belongs to another task')
+  if (assignment && assignment.state !== 'active') conflicts.push('assignment suspended or unknown')
+  const session = textOrNull(assignment?.actor?.session_id) ?? textOrNull(task.sid) ?? textOrNull(task.owner?.session) ?? textOrNull(ownerNode?.session)
+  if (actorNode && ownerNode?.session && session !== ownerNode.session) conflicts.push('assignment session disagreement')
+  if (mechanical && task.sid && ownerNode?.session && task.sid !== ownerNode.session) conflicts.push('observed session disagreement')
+  if (task.account && ownerNode?.account && task.account !== ownerNode.account) conflicts.push('observed account disagreement')
+  if (task.provider && ownerNode?.provider && task.provider !== ownerNode.provider) conflicts.push('observed provider disagreement')
+  if (task.project_id && ownerNode?.project_id && task.project_id !== ownerNode.project_id) conflicts.push('observed project disagreement')
+  const open = openActionFor(ownerNodeId, ownerNode, session, textOrNull(task.provider) ?? task.owner?.provider ?? null)
+  if (conflicts.length || ownerFreshness.mayBeStale) {
+    open.command = null
+    open.kind = 'none'
+    open.note = conflicts.join('; ') || ownerFreshness.staleReason
+  }
 
   // Worker roster: the registry's precomputed list where it has one, else the nodes joined to this
   // task whose role is `worker`. `task.workers[]` is the director's own membership statement and is
   // used for role/state text, but never as the roster — a worker the director forgot to record is
   // still a worker the tick can see.
   const joined = nodesByTask.get(task.task_id) ?? []
-  const rosterIds = registryWorkersByTask[task.task_id] ?? joined.filter((id) => nodes[id]?.role === 'worker')
+  const publishedRoster = registryWorkersByTask[task.task_id]
+  const rosterIds = Array.isArray(publishedRoster) ? publishedRoster : joined.filter((id) => nodes[id]?.role === 'worker')
   const declaredRole = new Map<string, string>()
   for (const w of task.workers ?? []) if (w?.node) declaredRole.set(w.node, w.role)
 
@@ -724,8 +783,8 @@ function buildTaskView(
         state: node.class,
         band: node.band,
         title: node.title ?? null,
-        freshness: nodeFreshness(node, hostBoot),
-        live: node.class !== 'DEAD'
+        freshness: nodeFreshness(node, hostBoot, nowMs, hostBootId),
+        live: nodeIsLive(node)
       }
     })
 
@@ -749,6 +808,9 @@ function buildTaskView(
   }
 
   return {
+    binding: { mechanicalNode: mechanical, declaredNode: declared, assignment: assignment ?? null,
+      supervisorTaskId: assignment?.supervisor_task_id ?? textOrNull(task.supervisor_task_id),
+      creatorNode: ownerNode?.owner_node ?? null, conflicts, controlGranted: false },
     taskId: task.task_id,
     title: task.title ?? task.task_id,
     project: task.project ?? 'unknown',
@@ -760,21 +822,21 @@ function buildTaskView(
     objective: task.objective ?? '',
     scope: task.scope ?? '',
     owner: {
-      kind: task.owner?.kind ?? 'unknown',
+      kind: assignment?.role ?? task.owner?.kind ?? ownerNode?.role ?? 'unknown',
       node: ownerNodeId,
-      session: task.owner?.session ?? ownerNode?.session ?? null,
-      provider: task.owner?.provider ?? ownerNode?.provider ?? null,
-      account: task.owner?.account ?? ownerNode?.account ?? null,
+      session,
+      provider: textOrNull(assignment?.actor?.provider) ?? textOrNull(task.provider) ?? textOrNull(task.owner?.provider) ?? textOrNull(ownerNode?.provider),
+      account: textOrNull(task.account) ?? textOrNull(task.owner?.account) ?? textOrNull(ownerNode?.account),
       model: task.owner?.model ?? ownerNode?.model ?? null,
       role: ownerNode?.role ?? null,
       class: ownerNode?.class ?? null,
       band: ownerNode?.band ?? 'UNKNOWN',
-      live: !!ownerNode && ownerNode.class !== 'DEAD',
+      live: !!ownerNode && nodeIsLive(ownerNode) && conflicts.length === 0,
       present: !!ownerNode,
       freshness: ownerFreshness
     },
     nextAction: {
-      text: task.next_action?.text ?? '',
+      text: typeof task.next_action === 'string' ? task.next_action : task.next_action?.text ?? '',
       owner: task.next_action?.owner ?? 'unknown',
       since: task.next_action?.since ?? null
     },
@@ -787,9 +849,9 @@ function buildTaskView(
       hoistedBlockers: blockers.filter((b) => b.raisedByWorker)
     },
     workerRows,
-    freshness: taskFreshness(task, hostBoot),
+    freshness: taskFreshness(task, hostBootId ? null : hostBoot),
     attention: { needed: attentionReasons.length > 0, reasons: attentionReasons },
-    open: openActionFor(ownerNodeId, ownerNode, task.owner?.session ?? null, task.owner?.provider ?? null),
+    open,
     dependencies: task.dependencies ?? [],
     retiredNodes: (task.retired_nodes ?? []).map((r) => ({
       node: r.node,
