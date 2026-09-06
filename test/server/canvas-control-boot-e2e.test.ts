@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
 
 import { sessionName, TMUX_SOCKET } from '../../src/core/tmux-naming'
+import { privateTmuxSocketReason } from '../../src/core/tmux-test-socket'
 import { startServer } from '../../src/server/index'
 import { IPC } from '../../src/shared/ipc'
 import type { Workspace } from '../../src/shared/types'
@@ -34,7 +35,15 @@ function backendExists(persistKey: string): boolean {
   }
 }
 
-describe.skipIf(!hasTmux)('disposable Server boot rescue', () => {
+
+// This suite spawns and/or kills sessions on the resolved TMUX_SOCKET. On the machine hosting a
+// live nodeterm canvas that IS the live server's socket, so it skips unless the process was given
+// a private one (NODETERM_TMUX_SOCKET). See src/core/tmux-test-socket.ts.
+const socketRefusal = privateTmuxSocketReason()
+if (socketRefusal) console.warn(`[skip] ${import.meta.url.split('/').pop()}: ${socketRefusal}`)
+const canDriveTmux = hasTmux && !socketRefusal
+
+describe.skipIf(!canDriveTmux)('disposable Server boot rescue', () => {
   let dataDir = ''
   let projectDir = ''
   let close: (() => Promise<void>) | undefined

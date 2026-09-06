@@ -868,3 +868,38 @@ only exercises the HTTP/auth surface). With `npm run server:dev` running:
     parent node; click it to watch its live transcript stream.
 13. **Context meter (Phase 3b)** — as a Claude session accumulates transcript, the node's
     **context-window meter** should fill.
+
+
+## tmux socket isolation (`NODETERM_TMUX_SOCKET`)
+
+Server Edition puts every local terminal in a tmux session on one socket: `tmux -L node-terminal`,
+under `$TMUX_TMPDIR` (else `/tmp/tmux-<uid>/`). That name is shared with anything else on the box
+that binds it — a desktop nodeterm, an ad-hoc `tmux -L node-terminal` attach, and the repo's own
+`test/server/*-e2e` suites, which create and kill real sessions there. On a machine that hosts a
+live canvas, a developer running `npm test` is one socket away from the sessions behind it.
+
+Set `NODETERM_TMUX_SOCKET` to give a production instance a socket of its own:
+
+```ini
+# /etc/systemd/system/nodeterm-server.service (or the user unit)
+Environment=NODETERM_TMUX_SOCKET=nodeterm-live
+```
+
+- Unset (the default) is the historical `node-terminal`, so an existing install is unchanged.
+- The name is validated: 1-64 chars of `[A-Za-z0-9][A-Za-z0-9._-]*`. A typo **fails the boot**
+  rather than falling back to the shared socket — falling back would undo the isolation the setting
+  exists to provide.
+- It must be in the **environment**. The name is bound when `src/core/tmux-naming.ts` first loads,
+  which is before argv is parsed, so `--tmux-socket` can only *declare* what the environment already
+  set; a flag naming a different socket is refused at boot with the `NODETERM_TMUX_SOCKET=` line to
+  use instead.
+- **Changing the socket of a running instance orphans its sessions.** The old server keeps them on
+  the old socket; the new one finds none and cold-starts. Move deliberately, or accept a cold start.
+- Remote (SSH) legs share the constant, so a non-default socket also changes which socket name the
+  session-memory sweep and the speculative kill look for **on a peer host**. Suited to a
+  self-contained Server Edition host; splitting local-vs-peer socket names is a follow-up.
+
+Running the tmux-driving test suites on the same machine is gated on the same knob: with the
+default socket the three `test/server/*-e2e` suites that touch it skip with a printed reason
+(`src/core/tmux-test-socket.ts`), and run only when the process was given a private socket, e.g.
+`NODETERM_TMUX_SOCKET=nt-test-$$ npm test`.

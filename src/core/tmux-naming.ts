@@ -3,7 +3,69 @@
 import { randomBytes } from 'crypto'
 import { sanitizePasteText } from './paste-injection'
 
-export const TMUX_SOCKET = 'node-terminal'
+/**
+ * The socket name nodeterm has always used, and the one a PEER nodeterm on another machine still
+ * binds. It is the default for this process and a wire constant for anything that reasons about
+ * somebody else's install.
+ */
+export const DEFAULT_TMUX_SOCKET = 'node-terminal'
+
+/**
+ * Socket names we accept for `tmux -L <name>`.
+ *
+ * tmux resolves `-L` under `$TMUX_TMPDIR` (else `/tmp`), so a name carrying `/` or `..` would
+ * point the server at an arbitrary path, and a leading `-` would be read as a flag. The name also
+ * lands inside a `sockaddr_un.sun_path` (103 usable chars on macOS), so the length is bounded well
+ * below it. Anything else is an operator typo and must be loud.
+ */
+const SAFE_TMUX_SOCKET = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
+/**
+ * Validate a configured socket name. Empty/unset means the default; a NON-EMPTY invalid value
+ * THROWS rather than falling back.
+ *
+ * The fallback direction matters here in a way it usually does not: this setting exists so a
+ * production instance can keep its sessions off the shared socket, and silently degrading a typo
+ * to `node-terminal` would put it right back on the socket it was configured away from — the exact
+ * failure the setting exists to prevent. Failing the boot is the safe direction.
+ */
+export function resolveTmuxSocketName(raw: string | undefined | null): string {
+  const name = (raw ?? '').trim()
+  if (name === '') return DEFAULT_TMUX_SOCKET
+  if (!SAFE_TMUX_SOCKET.test(name)) {
+    throw new Error(
+      `invalid tmux socket name ${JSON.stringify(name)}: expected 1-64 characters matching ` +
+        `[A-Za-z0-9][A-Za-z0-9._-]* (no path separators, no leading dash). ` +
+        `Set NODETERM_TMUX_SOCKET to a plain name, or unset it for the default ` +
+        `"${DEFAULT_TMUX_SOCKET}".`
+    )
+  }
+  return name
+}
+
+/**
+ * This process's LOCAL tmux socket — what every `-L` in `pty-manager.ts` binds.
+ *
+ * Resolved ONCE, at module load, from `NODETERM_TMUX_SOCKET`. Unset (the overwhelming case) gives
+ * the historical `node-terminal`, so an existing install is byte-identical.
+ *
+ * Load-time and not a settable function on purpose: the name is read by ~25 call sites plus two
+ * module-level arrays (`KILL_TMUX_SOCKETS`, `session-memory-remote`'s `SWEEP_SOCKETS`), and a
+ * value that can change after those arrays are built is a socket list that silently disagrees with
+ * the sessions we actually spawned. A constant cannot drift. The cost is that a CLI flag arrives
+ * too late to change it — `assertTmuxSocketBound` in `src/server/config.ts` turns that into a
+ * named refusal instead of a flag that appears to work.
+ *
+ * Consequence worth knowing before you set it: the SSH legs that sweep or kill on a REMOTE host
+ * (`session-memory-remote.ts`, `remoteTmuxKillEverySocketArgs`) also use this name, because they
+ * share the constant. A non-default socket therefore suits a self-contained Server Edition host;
+ * on a machine driving SSH projects into peers that use the default, those remote sweeps would
+ * look for the wrong socket name over there. Splitting local-vs-peer is a follow-up, not this
+ * change.
+ */
+export const TMUX_SOCKET = resolveTmuxSocketName(
+  typeof process !== 'undefined' ? process.env?.NODETERM_TMUX_SOCKET : undefined
+)
 
 /** Per-node tmux session name. Must stay stable — it is the persistence key. */
 export function sessionName(persistKey: string): string {

@@ -1,6 +1,7 @@
 import os from 'os'
 import path from 'path'
 import { parseTrustedNets, DEFAULT_TRUSTED_NETS_SPEC, type TrustProxyConfig } from './proxy-trust'
+import { DEFAULT_TMUX_SOCKET, TMUX_SOCKET, resolveTmuxSocketName } from '../core/tmux-naming'
 
 /**
  * Fully-resolved server configuration. Produced by {@link resolveConfig} from the
@@ -64,6 +65,18 @@ export type ServerConfig = {
    * Absent = feature off (default). See src/server/proxy-trust.ts and docs/SERVER.md.
    */
   trustProxy?: TrustProxyConfig
+  /**
+   * tmux socket this instance's local sessions live on (`tmux -L <name>`). Defaults to
+   * `node-terminal`, which is what every install has always used, so an upgrade changes nothing.
+   *
+   * Set it — `NODETERM_TMUX_SOCKET=<name>`, systemd `Environment=` — to give a production instance
+   * a PRIVATE socket, so a developer running the test suite (or `tmux kill-server`) on the same
+   * machine cannot reach the sessions behind the live canvas.
+   *
+   * Optional in the type because tests construct `ServerConfig` literals; `resolveConfig` always
+   * sets it.
+   */
+  tmuxSocket?: string
 }
 
 /**
@@ -185,6 +198,12 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     )
   }
 
+  // Throws on a typo: see resolveTmuxSocketName. A misconfigured socket name must fail the boot,
+  // not silently put this instance back on the shared socket.
+  const tmuxSocket = resolveTmuxSocketName(
+    pick('tmux-socket', 'NODETERM_TMUX_SOCKET', DEFAULT_TMUX_SOCKET)
+  )
+
   // Reverse-proxy SSO trust. `pick` with an empty default so "unset" and "" coincide.
   const trustHeader = pick('trust-proxy-header', 'NODETERM_TRUST_PROXY_HEADER', '')
   const trustNetsSpec = pick('trust-proxy-nets', 'NODETERM_TRUST_PROXY_NETS', '')
@@ -216,6 +235,27 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     canvasControl,
     deadCardReapMinutes,
     deadCardReapMassLimit,
-    deadCardReapMassFraction
+    deadCardReapMassFraction,
+    tmuxSocket
   }
+}
+
+/**
+ * Refuse a `--tmux-socket` that cannot take effect.
+ *
+ * `TMUX_SOCKET` is bound when `src/core/tmux-naming.ts` loads, which happens on the first import —
+ * before argv is parsed. So a CLI flag naming a different socket is not a configuration, it is a
+ * lie: the process would answer "running on my-private-socket" while every pty it spawns lands on
+ * `node-terminal`. Called from `main.ts` after `resolveConfig`; `bound` is injectable so the check
+ * itself is testable without re-importing the module under a different environment.
+ */
+export function assertTmuxSocketBound(cfg: ServerConfig, bound: string = TMUX_SOCKET): void {
+  const want = cfg.tmuxSocket ?? DEFAULT_TMUX_SOCKET
+  if (want === bound) return
+  throw new Error(
+    `tmux socket "${want}" cannot take effect: this process bound "${bound}" at startup. ` +
+      `The name is read from NODETERM_TMUX_SOCKET once, when the module loads, so a --tmux-socket ` +
+      `flag arrives too late. Start the server with NODETERM_TMUX_SOCKET=${want} in the ` +
+      `environment (systemd: Environment=NODETERM_TMUX_SOCKET=${want}).`
+  )
 }

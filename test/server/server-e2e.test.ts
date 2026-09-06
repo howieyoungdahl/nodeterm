@@ -9,6 +9,7 @@ import { SESSION_COOKIE } from '../../src/server/http'
 import { decodePtyData } from '../../src/shared/rpc'
 import { IPC } from '../../src/shared/ipc'
 import { TMUX_SOCKET, sessionName } from '../../src/core/tmux-naming'
+import { privateTmuxSocketReason } from '../../src/core/tmux-test-socket'
 
 const hasTmux = (() => { try { execSync('tmux -V'); return true } catch { return false } })()
 
@@ -17,7 +18,15 @@ const hasTmux = (() => { try { execSync('tmux -V'); return true } catch { return
 // is the whole point (a real cold start spawns a real pty inside a brand-new tmux session).
 const PERSIST_KEY = `e2e-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 
-describe.skipIf(!hasTmux)('server e2e: login → ws → pty echo round-trip', () => {
+
+// This suite spawns and/or kills sessions on the resolved TMUX_SOCKET. On the machine hosting a
+// live nodeterm canvas that IS the live server's socket, so it skips unless the process was given
+// a private one (NODETERM_TMUX_SOCKET). See src/core/tmux-test-socket.ts.
+const socketRefusal = privateTmuxSocketReason()
+if (socketRefusal) console.warn(`[skip] ${import.meta.url.split('/').pop()}: ${socketRefusal}`)
+const canDriveTmux = hasTmux && !socketRefusal
+
+describe.skipIf(!canDriveTmux)('server e2e: login → ws → pty echo round-trip', () => {
   let dataDir: string, close: () => Promise<void>, port: number, cookie: string
 
   beforeAll(async () => {

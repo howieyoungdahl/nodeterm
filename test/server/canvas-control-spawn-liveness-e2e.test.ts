@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { hookServer } from '../../src/core/agents/hook-server'
 import { nodeAuthToken } from '../../src/core/agents/node-auth-token'
 import { sessionName, TMUX_SOCKET } from '../../src/core/tmux-naming'
+import { privateTmuxSocketReason } from '../../src/core/tmux-test-socket'
 import { startServer } from '../../src/server/index'
 import type { ServerControlReply } from '../../src/server/headless-node-factory'
 import type { Workspace } from '../../src/shared/types'
@@ -33,7 +34,15 @@ function killOwnedBackend(nodeId: string): void {
   }
 }
 
-describe.skipIf(!hasTmux)('disposable Server canvas-creation liveness', () => {
+
+// This suite spawns and/or kills sessions on the resolved TMUX_SOCKET. On the machine hosting a
+// live nodeterm canvas that IS the live server's socket, so it skips unless the process was given
+// a private one (NODETERM_TMUX_SOCKET). See src/core/tmux-test-socket.ts.
+const socketRefusal = privateTmuxSocketReason()
+if (socketRefusal) console.warn(`[skip] ${import.meta.url.split('/').pop()}: ${socketRefusal}`)
+const canDriveTmux = hasTmux && !socketRefusal
+
+describe.skipIf(!canDriveTmux)('disposable Server canvas-creation liveness', () => {
   let dataDir = ''
   let projectDir = ''
   let close: (() => Promise<void>) | undefined
