@@ -337,6 +337,7 @@ export const IPC = {
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',
+  projectSettingsUpdateLocalReconciled: 'project-settings:update-local-reconciled',
   /** Resolved settings + per-family trust verdict for one project (`ProjectLaunchInfo`), the single
    *  read a launcher warms before it may consume a shared-sourced value — answers `null` for an
    *  unknown project id, same as projectSettingsRead. */

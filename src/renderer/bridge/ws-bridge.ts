@@ -322,8 +322,8 @@ export function buildRealApi(
       >,
     writeShared: (projectId, doc) =>
       client.request(IPC.projectSettingsWriteShared, projectId, doc) as Promise<boolean>,
-    updateLocal: (projectId, local) =>
-      client.request(IPC.projectSettingsUpdateLocal, projectId, local) as Promise<boolean>,
+    updateLocal: (projectId, request) =>
+      client.request(IPC.projectSettingsUpdateLocalReconciled, projectId, request) as ReturnType<NodeTerminalApi['projectSettings']['updateLocal']>,
     launchInfo: (projectId) =>
       client.request(IPC.projectSettingsLaunchInfo, projectId) as ReturnType<
         NodeTerminalApi['projectSettings']['launchInfo']

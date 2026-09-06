@@ -5,6 +5,7 @@ import type { Project, Workspace } from '../shared/types'
 import type { WorkspaceRevisionView, WorkspaceRevisionRequest, WorkspaceRevisionOutcome, ProjectRevisionOutcome } from '../shared/workspace-reconciliation'
 import { reconcileProjectDocuments, type ProjectDocument } from '../shared/project-reconciliation'
 import { projectEntityView } from '../shared/project-view'
+import { LocalSettingsStore } from './local-settings-store'
 import { ProjectCommitStore, revisionOf, readPublicationFile, isPublicationReadError, type FileRevision, type FileCommitResult } from './project-commit-store'
 import { fileToProject, projectToFile, splitWorkspace, inlineProjectFileRelPath, isInlineProjectFileId,
   type IndexEntryV3, type ProjectFileV1 } from './workspace-files'
@@ -40,6 +41,10 @@ function overlay(raw: string, before: ProjectDocument, after: ProjectDocument, k
 export class WorkspaceReconciliationStore {
   private clients = new Map<string, BoundClient>()
   constructor(private driver: WorkspaceDriver) {}
+
+  localSettings(): LocalSettingsStore {
+    return new LocalSettingsStore(this.driver.indexPath, (id) => this.clientDir(id), (id, value) => this.enroll(id, value))
+  }
 
   private clientDir(id: string): string {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('E_UNKNOWN_RECONCILIATION_CLIENT')

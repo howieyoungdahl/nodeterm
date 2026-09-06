@@ -1055,11 +1055,11 @@ export interface ProjectSettingsApi {
   /** Whole-document write of the git-shared `.nodeterm/settings.json`. See
    *  `WorkspaceStore.writeProjectSettings` for the false-vs-true contract. */
   writeShared(projectId: string, doc: import('./project-settings').ProjectSettingsDoc): Promise<boolean>
-  /** This machine's own overlay; `local: undefined` clears it. */
+  /** Caller-bound known-leaf delta for this host's local overlay. */
   updateLocal(
     projectId: string,
-    local: import('./project-settings').ProjectLocalSettings | undefined
-  ): Promise<boolean>
+    request: import('./local-settings-reconciliation').LocalSettingsRequest
+  ): Promise<import('./local-settings-reconciliation').LocalSettingsOutcome>
   /** Resolved settings + per-family trust verdict for one project — `null` for an unknown id. The
    *  renderer cache (`renderer/state/projectLaunchInfo.ts`) warms this on activate and never awaits
    *  it inline; a caller wanting the raw handshake calls this directly instead. */

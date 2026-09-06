@@ -8,6 +8,7 @@ import {
   type ResolvedProjectSettings
 } from '@shared/project-settings'
 import { ensureProjectLaunchInfo, invalidateProjectLaunchInfo } from '../../state/projectLaunchInfo'
+import { localSettingsDelta, type LocalSettingsRequest } from '@shared/local-settings-reconciliation'
 
 /**
  * One project's `.nodeterm/settings.json` (the git-shared doc) plus this machine's local overlay,
@@ -34,19 +35,16 @@ export interface ProjectSettingsHook {
    */
   saveShared(doc: ProjectSettingsDoc): Promise<boolean>
   /**
-   * Commits an edit to THIS MACHINE's local overlay — a whole-document write, exactly like
-   * `saveShared`. Takes an UPDATER over the current document (preferring a still-in-flight write's
-   * result over the last-read snapshot, via the same `pendingLocalRef` guard `saveShared` uses for
-   * the shared doc), so two local edits inside one IPC round-trip do not drop the first. The
-   * updater form is the ONLY form: a plain next-document argument cannot see the pending base, so
-   * it would silently revert an edit whose re-read has not landed yet — the exact hazard
-   * `pendingLocalRef` exists to close. Clearing the whole overlay is `saveLocal(() => undefined)`.
-   * Re-reads on success.
+   * Serializes known-leaf deltas over acknowledged local metadata. An unresolved request is
+   * retained across reloads in this tab and must settle before another edit can be submitted.
+   * `saveLocal(() => undefined)` removes known leaves, never unknown extensions.
    */
   saveLocal(
     update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
   ): Promise<boolean>
   reload(): void
+  localError: string | null
+  retryLocal(): Promise<boolean>
 }
 
 /** The document half of a shared file — `version`/`rev`/`savedAt` belong to the store, which
@@ -90,6 +88,15 @@ const EMPTY_FAMILIES = (): ResolvedProjectSettings => resolveProjectSettings(und
 export function useProjectSettings(projectId: string): ProjectSettingsHook {
   const [snapshot, setSnapshot] = useState<ProjectSettingsSnapshot | null | 'loading'>('loading')
   const [nonce, setNonce] = useState(0)
+  const [localError, setLocalError] = useState<string | null>(null)
+  const localIntent = useRef<{ projectId: string; request: LocalSettingsRequest } | null>(null)
+  const localFlight = useRef<Promise<boolean> | null>(null)
+  const localQueue = useRef<Promise<boolean>>(Promise.resolve(true))
+  const currentProject = useRef(projectId)
+  currentProject.current = projectId
+  const readProject = useRef(projectId)
+  const generation = useRef(0)
+  const intentKey = `nodeterm.local-settings.intent.${projectId}`
   /** Counts successful writes, so a read can tell whether it started before or after the last one. */
   const writeSeqRef = useRef(0)
 
@@ -105,15 +112,24 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
   // re-read is asynchronous; the user's next blur is not going to wait for it. Tagged with the
   // project id so a pane switch can never merge one project's edit into another's file.
   const pendingRef = useRef<{ projectId: string; doc: ProjectSettingsDoc } | null>(null)
-  // Same hazard, same fix, for the LOCAL overlay: `saveLocal` is also a whole-document write, so
-  // two local edits in one round-trip need their own pending base independent of the shared one.
-  const pendingLocalRef = useRef<{ projectId: string; local: ProjectLocalSettings | undefined } | null>(
-    null
-  )
 
   useEffect(() => {
     let alive = true
-    setSnapshot('loading')
+    const changed = readProject.current !== projectId
+    readProject.current = projectId
+    if (changed) {
+      generation.current += 1
+      localQueue.current = Promise.resolve(true)
+      localFlight.current = null
+      snapshotRef.current = 'loading'
+    }
+    try {
+      const raw = sessionStorage.getItem(intentKey)
+      localIntent.current = raw ? JSON.parse(raw) : null
+      if (localIntent.current) setLocalError('A local edit is retained in this tab. Retry its original operation.')
+      else if (changed) setLocalError(null)
+    } catch { setLocalError('Retained local edit storage is unavailable; no new edit will be sent.') }
+    setSnapshot((last) => !changed && nonce && last !== 'loading' ? last : 'loading')
     // A read only supersedes the pending doc if no write happened while it was in flight;
     // otherwise what we just wrote is still the newer truth. Belt-and-braces: the effect's own
     // cancellation below already drops a read issued before the write in every path the test
@@ -122,17 +138,23 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
     const seqAtStart = writeSeqRef.current
     const settle = (next: ProjectSettingsSnapshot | null): void => {
       if (!alive) return
+      if (writeSeqRef.current !== seqAtStart) return
       if (writeSeqRef.current === seqAtStart) {
         pendingRef.current = null
-        pendingLocalRef.current = null
       }
-      setSnapshot(next)
+      if (next !== null || !nonce) setSnapshot(next)
     }
-    void window.nodeTerminal.projectSettings.read(projectId).then(settle, () => settle(null))
+    void window.nodeTerminal.projectSettings.read(projectId).then((next) => {
+      settle(next)
+      if (alive && next && !localIntent.current) setLocalError(null)
+    }, () => {
+      settle(null)
+      if (alive) setLocalError('Local settings are unavailable. Reload to retry the read; retained edits are not discarded.')
+    })
     return () => {
       alive = false
     }
-  }, [projectId, nonce])
+  }, [projectId, nonce, intentKey])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
 
@@ -163,33 +185,62 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
     [projectId, reload]
   )
 
-  const saveLocal = useCallback(
-    async (
-      update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
-    ): Promise<boolean> => {
-      const pending =
-        pendingLocalRef.current?.projectId === projectId ? pendingLocalRef.current : null
+  const retryLocal = useCallback((): Promise<boolean> => {
+    if (localFlight.current) return localFlight.current
+    const intent = localIntent.current
+    if (!intent || intent.projectId !== projectId || currentProject.current !== projectId) return Promise.resolve(false)
+    const gen = generation.current
+    const run = (async () => {
+      try {
+        const result = await window.nodeTerminal.projectSettings.updateLocal(projectId, intent.request)
+        if (currentProject.current !== projectId || generation.current !== gen) return false
+        if (result.operationId !== intent.request.operationId || !['committed', 'already-applied'].includes(result.kind) ||
+            !result.receiptRevision || !result.current || result.current.projectId !== projectId) {
+          setLocalError(`${result.kind ?? 'unavailable'}: ${result.message ?? 'The edit is retained; retry the same operation.'}`)
+          return false
+        }
+        const previous = snapshotRef.current
+        if (!previous || previous === 'loading') return false
+        const next = { ...previous, local: result.current.local,
+          localBase: { clientId: result.current.clientId, indexRevision: result.current.indexRevision } }
+        writeSeqRef.current += 1
+        snapshotRef.current = next
+        setSnapshot(next)
+        sessionStorage.removeItem(intentKey)
+        localIntent.current = null
+        setLocalError(null)
+        invalidateProjectLaunchInfo(projectId)
+        void ensureProjectLaunchInfo(projectId)
+        return true
+      } catch (error) {
+        if (currentProject.current === projectId) setLocalError(`unavailable: ${String(error)}. The edit and operation are retained.`)
+        return false
+      }
+    })()
+    localFlight.current = run
+    void run.finally(() => { if (localFlight.current === run) localFlight.current = null })
+    return run
+  }, [projectId, intentKey])
+
+  const saveLocal = useCallback((update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined): Promise<boolean> => {
+    const run = localQueue.current.then(async () => {
+      if (currentProject.current !== projectId) return false
+      // No new operation can pass an unresolved intent. Explicit retry uses its original ID.
+      if (localIntent.current) { setLocalError('An earlier local edit is retained. Retry it before submitting another edit.'); return false }
       const snap = snapshotRef.current
-      // Same refusal as `saveShared`, same reason: the local overlay is a whole-document write too,
-      // so an updater handed `undefined` because nothing has been READ yet (rather than because the
-      // overlay is genuinely empty) would erase this machine's overrides for every other family.
-      if (!pending && (snap === 'loading' || snap === null)) return false
-      const current = pending ? pending.local : (snap as ProjectSettingsSnapshot).local
-      const next = update(current)
-      const ok = await window.nodeTerminal.projectSettings.updateLocal(projectId, next)
-      if (!ok) return false
-      // Advance the merge base NOW, not when the re-read lands: the next blur may arrive first.
-      writeSeqRef.current += 1
-      pendingLocalRef.current = { projectId, local: next }
-      reload()
-      // A local overlay change can flip which value (local vs shared) a launch would consume —
-      // same re-warm as `saveShared`.
-      invalidateProjectLaunchInfo(projectId)
-      void ensureProjectLaunchInfo(projectId)
-      return true
-    },
-    [projectId, reload]
-  )
+      if (!snap || snap === 'loading' || !snap.localBase) { setLocalError('Local settings have no acknowledged base; reload to retry the read.'); return false }
+      try {
+        if (sessionStorage.getItem(intentKey)) { setLocalError('A retained local request must settle first.'); return false }
+        const next = update(snap.local), changes = localSettingsDelta(snap.local, next)
+        if (!changes.length) return true
+        localIntent.current = { projectId, request: { ...snap.localBase, projectId, operationId: crypto.randomUUID(), changes } }
+        sessionStorage.setItem(intentKey, JSON.stringify(localIntent.current))
+        return await retryLocal()
+      } catch (error) { setLocalError(String(error)); return false }
+    })
+    localQueue.current = run
+    return run
+  }, [projectId, retryLocal, intentKey])
 
   const resolved = useMemo(
     () =>
@@ -199,5 +250,5 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
     [snapshot]
   )
 
-  return { snapshot, resolved, saveShared, saveLocal, reload }
+  return { snapshot, resolved, saveShared, saveLocal, reload, localError, retryLocal }
 }

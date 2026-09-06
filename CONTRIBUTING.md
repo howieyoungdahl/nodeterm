@@ -515,6 +515,12 @@ and instruction installation; temporary test paths must never reach live provide
 
 ## Testing
 
+Local project overlays use caller-enrolled, index-only leaf deltas and durable receipts.
+Never turn a failed local edit into a new operation or a speculative host-map update.
+The old boolean IPC route returns literal false; the typed route is distinct so stale clients
+cannot mistake a refusal object for success. Preserve unknown fields and retained target history;
+see `docs/project-reconciliation.md` for metadata read, retry and compatibility boundaries.
+
 Project reconciliation must retain a committed raw common base independently of pending renderer
 edits. Unknown fields need a raw-base overlay before typed serialization; a conflict preview is not
 a writable resolution. The revision-bound adapters and their explicit rollout limits are documented in

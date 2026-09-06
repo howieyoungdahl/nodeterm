@@ -350,6 +350,11 @@ function EditableProjectSection({
           }
         />
       </SearchableRow>
+      {settings.localError ? <div role="status" className="text-[12px] text-[color:var(--warn)]">
+        {settings.localError}
+        <button type="button" onClick={() => { void settings.retryLocal() }}>Retry retained local edit</button>
+        <button type="button" onClick={settings.reload}>Reload settings</button>
+      </div> : null}
       <ProjectFamilyEditors
         projectId={project.id}
         snapshot={snapshot}
@@ -366,6 +371,7 @@ function EditableProjectSection({
         ssh={Boolean(project.ssh)}
         saveShared={settings.saveShared}
         saveLocal={settings.saveLocal}
+        localError={settings.localError}
         reload={settings.reload}
       />
     </SettingsSection>

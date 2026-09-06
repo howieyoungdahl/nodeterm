@@ -236,6 +236,43 @@ synthetic fixture evidence outside source control.
 
 ## Combined fork recovery prototype (2026-09-05)
 
+### Local project-settings metadata
+
+The settings panel's read now enrolls an exact raw v3 index and matching local projection,
+without loading/saving a canvas. `project-settings:update-local-reconciled` accepts only that
+caller/base, project ID, stable operation ID and permitted local leaf changes. The old
+`project-settings:update-local` channel always returns literal `false`, never a truthy outcome
+object. Both Desktop preload and browser bridge use the new typed channel.
+
+Only known setup/worktree/agent/terminal fields and ignore-shared switches are writable. Environment
+entries have individual validated keys; neither editing nor clearing an environment replaces unseen
+entries. `undefined` in the editor becomes known-leaf removals, never an unknown-extension reset.
+Raw root/index/entry siblings, local view fields, settings caches and future extension fields survive.
+No shared-file write, SSH healing, project creation, execution or session control is performed.
+The shared preview reads a local shared file or retained SSH cache; local shared write revision and
+conflict checks remain unchanged. Internal local-settings consumers read the current index, never a
+speculative host map. Server "This machine" means the host's shared index, not browser preferences.
+
+The existing cooperative coordinator supplies enrollment storage, immutable versions, writer locks,
+common-base merging and receipts. A checkpoint of retained versions taken before each enrolled read
+lets the publication guard inspect every subsequently retained observation for deletion, duplicate
+membership, relocation/reuse or tombstones, including observed ABA with identical final bytes.
+Pruned/corrupt/redirected or oversized evidence refuses. Enumeration stops at 4096+1 entries;
+descriptor reads consume at most their remaining byte budget plus one sentinel (32 MiB aggregate
+history/enrollment, 1 MiB immutable wire intent). This is not hostile same-user filesystem isolation:
+unobserved external edit-and-restore transitions cannot be reconstructed, and lock recovery is not
+implemented. No history is pruned or lock cleared by this adapter.
+
+Only a complete durable receipt with matching retained candidate supports acknowledgment. A historical
+receipt is separate from the fresh enrolled local read returned for the next edit; an unavailable or
+changed target does not receive old local values. Busy/conflict/unknown results retain the edit and
+immutable request. The panel catches IPC rejection, displays the reason and offers explicit retry;
+it serializes subsequent edits on acknowledgments, not speculative bases. Same-tab session storage
+retains pending operations across reload/remount; lost/cleared browser storage and abandoned locks
+still require explicit recovery. A conflict cannot be overwritten by retrying with a fresh ID.
+Opaque enrollment is an operator-read binding, not an authenticated agent principal. Desktop/mobile/
+Windows/live acceptance is not established by the disposable registered-core and mounted-hook tests.
+
 The local recovery composition retains the remote-navigation and Server branches alongside
 D04/D09/D11 and PR23–25. Its actual Flow projection must preserve `controlSize`, `role`,
 `taskSummary`, `taskFrame`, `pinned`, `manualPlacement`, `compactRect` and `appearance`;

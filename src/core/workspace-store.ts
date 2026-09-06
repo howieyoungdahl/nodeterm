@@ -277,12 +277,13 @@ export class WorkspaceStore {
     platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
       typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
     platform().handle(IPC.projectSettingsRead, (projectId: unknown) =>
-      typeof projectId === 'string' ? this.readProjectSettings(projectId) : null)
+      typeof projectId === 'string' ? this.readAcknowledgedProjectSettings(projectId) : null)
     platform().handle(IPC.projectSettingsWriteShared, (projectId: unknown, doc: ProjectSettingsDoc) =>
       typeof projectId === 'string' ? this.writeProjectSettings(projectId, doc) : false)
-    platform().handle(IPC.projectSettingsUpdateLocal,
-      (projectId: unknown, local: ProjectLocalSettings | undefined) =>
-        typeof projectId === 'string' ? this.updateLocalProjectSettings(projectId, local) : false)
+    // Stale clients interpret any object as true. Never send typed refusals on their boolean wire.
+    platform().handle(IPC.projectSettingsUpdateLocal, () => false)
+    platform().handle(IPC.projectSettingsUpdateLocalReconciled,
+      (projectId: string, request: unknown) => this.updateLocalProjectSettings(projectId, request))
   }
 
   /**
@@ -615,9 +616,12 @@ export class WorkspaceStore {
    * rare enough (a panel opening, a launch) that a stale answer would cost more than the read does.
    */
   async readProjectSettings(projectId: string): Promise<ProjectSettingsState | null> {
-    const e = this.index?.entries.find((x) => x.id === projectId)
+    // Local overlays are index metadata: never consume a failed edit's speculative host map,
+    // or let a late receipt roll a newer writer's overlay back. This read grants no write base.
+    const index = JSON.parse(await readPublicationFile(this.indexPath)) as WorkspaceIndexV3
+    const e = index.entries?.find((x) => x.id === projectId)
     if (!e) return null
-    const local = this.localSettingsByProject.get(projectId)
+    const local = sanitizeProjectLocalSettings(e.localSettings)
     if (e.ssh) return this.readSshSettings(projectId, e.ssh, local)
     // An inline canvas has no folder, so there is no shared document to have.
     if (!e.cwd) return { shared: null, local }
@@ -837,22 +841,27 @@ export class WorkspaceStore {
   }
 
   /**
-   * Replaces this machine's overlay for one project (undefined = clear it) and persists the index
-   * NOW, without waiting for a canvas save: a settings edit is often the only thing the user did in
-   * that session, and an overlay that lives only in memory until the next node is dragged is an
-   * overlay that quietly disappears when the app quits.
+   * Index-only caller-bound delta. Never changes host maps speculatively or invokes the legacy
+   * whole-index serializer. Unknown/failed results retain the same immutable operation.
    */
   async updateLocalProjectSettings(
     projectId: string,
-    local: ProjectLocalSettings | undefined
-  ): Promise<boolean> {
-    const e = this.index?.entries.find((x) => x.id === projectId)
-    if (!e) return false
-    const clean = local === undefined ? undefined : sanitizeProjectLocalSettings(local)
-    if (clean && Object.keys(clean).length) this.localSettingsByProject.set(projectId, clean)
-    else this.localSettingsByProject.delete(projectId)
-    await this.persistIndexNow()
-    return true
+    request: unknown
+  ) {
+    return this.reconciliation().localSettings().update(projectId, request)
+  }
+
+  async readAcknowledgedProjectSettings(projectId: string): Promise<ProjectSettingsSnapshot | null> {
+    const view = await this.reconciliation().localSettings().read(projectId)
+    if (!view) return null
+    // Read only the shared local file/cache. This metadata read cannot initiate SSH healing.
+    const sharedRaw = view.entry.cwd && !view.entry.ssh
+      ? await fs.readFile(path.join(view.entry.cwd, PROJECT_DIR, 'settings.json'), 'utf8').catch(() => undefined) : undefined
+    const read = sharedRaw === undefined ? undefined : parseProjectSettingsFile(sharedRaw)
+    const cached = view.entry.ssh && view.entry.settingsCache ? parseProjectSettingsFile(JSON.stringify(view.entry.settingsCache)) : undefined
+    return { local: view.local, localBase: { clientId: view.clientId, indexRevision: view.indexRevision },
+      shared: read?.status === 'ok' ? read.file : cached?.status === 'ok' ? cached.file : null,
+      ...(read?.status === 'conflict' ? { conflict: true as const } : {}) }
   }
 
   /** Rewrites the CURRENT index with the settings maps applied. On `saveChain` like every other

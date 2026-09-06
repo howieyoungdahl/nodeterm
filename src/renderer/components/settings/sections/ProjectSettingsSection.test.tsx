@@ -27,7 +27,8 @@ function project(over: Partial<Project> = {}): Project {
   }
 }
 
-const EMPTY_SNAPSHOT: ProjectSettingsSnapshot = { shared: null, local: undefined }
+const BASE = { clientId: 'fixture-client', indexRevision: 'a'.repeat(64) }
+const EMPTY_SNAPSHOT: ProjectSettingsSnapshot = { shared: null, localBase: BASE, local: undefined }
 
 describe('ProjectSettingsSection', () => {
   let root: Root
@@ -72,11 +73,12 @@ describe('ProjectSettingsSection', () => {
   }
 
   beforeEach(() => {
+    sessionStorage.clear()
     host = document.createElement('div')
     document.body.appendChild(host)
     read = vi.fn(async () => EMPTY_SNAPSHOT)
     writeShared = vi.fn(async () => true)
-    updateLocal = vi.fn(async () => true)
+    updateLocal = vi.fn(async (_id, request) => ({ kind: 'committed', operationId: request.operationId, receiptRevision: 'b'.repeat(64), current: { projectId: 'p1', ...BASE, local: Object.fromEntries(request.changes.filter((c: any) => !c.remove).map((c: any) => [c.family, { [c.key]: c.value }])) } }))
     dirty = vi.fn<() => void>()
     unregisterDirty = registerWorkspaceDirty(dirty)
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal = {
@@ -178,7 +180,7 @@ describe('ProjectSettingsSection', () => {
   })
 
   it('shows the conflict banner when the shared file is git-conflicted', async () => {
-    read = vi.fn(async () => ({ shared: null, local: undefined, conflict: true }) as ProjectSettingsSnapshot)
+    read = vi.fn(async () => ({ shared: null, localBase: BASE, local: undefined, conflict: true }) as ProjectSettingsSnapshot)
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
     await mountSection()
     expect(host.textContent).toContain('conflict')
@@ -232,7 +234,27 @@ describe('ProjectSettingsSection', () => {
     const local = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
     await typeInto(local, '/bin/zsh')
     await blur(local)
-    expect(updateLocal).toHaveBeenCalledWith('p1', { terminal: { shell: '/bin/zsh' } })
+    expect(updateLocal).toHaveBeenCalledWith('p1', expect.objectContaining({ ...BASE, projectId: 'p1', changes: [{ family: 'terminal', key: 'shell', value: '/bin/zsh' }] }))
+  })
+
+  it('settles an IPC rejection visibly and retains the typed edit and operation for explicit retry', async () => {
+    updateLocal.mockRejectedValue(new Error('disconnected'))
+    await mountSection()
+    const local = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
+    await typeInto(local, '/bin/zsh'); await blur(local)
+    expect(host.textContent).toContain('Could not save this override')
+    expect(host.textContent).toContain('Retry retained local edit')
+    expect(local.value).toBe('/bin/zsh')
+    const retained = JSON.parse(sessionStorage.getItem('nodeterm.local-settings.intent.p1')!)
+    expect(retained.request).toEqual(updateLocal.mock.calls[0][1])
+    expect(retained.request.changes).toEqual([{ family: 'terminal', key: 'shell', value: '/bin/zsh' }])
+    updateLocal.mockImplementation(async (_id, request) => ({ kind: 'already-applied', operationId: request.operationId,
+      receiptRevision: 'b'.repeat(64), current: { ...BASE, projectId: 'p1', local: { terminal: { shell: '/bin/zsh' } } } }))
+    const retry = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Retry retained local edit')!
+    await click(retry)
+    expect(updateLocal.mock.calls[1][1]).toEqual(retained.request)
+    expect(host.textContent).not.toContain('Could not save this override')
+    expect(host.textContent).not.toContain('Retry retained local edit')
   })
 
   it('toggles a family ignoreShared Switch via saveLocal, merged with any existing local doc', async () => {
@@ -242,13 +264,13 @@ describe('ProjectSettingsSection', () => {
     )!
     expect(toggle.getAttribute('aria-checked')).toBe('false')
     await click(toggle)
-    expect(updateLocal).toHaveBeenCalledWith('p1', { ignoreShared: { setup: true } })
+    expect(updateLocal).toHaveBeenCalledWith('p1', expect.objectContaining({ changes: [{ family: 'ignoreShared', key: 'setup', value: true }] }))
   })
 
   it('flips the shared row\'s provenance note to "Overridden on this machine" when a local value wins', async () => {
     read = vi.fn(async () => ({
       shared: { version: 1, rev: 1, savedAt: 't', terminal: { shell: '/bin/bash' } },
-      local: { terminal: { shell: '/bin/zsh' } }
+      localBase: BASE, local: { terminal: { shell: '/bin/zsh' } }
     }))
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
     await mountSection()
@@ -269,7 +291,7 @@ describe('ProjectSettingsSection', () => {
   })
 
   it('does not disable the local editor or ignoreShared switch while the shared file is conflicted', async () => {
-    read = vi.fn(async () => ({ shared: null, local: undefined, conflict: true }) as ProjectSettingsSnapshot)
+    read = vi.fn(async () => ({ shared: null, localBase: BASE, local: undefined, conflict: true }) as ProjectSettingsSnapshot)
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
     await mountSection()
     const sharedShell = host.querySelector<HTMLInputElement>('#project-terminal-shell-p1')!
@@ -309,22 +331,19 @@ describe('ProjectSettingsSection', () => {
   })
 
   it('preserves an existing local family when a different local field is committed', async () => {
-    read = vi.fn(async () => ({ shared: null, local: { agents: { launchCmd: 'x' } } }) as ProjectSettingsSnapshot)
+    read = vi.fn(async () => ({ shared: null, localBase: BASE, local: { agents: { launchCmd: 'x' } } }) as ProjectSettingsSnapshot)
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
     await mountSection()
     const local = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
     await typeInto(local, '/bin/zsh')
     await blur(local)
-    expect(updateLocal).toHaveBeenCalledWith('p1', {
-      agents: { launchCmd: 'x' },
-      terminal: { shell: '/bin/zsh' }
-    })
+    expect(updateLocal).toHaveBeenCalledWith('p1', expect.objectContaining({ changes: [{ family: 'terminal', key: 'shell', value: '/bin/zsh' }] }))
   })
 
   it('merges a shared textarea blur into the whole shared doc, preserving other families', async () => {
     read = vi.fn(async () => ({
       shared: { version: 1, rev: 1, savedAt: 't', agents: { launchCmd: 'y' } },
-      local: undefined
+      localBase: BASE, local: undefined
     }) as ProjectSettingsSnapshot)
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
     await mountSection()
@@ -402,7 +421,7 @@ describe('ProjectSettingsSection', () => {
     expect(local.disabled).toBe(false)
     await typeInto(local, '/bin/zsh')
     await blur(local)
-    expect(updateLocal).toHaveBeenCalledWith('p1', { terminal: { shell: '/bin/zsh' } })
+    expect(updateLocal).toHaveBeenCalledWith('p1', expect.objectContaining({ ...BASE, projectId: 'p1', changes: [{ family: 'terminal', key: 'shell', value: '/bin/zsh' }] }))
   })
 
   it('gives every local row an accessible name of its own, so it never duplicates its shared twin', async () => {
@@ -537,14 +556,15 @@ describe('useProjectSettings', () => {
   }
 
   beforeEach(() => {
+    sessionStorage.clear()
     host = document.createElement('div')
     document.body.appendChild(host)
     read = vi.fn(async () => ({
       shared: { version: 1, rev: 3, savedAt: 't', terminal: { shell: '/bin/bash', theme: 'dark' } },
-      local: undefined
+      localBase: BASE, local: undefined
     }))
     writeShared = vi.fn(async () => true)
-    updateLocal = vi.fn(async () => true)
+    updateLocal = vi.fn(async (_id, request) => ({ kind: 'committed', operationId: request.operationId, receiptRevision: 'b'.repeat(64), current: { projectId: 'p1', ...BASE, local: Object.fromEntries(request.changes.filter((c: any) => !c.remove).map((c: any) => [c.family, { [c.key]: c.value }])) } }))
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal = {
       projectSettings: { read, writeShared, updateLocal },
       workspace: { save: vi.fn() }
@@ -559,7 +579,7 @@ describe('useProjectSettings', () => {
   it('resolves local over shared with provenance', async () => {
     read.mockResolvedValue({
       shared: { version: 1, rev: 3, savedAt: 't', terminal: { shell: '/bin/bash', theme: 'dark' } },
-      local: { terminal: { theme: 'light' } }
+      localBase: BASE, local: { terminal: { theme: 'light' } }
     })
     await mount()
     expect(hook.resolved.terminal.shell).toEqual({ value: '/bin/bash', source: 'shared' })
@@ -599,7 +619,7 @@ describe('useProjectSettings', () => {
     // document would make B's whole-document write silently delete A's shell.
     const first: ProjectSettingsSnapshot = {
       shared: { version: 1, rev: 1, savedAt: 't', terminal: { shell: '/bin/bash' } },
-      local: undefined
+      localBase: BASE, local: undefined
     }
     let gate: (v: ProjectSettingsSnapshot) => void = () => {}
     read.mockResolvedValueOnce(first).mockReturnValue(
@@ -609,7 +629,7 @@ describe('useProjectSettings', () => {
     await act(async () => {
       await hook.saveShared({ terminal: { shell: '/bin/fish' } })
     })
-    expect(hook.snapshot).toBe('loading') // the re-read is gated open
+    expect(hook.snapshot).not.toBe('loading') // retain the last acknowledged view while refreshing
     await act(async () => {
       await hook.saveShared({ setup: { waitForSetup: true } })
     })
@@ -625,7 +645,7 @@ describe('useProjectSettings', () => {
   it('drops a field cleared to undefined, and the family with it', async () => {
     read.mockResolvedValue({
       shared: { version: 1, rev: 1, savedAt: 't', terminal: { shell: '/bin/bash' } },
-      local: undefined
+      localBase: BASE, local: undefined
     })
     await mount()
     await act(async () => {
@@ -645,16 +665,16 @@ describe('useProjectSettings', () => {
     expect(read).toHaveBeenCalledTimes(1)
   })
 
-  it('passes the local overlay through whole and re-reads', async () => {
+  it('sends only local leaves and consumes the acknowledged fresh projection', async () => {
     await mount()
     await act(async () => {
       await hook.saveLocal(() => ({ terminal: { shell: '/bin/zsh' }, ignoreShared: { agents: true } }))
     })
-    expect(updateLocal).toHaveBeenCalledWith('p1', {
-      terminal: { shell: '/bin/zsh' },
-      ignoreShared: { agents: true }
-    })
-    expect(read).toHaveBeenCalledTimes(2)
+    expect(updateLocal).toHaveBeenCalledWith('p1', expect.objectContaining({ changes: [
+      { family: 'terminal', key: 'shell', value: '/bin/zsh' },
+      { family: 'ignoreShared', key: 'agents', value: true }
+    ] }))
+    expect(read).toHaveBeenCalledTimes(1)
   })
 
   it('keeps a local save that is still being re-read as the merge base for the next local save', async () => {
@@ -663,7 +683,7 @@ describe('useProjectSettings', () => {
     // local doc would make B's whole-document write silently drop A's edit.
     const first: ProjectSettingsSnapshot = {
       shared: { version: 1, rev: 1, savedAt: 't', terminal: { shell: '/bin/bash' } },
-      local: { agents: { launchCmd: 'x' } }
+      localBase: BASE, local: { agents: { launchCmd: 'x' } }
     }
     let gate: (v: ProjectSettingsSnapshot) => void = () => {}
     read.mockResolvedValueOnce(first).mockReturnValue(
@@ -673,15 +693,11 @@ describe('useProjectSettings', () => {
     await act(async () => {
       await hook.saveLocal((current) => ({ ...current, terminal: { shell: '/bin/zsh' } }))
     })
-    expect(hook.snapshot).toBe('loading') // the re-read is gated open
+    expect(hook.snapshot).not.toBe('loading') // retain the last acknowledged view while refreshing
     await act(async () => {
       await hook.saveLocal((current) => ({ ...current, worktree: { basePath: '/tmp/wt' } }))
     })
-    expect(updateLocal).toHaveBeenLastCalledWith('p1', {
-      agents: { launchCmd: 'x' },
-      terminal: { shell: '/bin/zsh' },
-      worktree: { basePath: '/tmp/wt' }
-    })
+    expect(updateLocal).toHaveBeenLastCalledWith('p1', expect.objectContaining({ changes: [{ family: 'worktree', key: 'basePath', value: '/tmp/wt' }] }))
     await act(async () => {
       gate(first)
     })
@@ -781,7 +797,7 @@ describe('ProjectSettingsSection — setup run controls', () => {
 
   const snapshotWith = (setup: Record<string, unknown>): ProjectSettingsSnapshot => ({
     shared: { version: 1, rev: 1, savedAt: '2026-08-19T00:00:00.000Z', setup },
-    local: undefined
+    localBase: BASE, local: undefined
   })
 
   const mountPanel = async (
@@ -814,6 +830,7 @@ describe('ProjectSettingsSection — setup run controls', () => {
   const log = (): HTMLElement | null => host.querySelector('[role="log"]')
 
   beforeEach(() => {
+    sessionStorage.clear()
     host = document.createElement('div')
     document.body.appendChild(host)
     useProjectSetup.setState({ byRunKey: {}, projectRunKey: {}, groupRunKey: {} })
@@ -865,7 +882,7 @@ describe('ProjectSettingsSection — setup run controls', () => {
   })
 
   it('uses the EFFECTIVE value: a machine-local script enables the button with none shared', async () => {
-    await mountPanel({ shared: null, local: { setup: { setupScript: 'local-only.sh' } } })
+    await mountPanel({ shared: null, localBase: BASE, local: { setup: { setupScript: 'local-only.sh' } } })
     expect(button('Run setup').disabled).toBe(false)
   })
 

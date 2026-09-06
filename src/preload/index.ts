@@ -170,8 +170,8 @@ const api: NodeTerminalApi = {
     read: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsRead, projectId),
     writeShared: (projectId: string, doc) =>
       ipcRenderer.invoke(IPC.projectSettingsWriteShared, projectId, doc),
-    updateLocal: (projectId: string, local) =>
-      ipcRenderer.invoke(IPC.projectSettingsUpdateLocal, projectId, local),
+    updateLocal: (projectId: string, request) =>
+      ipcRenderer.invoke(IPC.projectSettingsUpdateLocalReconciled, projectId, request),
     launchInfo: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsLaunchInfo, projectId),
     onTrustChanged: subscribeProjectTrustChanged
   },

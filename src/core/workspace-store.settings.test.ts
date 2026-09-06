@@ -9,6 +9,16 @@ import { ProjectTrustStore, hashTrustContent, localTrustKey } from './project-tr
 import { registerProjectLaunchInfoHandlers } from './project-launch-info-handlers'
 import { projectTrustContent, type ProjectLaunchInfo } from '../shared/project-settings'
 import type { Project, Workspace } from '../shared/types'
+import { localSettingsDelta } from '../shared/local-settings-reconciliation'
+import type { ProjectLocalSettings } from '../shared/project-settings'
+import { randomUUID } from 'node:crypto'
+
+async function updateLocal(store: WorkspaceStore, id: string, local: ProjectLocalSettings | undefined): Promise<boolean> {
+  const snap = await store.readAcknowledgedProjectSettings(id)
+  if (!snap?.localBase) return false
+  const outcome = await store.updateLocalProjectSettings(id, { ...snap.localBase, projectId: id, operationId: randomUUID(), changes: localSettingsDelta(snap.local, local) })
+  return outcome.kind === 'committed'
+}
 
 let userData: string
 let projRoot: string
@@ -101,7 +111,7 @@ describe('project settings — local leg', () => {
   it('local overlay persists across store instances without a canvas save', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
-    await store.updateLocalProjectSettings('p1', { ignoreShared: { setup: true } })
+    expect(await updateLocal(store, 'p1', { ignoreShared: { setup: true } })).toBe(true)
     const store2 = new WorkspaceStore()
     await store2.load()
     const s = await store2.readProjectSettings('p1')
@@ -112,8 +122,11 @@ describe('project settings — local leg', () => {
     const store = new WorkspaceStore()
     const w = ws([project({ cwd: projRoot })])
     await store.save(w)
-    await store.updateLocalProjectSettings('p1', { terminal: { shell: '/bin/fish' } })
-    await store.save(w) // canvas autosave rebuilds the index
+    expect(await updateLocal(store, 'p1', { terminal: { shell: '/bin/fish' } })).toBe(true)
+    const view = await store.loadReconciled()
+    const result = await store.saveReconciled({ clientId: view.clientId, operationId: randomUUID(), indexRevision: view.indexRevision,
+      expected: Object.fromEntries(Object.entries(view.projects).map(([id, p]) => [id, p.revision])), workspace: view.workspace })
+    expect(result.index.kind).toBe('committed') // actual enrolled canvas save retains local metadata
     const idx = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
     expect(idx.entries[0].localSettings).toEqual({ terminal: { shell: '/bin/fish' } })
   })
@@ -122,10 +135,10 @@ describe('project settings — local leg', () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
     const idxPath = path.join(userData, 'workspace.json')
-    await store.updateLocalProjectSettings('p1', { terminal: { shell: '/bin/fish' } })
+    expect(await updateLocal(store, 'p1', { terminal: { shell: '/bin/fish' } })).toBe(true)
     const set = JSON.parse(await fs.readFile(idxPath, 'utf-8'))
     expect(set.entries[0].localSettings).toEqual({ terminal: { shell: '/bin/fish' } })
-    await store.updateLocalProjectSettings('p1', undefined)
+    expect(await updateLocal(store, 'p1', undefined)).toBe(true)
     const idx = JSON.parse(await fs.readFile(idxPath, 'utf-8'))
     expect(idx.entries[0].localSettings).toBeUndefined()
     const s = await store.readProjectSettings('p1')
@@ -146,7 +159,7 @@ describe('project settings — local leg', () => {
   it('an inline (cwd-less) project has no shared doc and cannot be written to', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ id: 'inline1', name: 'inline' })]))
-    await store.updateLocalProjectSettings('inline1', { terminal: { theme: 'dark' } })
+    expect(await updateLocal(store, 'inline1', { terminal: { theme: 'dark' } })).toBe(true)
     const s = await store.readProjectSettings('inline1')
     expect(s?.shared).toBeNull()
     expect(s?.local).toEqual({ terminal: { theme: 'dark' } })
@@ -158,7 +171,7 @@ describe('project settings — local leg', () => {
     await store.save(ws([project({ cwd: projRoot })]))
     expect(await store.readProjectSettings('nope')).toBeNull()
     expect(await store.writeProjectSettings('nope', {})).toBe(false)
-    expect(await store.updateLocalProjectSettings('nope', {})).toBe(false)
+    expect((await store.updateLocalProjectSettings('nope', {})).kind).toBe('publication-refused')
   })
 
   it('a hostile localSettings shape in workspace.json is sanitized on load', async () => {
@@ -371,7 +384,9 @@ describe('project settings IPC registration', () => {
     expect(await handlers['project-settings:write-shared']('p1', { terminal: { shell: '/bin/zsh' } })).toBe(true)
     const snap = (await handlers['project-settings:read']('p1')) as { shared: { terminal?: { shell?: string } } | null }
     expect(snap.shared?.terminal?.shell).toBe('/bin/zsh')
-    expect(await handlers['project-settings:update-local']('p1', { ignoreShared: { setup: true } })).toBe(true)
+    const base = await store.readAcknowledgedProjectSettings('p1')
+    expect(await handlers['project-settings:update-local-reconciled']('p1', { ...base!.localBase, projectId: 'p1', operationId: randomUUID(),
+      changes: [{ family: 'ignoreShared', key: 'setup', value: true }] })).toMatchObject({ kind: 'committed' })
     expect(await handlers['project-settings:read']('nope')).toBeNull()
   })
 })
@@ -415,7 +430,7 @@ describe('project-settings:launch-info', () => {
     // gate — while this machine's own local overlay picks a launchCmd of its own (never gated: a
     // value the user typed locally is their own instruction, not hostile shared input).
     await store.writeProjectSettings('p1', { terminal: { shell: '/bin/zsh' } })
-    await store.updateLocalProjectSettings('p1', { agents: { launchCmd: 'npm run dev' } })
+    expect(await updateLocal(store, 'p1', { agents: { launchCmd: 'npm run dev' } })).toBe(true)
 
     const info = (await fake.handlers['project-settings:launch-info']('p1')) as ProjectLaunchInfo
     expect(info.resolved.agents.launchCmd).toEqual({ value: 'npm run dev', source: 'local' })
