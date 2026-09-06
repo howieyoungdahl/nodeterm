@@ -85,8 +85,17 @@ export function systemUpdateRuntime(config: UpdateConfig): UpdateRuntime {
   }
 }
 
+/**
+ * A restart is admissible when the server has no work in flight: no spawn running or queued and
+ * every delivery queue drained. Connected browsers do NOT block it (operator decision, 2026-09-06): the
+ * service runs with KillMode=process so tmux panes survive, and the renderer's reconnect overlay
+ * reloads the page on the first successful reopen with the same saved layout. Waiting for zero
+ * viewers meant waiting for the operator to stop working, which in practice was never: the staged
+ * release deferred 238 times over a day while one tab stayed open. The cost of restarting under a
+ * viewer is bounded by the renderer's autosave debounce (under a second of unsaved canvas edits).
+ */
 export function mayRestart(health: Health): boolean {
-  return Number.isFinite(health.startedAt) && health.wsClientCount === 0 &&
+  return Number.isFinite(health.startedAt) &&
     health.spawnHandler?.state === 'idle' && health.spawnHandler.active === 0 &&
     health.spawnHandler.queued === 0 && !!health.deliveryQueueDepths &&
     Object.values(health.deliveryQueueDepths).every((depth) => depth === 0)
@@ -234,7 +243,7 @@ export class ServerUpdater {
         return this.status('staged', sha, 'Build completed; reserving activation for the next tick')
       phase = 'preflight'
       const health = await this.runtime.ops('health') as Health
-      if (!mayRestart(health)) return this.status('deferred', sha, 'Canvas viewers or server operations are still active')
+      if (!mayRestart(health)) return this.status('deferred', sha, 'Server operations are still active (spawn in progress or deliveries queued)')
       if (this.runtime.run('systemctl', ['--user', 'show', this.config.service, '-p', 'KillMode', '--value']).trim() !== 'process')
         throw new Error('Service must use KillMode=process to preserve tmux')
       if (this.runtime.run('systemctl', ['--user', 'show', this.config.service, '-p', 'WorkingDirectory', '--value']).trim() !== this.current)
@@ -243,7 +252,8 @@ export class ServerUpdater {
       const panes = this.panes()
       const nodes = await this.nodes()
       await this.snapshot(sha, panes, nodes)
-      // Recheck after the filesystem reads. Any unreadable health or newly connected browser defers.
+      // Recheck after the filesystem reads. Unreadable health, new server activity or a server that
+      // restarted underneath the snapshot defers; a browser connecting meanwhile does not.
       const finalHealth = await this.runtime.ops('health') as Health
       if (!mayRestart(finalHealth) || finalHealth.startedAt !== health.startedAt)
         return this.status('deferred', sha, 'Server activity changed during preflight')
