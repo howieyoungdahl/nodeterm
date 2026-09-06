@@ -13,15 +13,20 @@ describe('/opsapi', () => {
   let spawn: SpawnHandlerState
   let adoptResult: OpsAdoptResult
   let adoptCalls = 0
+  let sweepForce: boolean | undefined
 
   beforeEach(async () => {
     adoptCalls = 0
+    sweepForce = undefined
     adoptResult = { adopted: [], skipped: [], live: true }
     spawn = new SpawnHandlerState({ now: () => now, wedgeAfterMs: 100 })
     const handler = createOpsApiHandler({
       token: 'ops-secret',
       nodes: async () => [],
-      sweep: async (dryRun) => ({ dryRun, affectedIds: ['dead-a'], scanned: 2 }),
+      sweep: async (dryRun, force) => {
+        sweepForce = force
+        return { dryRun, affectedIds: ['dead-a'], scanned: 2 }
+      },
       remove: async (id, force) => ({ ok: true, removedIds: [id], forced: force }),
       adoptOrphans: async () => {
         adoptCalls += 1
@@ -82,6 +87,31 @@ describe('/opsapi', () => {
     })
     expect(good.status).toBe(200)
     expect(await good.json()).toEqual({ dryRun: true, affectedIds: ['dead-a'], scanned: 2 })
+  })
+
+  it('defaults the sweep force gate to false and passes an explicit one through', async () => {
+    const plain = await fetch(`${base}/opsapi/sweep`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ dryRun: false })
+    })
+    expect(plain.status).toBe(200)
+    expect(sweepForce).toBe(false)
+
+    const forced = await fetch(`${base}/opsapi/sweep`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ dryRun: false, force: true })
+    })
+    expect(forced.status).toBe(200)
+    expect(sweepForce).toBe(true)
+
+    const bad = await fetch(`${base}/opsapi/sweep`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ dryRun: false, force: '1' })
+    })
+    expect(bad.status).toBe(400)
   })
 
   it('passes the explicit force gate to one-card deletion', async () => {

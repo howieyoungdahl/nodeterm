@@ -47,6 +47,18 @@ export type ServerConfig = {
    */
   deadCardReapMinutes?: number
   /**
+   * Mass-sweep guard: dead terminal cards in a SINGLE sweep pass at or above which the sweep
+   * refuses the whole pass, removes nothing, and logs one line. Default 5; zero disables this
+   * rule (the fraction rule below still applies). `POST /opsapi/sweep {"force":true}` overrides.
+   */
+  deadCardReapMassLimit?: number
+  /**
+   * Mass-sweep guard, share form: dead-of-scanned ratio (0..1) at or above which the sweep
+   * refuses. Default 0.5; zero disables this rule. Needs at least two dead cards to trip, so a
+   * one-card canvas is still reapable.
+   */
+  deadCardReapMassFraction?: number
+  /**
    * Reverse-proxy SSO trust (issue #29): requests whose TCP peer is inside `nets` and
    * which carry `header` (non-empty) are authenticated without a session cookie.
    * Absent = feature off (default). See src/server/proxy-trust.ts and docs/SERVER.md.
@@ -135,6 +147,33 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
       ? Math.min(parsedDeadCardReapMinutes, 7 * 24 * 60)
       : 30
 
+  // The guard's two thresholds. Same degrade-to-default rule as the interval above: a hand-edited
+  // service env that cannot be read as a number must never end up SWEEPING MORE than the shipped
+  // default, so anything unparseable, negative, or (for the fraction) outside 0..1 falls back.
+  const massLimitRaw = pick(
+    'dead-card-reap-mass-limit',
+    'NODETERM_DEAD_CARD_REAP_MASS_LIMIT',
+    '5'
+  ).trim()
+  const massLimitParsed = Number(massLimitRaw)
+  const deadCardReapMassLimit =
+    massLimitRaw !== '' && Number.isFinite(massLimitParsed) && massLimitParsed >= 0
+      ? Math.floor(massLimitParsed)
+      : 5
+  const massFractionRaw = pick(
+    'dead-card-reap-mass-fraction',
+    'NODETERM_DEAD_CARD_REAP_MASS_FRACTION',
+    '0.5'
+  ).trim()
+  const massFractionParsed = Number(massFractionRaw)
+  const deadCardReapMassFraction =
+    massFractionRaw !== '' &&
+    Number.isFinite(massFractionParsed) &&
+    massFractionParsed >= 0 &&
+    massFractionParsed <= 1
+      ? massFractionParsed
+      : 0.5
+
   // Headless binds nothing, so the "plain HTTP on a public interface" hazard the loopback refusal
   // guards against does not apply — a stray NODETERM_HOST must not fail a headless boot.
   if (!isLoopback(host) && !insecureHttp && !headless) {
@@ -175,6 +214,8 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     trustProxy,
     headless,
     canvasControl,
-    deadCardReapMinutes
+    deadCardReapMinutes,
+    deadCardReapMassLimit,
+    deadCardReapMassFraction
   }
 }

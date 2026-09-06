@@ -42,6 +42,9 @@ export class ServerDeadCardReaper {
     this.running = true
     try {
       const result = await this.deps.sweep(false)
+      // A refused pass removed nothing; the engine already printed the one loud line for it, and
+      // `affectedIds` there is the set it DECLINED to touch — reporting it as reaped would be a lie.
+      if (result.refused) return
       if (result.affectedIds.length) {
         const info = this.deps.info ?? console.info
         info(
