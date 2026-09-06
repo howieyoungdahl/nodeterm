@@ -213,6 +213,34 @@ server lifecycle work: generated files can be overwritten at app boot or SSH rec
 client-only refresh must account for that reversion boundary until the durable bundle contains the
 same source. Per-launch launchers are not part of this resolver change.
 
+## Codex hook payload identity
+
+Tool-shell environment recovery and hook delivery are separate paths. Codex 0.153.4's
+[command-hook runner](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/hooks/src/engine/command_runner.rs)
+replays a session environment snapshot; its thread identifier is serialized in the hook's JSON
+stdin. Do not assume a tool's measured `CODEX_THREAD_ID` also reaches a daemon-spawned hook.
+
+The generated Codex hook reads its body once before the missing-node gate and parses only the
+top-level `session_id`, using `jq` or Node. That identifier is a lookup key for the existing
+account-scoped binding resolver, not a node identifier or an authorization grant. An explicit
+invalid identifier or a disagreement with `CODEX_THREAD_ID` refuses with a fixed diagnostic,
+empty stdout and exit 0. Older envelopes that omit the field retain their existing environment
+path. When neither JSON parser is available, an existing environment identity still works;
+payload-only recovery reports the missing parser and makes no request. Other providers' scripts
+do not acquire this payload parser.
+
+Payload-only recovery finishes the existing bounded hook POST before the hook process exits, so
+an immediate canvas-control tool does not race the registration it needs. Normal environment-based
+hooks keep their background POST. Endpoint failures retain the existing per-request timeout and
+bounded fallback behavior; the hook never starts or repairs a daemon.
+
+This matters for a Codex launched in a plain terminal: a successful control request verifies the
+node token, but does not identify its agent in the status mirror. The verified hook supplies that
+runtime identity, allowing the existing Server canvas-control capability check to succeed. No
+plain-terminal default, creator-ownership exception, server restart or daemon replacement is
+needed. The composed disposable-server test covers the hook, mirror and factory together;
+production activation remains a separate operator step.
+
 ## Supply-chain guard
 
 Account ids arrive from hand-editable `settings.json` / `project.json`. Every id passes

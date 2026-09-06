@@ -275,6 +275,13 @@ commands exit 1. The shell checks protected-record shape/scope, not HMAC signatu
 `docs/shared-codex-node-identity.md` for account semantics and exact comparisons. Keep the SSH shim
 constants machine-neutral: a local record root must never be baked into a remote host's copy.
 
+Codex hooks must also recover a mapped session from their JSON stdin before the missing-node
+gate. A daemon hook need not carry the tool shell's `CODEX_THREAD_ID`. Parse the top-level
+`session_id` with a real JSON parser, retain the original body for delivery, and pass that ID
+through the same scoped resolver. Payload/env disagreements refuse; a payload is not authority.
+Keep no-parser direct launches compatible and make payload-only unavailability explicit. Other
+providers must not inherit Codex's payload bootstrap.
+
 **A stream error is not a throw you can catch.** When a write to `process.stdout`/`stderr` fails —
 `EPIPE` down a closed pipe, `EIO` after macOS revokes a closed terminal's tty — node reports it by
 emitting `'error'` on the stream a tick later, and the default for an unhandled `'error'` event is
