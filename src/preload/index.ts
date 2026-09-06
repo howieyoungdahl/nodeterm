@@ -137,6 +137,9 @@ const api: NodeTerminalApi = {
     }
   },
   workspace: {
+    loadReconciled: (clientId?: string) => ipcRenderer.invoke(IPC.workspaceLoadReconciled, clientId),
+    saveReconciled: (request: import('../shared/workspace-reconciliation').WorkspaceRevisionRequest) =>
+      ipcRenderer.invoke(IPC.workspaceSaveReconciled, request),
     load: () => ipcRenderer.invoke(IPC.workspaceLoad),
     save: (workspace: Workspace) => ipcRenderer.invoke(IPC.workspaceSave, workspace),
     probeFolder: (folder: string) => ipcRenderer.invoke(IPC.workspaceProbeFolder, folder),

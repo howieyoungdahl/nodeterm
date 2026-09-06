@@ -33,6 +33,19 @@ const project = (nodes: CanvasNodeState[], over: Partial<Project> = {}): Project
 const phoneNode = node('term-mmm-9f2a', { title: 'Mobile session', agentId: 'claude' })
 
 describe('decideExternalChange', () => {
+  it('ignores machine-local overlay changes while retaining a shared-field conflict', () => {
+    const base = project([node('term-a-1')])
+    const incoming = project(base.nodes, {
+      breadcrumbs: [{ nodeId: 'term-a-1', at: 42, note: 'camera only' }],
+      capabilityAck: { agentMessaging: 'declined' },
+      closedAt: 100,
+      closedSessions: []
+    })
+    expect(decideExternalChange({ dirty: true, base, incoming, liveNodeIds: ['term-a-1'] }).kind).toBe('ignore')
+    expect(decideExternalChange({ dirty: true, base, incoming: { ...incoming, name: 'Shared rename' },
+      liveNodeIds: ['term-a-1'] }).kind).toBe('conflict')
+  })
+
   it('reloads wholesale when there are no unsaved local edits (unchanged behavior)', () => {
     const base = project([node('term-a-1')])
     const incoming = project([node('term-a-1'), phoneNode])
