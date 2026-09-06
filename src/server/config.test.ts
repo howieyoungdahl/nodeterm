@@ -103,7 +103,9 @@ describe('resolveConfig', () => {
   })
 
   it('mass-sweep guard degrades a malformed edit to the default, never to a wider sweep', () => {
-    for (const value of ['', 'nope', '-1', 'NaN', 'Infinity']) {
+    // '0.5' and '0.7' are the fraction flag's vocabulary typed into the count flag; they used to
+    // floor to 0, which DISABLES the count rule — a wider sweep, not a narrower one.
+    for (const value of ['', 'nope', '-1', 'NaN', 'Infinity', '0.5', '0.7', '4.9']) {
       expect(resolveConfig({ NODETERM_DEAD_CARD_REAP_MASS_LIMIT: value }, []).deadCardReapMassLimit)
         .toBe(5)
     }

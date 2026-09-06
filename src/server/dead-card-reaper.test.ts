@@ -121,6 +121,9 @@ describe('ServerDeadCardReaper', () => {
     reaper.start()
     tick!()
     await vi.waitFor(() => expect(sweep).toHaveBeenCalledOnce())
+    // The timer requests an applied pass and NEVER the force override — that flag exists only for a
+    // human typing it into POST /opsapi/sweep.
+    expect(sweep).toHaveBeenCalledWith(false)
     expect(info).not.toHaveBeenCalled()
   })
 
