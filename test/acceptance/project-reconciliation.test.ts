@@ -12,7 +12,16 @@ import { acknowledgeProjectSave, openProjectReconciliation, prepareProjectSave,
 // server, terminal, hook installer or provider home is started/touched by this fixture.
 let fixtureDir: string
 beforeEach(async () => { fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nt-reconcile-')) })
-afterEach(async () => { await fs.rm(fixtureDir, { recursive: true, force: true }) })
+afterEach(async () => {
+  const evidenceRoot = process.env.NODETERM_RECONCILIATION_EVIDENCE_DIR
+  if (evidenceRoot) {
+    await fs.mkdir(evidenceRoot, { recursive: true })
+    await fs.cp(fixtureDir, path.join(evidenceRoot, path.basename(fixtureDir)), {
+      recursive: true, errorOnExist: true, force: false
+    })
+  }
+  await fs.rm(fixtureDir, { recursive: true, force: true })
+})
 
 const original = JSON.stringify({ version: 1, rev: 1, name: 'Fixture', nodes: [
   { id: 'term-aaa-111', kind: 'terminal', title: 'Local task', position: { x: 0, y: 0 },
@@ -35,6 +44,7 @@ describe('disposable project reconciliation drill', () => {
     const disk = { revision: 'revision-after-registration', raw: await fs.readFile(file, 'utf8') }
     const plan = reconcileProjectSave(prepared.request, base, disk)
     if (plan.kind !== 'merged') throw new Error(`Unexpected ${plan.kind}`)
+    await writeFileAtomic(path.join(fixtureDir, 'merge-recovery.json'), JSON.stringify(plan.recovery))
     const final = JSON.stringify(plan.document)
     await writeFileAtomic(file, final)
     // Store fixtures are explicit, local test files. This is not a production journal contract.
