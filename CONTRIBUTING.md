@@ -378,6 +378,11 @@ has the four-way table and the measurements.
 
 ## Testing
 
+Remote task context is read-only metadata. Preserve absolute observation times,
+source generations and failures, and never use a filtered view as a control grant.
+Browser integration must revalidate exact host, project, account and session at
+focus. See `docs/remote-task-context.md` for the bounded adapter and client preferences.
+
 `npm test` must pass, and `npm run typecheck` is the fastest gate.
 
 Beyond that, one habit is worth more than any other here:

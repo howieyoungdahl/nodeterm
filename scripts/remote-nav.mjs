@@ -30,7 +30,7 @@
  * through the registry's own writer; `--pin` here prints the intent and performs nothing.
  */
 
-import { readFileSync } from 'node:fs'
+import { openSync, readSync, closeSync, fstatSync, constants } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -126,7 +126,22 @@ function readSource(explicitPath) {
   const resolved = model.resolveRegistryPath(env)
   if (!resolved.path) return { source: { kind: 'unset' }, reason: resolved.reason }
   try {
-    return { source: { kind: 'text', path: resolved.path, text: readFileSync(resolved.path, 'utf-8') }, reason: null }
+    const fd = openSync(resolved.path, constants.O_RDONLY | constants.O_NONBLOCK)
+    let text
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error('Registry source must be a regular file')
+      const ceiling = 1024 * 1024
+      const buffer = Buffer.alloc(ceiling + 1)
+      let offset = 0
+      while (offset < buffer.length) {
+        const size = readSync(fd, buffer, offset, buffer.length - offset, offset)
+        if (!size) break
+        offset += size
+      }
+      if (offset > ceiling) throw new Error('Registry exceeds 1048576 byte read limit; use the bounded context API')
+      text = new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, offset))
+    } finally { closeSync(fd) }
+    return { source: { kind: 'text', path: resolved.path, text }, reason: null }
   } catch (e) {
     // ENOENT is the only code that proves absence. Everything else is a failed read, and a failed
     // read is never evidence that there is no work.
@@ -229,6 +244,7 @@ if (args.json) {
       {
         path: nav.path,
         generated_at: nav.generatedAt,
+        source_generation: nav.sourceGeneration,
         staleness: nav.staleness,
         counts: nav.counts,
         ...payload

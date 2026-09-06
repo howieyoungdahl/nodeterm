@@ -3373,6 +3373,13 @@ sessions is a hazard whatever kills it; this removes the hazard, not a proven ca
 
 ## Conventions
 
+Remote task metadata never grants control. The navigator preserves mechanical and
+declared bindings, assignment actor/epoch/supervisor, creator ancestry and conflicts
+as distinct facts. Absolute observations age at read time; query/publication time
+cannot renew them. Browser focus must independently revalidate host, boot, project,
+account, provider and session, then use the existing attach-only authorization gate.
+The schema and bounded page seam are documented in `docs/remote-task-context.md`.
+
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their
   reasoning and measurements; it is dense on purpose and is loaded automatically by coding agents.
   **`CONTRIBUTING.md` is the short human door**: setup, the process-boundary rules, the house rules
