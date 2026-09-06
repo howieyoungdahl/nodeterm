@@ -87,7 +87,7 @@ export const NODE_CLASSES = [
   'BUSY',
   'IDLE'
 ] as const
-export type NodeClass = (typeof NODE_CLASSES)[number]
+export type NodeClass = (typeof NODE_CLASSES)[number] | 'GONE' | 'UNKNOWN' | '?'
 
 /** Contract §4 — the classes that put a node's task into `views.needs_attention`. */
 export const ATTENTION_CLASSES: readonly NodeClass[] = [
@@ -95,7 +95,8 @@ export const ATTENTION_CLASSES: readonly NodeClass[] = [
   'PERMISSION',
   'QUESTION',
   'NEEDS-OPERATOR',
-  'DEAD'
+  'DEAD',
+  'GONE'
 ]
 
 /** Contract §4 — `nodes[].role`. */
@@ -217,6 +218,16 @@ export interface TaskEvidence extends Extensible {
 }
 
 export interface RegistryTask extends Extensible {
+  node?: string
+  sid?: string
+  assignment?: {
+    actor: { node: string; session_id: string; provider: string; [key: string]: unknown }
+    assignment_epoch: number
+    supervisor_task_id: string | null
+    state: string
+    role: string
+    [key: string]: unknown
+  } | null
   task_id: string
   title: string
   project: string
@@ -250,6 +261,9 @@ export interface RegistryTask extends Extensible {
 }
 
 export interface RegistryNode extends Extensible {
+  observation_state?: string
+  host_boot_id?: string
+  conflicts?: unknown[]
   /** null for a node the supervisor can see but no task claims (contract §4, reply to R4). */
   task_id: string | null
   role: NodeRole
