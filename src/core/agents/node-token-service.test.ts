@@ -279,6 +279,24 @@ describe('node token service — the remote (SSH) minter', () => {
  * `legacy`, which after the cutoff is a node that cannot drive the canvas at all.
  */
 describe('node token service — a node that leaves the canvas takes its token with it', () => {
+  it('retains a missing token only while current-run pane provenance can recover its card', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    let live = [{ id: 'stays' }, { id: 'recoverable' }]
+    let retainRecoverable = true
+    initNodeTokens({
+      canvases: () => [{ nodes: live }],
+      retainMissing: (nodeId) => retainRecoverable && nodeId === 'recoverable'
+    })
+
+    live = [{ id: 'stays' }]
+    refreshNodeTokens()
+    expect(fs.readdirSync(nodeTokenDir()).sort()).toEqual(['recoverable', 'stays'])
+
+    retainRecoverable = false
+    refreshNodeTokens()
+    expect(fs.readdirSync(nodeTokenDir())).toEqual(['stays'])
+  })
+
   it('sweeps the file and releases the latch for an id that was there and now is not', async () => {
     hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
     let live = [{ id: 'stays' }, { id: 'departs' }]
