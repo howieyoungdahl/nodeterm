@@ -91,6 +91,7 @@ import { Dock } from '../components/Dock'
 import { TabBar } from '../components/TabBar'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { CommandPalette, type Command } from '../components/CommandPalette'
+import { usePaletteTranscriptSearch } from '../lib/usePaletteTranscriptSearch'
 import {
   IconCollapse,
   IconExpandCard,
@@ -1055,10 +1056,8 @@ export function Canvas() {
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [fileIndex, setFileIndex] = useState<QuickOpenIndexedFile[]>([])
-  const [transcriptHits, setTranscriptHits] = useState<TranscriptHit[]>([])
-  const transcriptQueryRef = useRef('')
-  // Pending debounce timer for the palette transcript search (reset on each keystroke).
-  const transcriptSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const { hits: transcriptHits, status: transcriptStatus, onQueryChange: onPaletteQuery,
+    reset: resetTranscriptSearch } = usePaletteTranscriptSearch(paletteOpen)
   // Cached visible-buffer text per terminal, for command-palette content search.
   const [bufferCache, setBufferCache] = useState<Record<string, string>>({})
   const captureTsRef = useRef<Record<string, number>>({})
@@ -9223,24 +9222,6 @@ export function Canvas() {
     }
   }, [])
 
-  const onPaletteQuery = useCallback((q: string) => {
-    transcriptQueryRef.current = q
-    // Reset any pending search so rapid keystrokes only fire one IPC call.
-    if (transcriptSearchTimer.current) clearTimeout(transcriptSearchTimer.current)
-    if (q.trim().length < 2) {
-      setTranscriptHits([])
-      return
-    }
-    const mine = q
-    // Debounce the actual search by ~180ms.
-    transcriptSearchTimer.current = setTimeout(() => {
-      window.nodeTerminal.transcripts.search(q).then((hits) => {
-        // Stale-response guard: ignore results for a query the user has moved past.
-        if (transcriptQueryRef.current === mine) setTranscriptHits(hits)
-      })
-    }, 180)
-  }, [])
-
   // Map a transcript hit's sessionId to a live node (via agentStatus). If that node still
   // exists anywhere, focus it; otherwise open a new Claude node that resumes the session.
   const openTranscriptHit = useCallback(
@@ -14295,10 +14276,10 @@ export function Canvas() {
           onRevealFile={revealProjectFile}
           onQueryChange={onPaletteQuery}
           extraCommands={transcriptCommands}
+          transcriptStatus={transcriptStatus}
           onClose={() => {
+            resetTranscriptSearch()
             setPaletteOpen(false)
-            setTranscriptHits([])
-            if (transcriptSearchTimer.current) clearTimeout(transcriptSearchTimer.current)
           }}
         />
       )}
