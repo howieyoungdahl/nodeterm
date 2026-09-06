@@ -59,12 +59,82 @@ export interface ServerNodeOpsDeps {
   protectAdopted?(nodeIds: readonly string[]): Promise<unknown>
   now?: () => number
   mutationQueue?: WorkspaceMutationQueue
+  /** Mass-sweep guard thresholds. Omitted = {@link DEFAULT_DEAD_CARD_MASS_LIMIT}. */
+  massLimit?: DeadCardMassLimit
+  /** The one loud line a refused sweep prints. Defaults to console.warn. */
+  warn?(message: string): void
 }
 
 export interface OpsSweepResult {
   dryRun: boolean
   affectedIds: string[]
   scanned: number
+  /** Set when the mass-sweep guard refused this pass. Absent = the pass was allowed to apply. */
+  refused?: OpsSweepRefusal
+}
+
+/**
+ * Why a pass refused to apply. `affectedIds` still carries the set it WOULD have removed, so an
+ * operator can look at it before deciding to force the pass through.
+ */
+export interface OpsSweepRefusal {
+  reason: 'mass_limit'
+  deadCount: number
+  scanned: number
+  maxCards: number
+  maxFraction: number
+}
+
+/**
+ * Mass-sweep guard thresholds.
+ *
+ * The reaper's job is attrition: the card or two whose tmux session died on its own since the last
+ * pass. A whole canvas reading dead in ONE pass is a different event — the tmux server died, the
+ * socket name changed, a probe regressed — and in that event the cards are the only remaining
+ * record of the sessions, so removing them destroys the evidence instead of tidying after it.
+ * (2026-09-06: the tmux server died at 06:39 and the 07:07 pass removed 16 terminal cards.)
+ * Above these thresholds the sweep applies NOTHING and says so; the operator forces it if the
+ * cards really are stale.
+ */
+export interface DeadCardMassLimit {
+  /** Dead cards in one pass at or above which the sweep refuses. 0 disables this rule. */
+  maxCards: number
+  /** Dead-of-scanned share at or above which the sweep refuses. 0 disables this rule. */
+  maxFraction: number
+}
+
+/**
+ * Five cards: more than four terminal sessions dying between two 30-minute passes is a host event,
+ * not attrition. Half the canvas: the count rule alone cannot see a small canvas losing everything
+ * it has (4 of 4 is as total a loss as 16 of 30), and the share rule alone cannot see a big canvas
+ * losing a serious chunk that is still a minority. They are OR-ed for that reason.
+ */
+export const DEFAULT_DEAD_CARD_MASS_LIMIT: DeadCardMassLimit = { maxCards: 5, maxFraction: 0.5 }
+
+/** One card is never a mass event, so the share rule needs at least a pair behind it. Without this
+ *  floor a single dead card on a one-card canvas is 100% and could never be reaped at all. */
+const MASS_FRACTION_FLOOR = 2
+
+/** Pure guard decision, shared by the timer and POST /opsapi/sweep. */
+export function deadCardMassRefusal(
+  deadCount: number,
+  scanned: number,
+  limit: DeadCardMassLimit
+): OpsSweepRefusal | null {
+  const byCount = limit.maxCards > 0 && deadCount >= limit.maxCards
+  const byFraction =
+    limit.maxFraction > 0 &&
+    deadCount >= MASS_FRACTION_FLOOR &&
+    scanned > 0 &&
+    deadCount / scanned >= limit.maxFraction
+  if (!byCount && !byFraction) return null
+  return {
+    reason: 'mass_limit',
+    deadCount,
+    scanned,
+    maxCards: limit.maxCards,
+    maxFraction: limit.maxFraction
+  }
 }
 
 export interface OpsAdoptedNode {
@@ -189,10 +259,12 @@ export function removeNodeCard(project: Project, nodeId: string): boolean {
 export class ServerNodeOps {
   private readonly now: () => number
   private readonly mutationQueue: WorkspaceMutationQueue
+  private readonly massLimit: DeadCardMassLimit
 
   constructor(private readonly deps: ServerNodeOpsDeps) {
     this.now = deps.now ?? Date.now
     this.mutationQueue = deps.mutationQueue ?? new WorkspaceMutationQueue()
+    this.massLimit = deps.massLimit ?? DEFAULT_DEAD_CARD_MASS_LIMIT
   }
 
   private runExclusive<T>(work: () => Promise<T>): Promise<T> {
@@ -236,7 +308,11 @@ export class ServerNodeOps {
     return Promise.all(pending)
   }
 
-  sweep(dryRun: boolean): Promise<OpsSweepResult> {
+  /**
+   * @param force Skip the mass-sweep guard. Only `POST /opsapi/sweep` with an explicit
+   *              `"force": true` sets this; the periodic reaper never does.
+   */
+  sweep(dryRun: boolean, force = false): Promise<OpsSweepResult> {
     return this.runExclusive(async () => {
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
       const deadByProject = new Map<Project, string[]>()
@@ -256,6 +332,25 @@ export class ServerNodeOps {
         }
       }
       const affectedIds = [...deadByProject.values()].flat()
+      const refused = force ? null : deadCardMassRefusal(affectedIds.length, scanned, this.massLimit)
+      if (refused) {
+        // Exactly one line per refused APPLY, printed by the engine rather than by each caller, so
+        // the timer and the REST route cannot each publish their own version of the same refusal.
+        // A dry run reports the refusal in its reply and stays silent: it removed nothing either
+        // way, and an operator probing the canvas must not have to mute a log to do it.
+        if (!dryRun) {
+          const warn = this.deps.warn ?? console.warn
+          warn(
+            `[nodeterm-server] REFUSED dead-card sweep: ${refused.deadCount} of ${scanned} local ` +
+              `terminal card(s) read dead in one pass (limit ${refused.maxCards} cards / ` +
+              `${Math.round(refused.maxFraction * 100)}% of the canvas). Nothing was removed — a ` +
+              `whole canvas going dead at once is a host event, and the cards are the record of ` +
+              `it. Sweep anyway: POST /opsapi/sweep {"dryRun":false,"force":true}. Change the ` +
+              `thresholds: --dead-card-reap-mass-limit / --dead-card-reap-mass-fraction.`
+          )
+        }
+        return { dryRun, affectedIds, scanned, refused }
+      }
       if (dryRun || affectedIds.length === 0) return { dryRun, affectedIds, scanned }
 
       for (const [project, ids] of deadByProject) {

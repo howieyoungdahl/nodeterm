@@ -69,6 +69,8 @@ Precedence: **CLI flag > environment variable > default.**
 | — | `NODETERM_SERVER_PASSWORD` | — | Seed the password headlessly on first boot (see above). |
 | `--canvas-control` | `NODETERM_SERVER_CANVAS_CONTROL` | off | Enable the bounded Server-local `/control/*` surface. |
 | `--dead-card-reap-minutes <n>` | `NODETERM_DEAD_CARD_REAP_MINUTES` | `30` | Interval for conservative local dead-card cleanup; `0` disables the timer but leaves `/opsapi/sweep` available. |
+| `--dead-card-reap-mass-limit <n>` | `NODETERM_DEAD_CARD_REAP_MASS_LIMIT` | `5` | Mass-sweep guard: dead cards in ONE pass at or above which the whole pass is refused; `0` disables this rule. |
+| `--dead-card-reap-mass-fraction <n>` | `NODETERM_DEAD_CARD_REAP_MASS_FRACTION` | `0.5` | Mass-sweep guard, share form (0..1) of scanned local terminal cards; `0` disables this rule. |
 | `--trust-proxy-header <name>` | `NODETERM_TRUST_PROXY_HEADER` | — (off) | Reverse-proxy SSO trust: identity header asserted by your proxy (see [Reverse-proxy SSO](#reverse-proxy-sso-header-trust)). |
 | `--trust-proxy-nets <list>` | `NODETERM_TRUST_PROXY_NETS` | `127.0.0.0/8, ::1/128` | Comma-separated IPs/CIDRs (IPv4+IPv6) whose requests may use the trust header. Only meaningful with the header set. |
 
@@ -288,10 +290,12 @@ The v1 contract is deliberately narrow:
   and the current-run creator `ownerSession`. Terminal pane state is `alive`, `dead`, or `unknown`;
   non-terminal cards say `none`. Agent state is normalized to `working`, `idle`, or `blocked` when
   the hook mirror knows it.
-- `POST /opsapi/sweep` requires exactly `{ "dryRun": true|false }` and returns
-  `{dryRun, affectedIds, scanned}`. It considers local terminal cards only, requires two definitive
-  absent-pane probes, and treats every failed/unreachable probe as `unknown`. Dry-run and the
-  periodic reaper use this same mutation engine.
+- `POST /opsapi/sweep` requires `{ "dryRun": true|false }` and accepts an optional
+  `"force": true|false` (default `false`); no other key is allowed. It returns
+  `{dryRun, affectedIds, scanned}`, plus `refused` when the mass-sweep guard blocked the pass. It
+  considers local terminal cards only, requires two definitive absent-pane probes, and treats every
+  failed/unreachable probe as `unknown`. Dry-run and the periodic reaper use this same mutation
+  engine.
 - `DELETE /opsapi/nodes/<id>` removes one card. A live pane returns `409 pane_alive`, and an
   unreadable pane returns `503 pane_state_unknown`; `?force=1` is the explicit operator gate. A
   forced local terminal deletion confirms backend teardown before saving the card removal. Agents
@@ -707,6 +711,21 @@ layer twice proves its session absent. Unreadable or failed probes preserve the 
 cards are never probed, and cleanup does not kill a session. Set
 `NODETERM_DEAD_CARD_REAP_MINUTES=0` (or pass `--dead-card-reap-minutes 0`) to disable only the
 periodic trigger; the operator endpoint remains available.
+
+**A mass sweep is refused, not applied.** The reaper's job is attrition — the card or two whose
+session died since the last pass. A whole canvas reading dead in ONE pass is a host event (the tmux
+server died, the socket name changed, a probe regressed), and in that event the cards are the only
+remaining record of those sessions. So when a single pass finds at least
+`--dead-card-reap-mass-limit` dead cards (default 5), or at least half the scanned local terminal
+cards (`--dead-card-reap-mass-fraction`, default `0.5`, needing at least two dead cards so a
+one-card canvas stays reapable), the sweep applies **nothing**, leaves every card in place, returns
+`refused: {reason, deadCount, scanned, maxCards, maxFraction}` alongside the set it declined to
+touch, and logs exactly one line naming the count and the override. That line comes from the engine
+rather than from each caller, so the timer and the REST route cannot print two versions of the same
+refusal. The override is deliberate and manual: `POST /opsapi/sweep` with
+`{"dryRun": false, "force": true}`. A dry run reports the refusal in its reply and logs nothing — it
+removed nothing either way. On 2026-09-06 the tmux server died at 06:39 and the 07:07 pass removed
+16 terminal cards; this guard is why that pass would now be refused.
 
 Server message delivery verifies submission in two stages. It waits until the complete framed
 message is visible in the target pane, sends Enter, then re-captures the pane. If the composer did

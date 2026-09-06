@@ -510,7 +510,14 @@ export async function startServer(
     // classification, not the fresh-spawn path: `attach-session` only, dead card if the session
     // vanishes. Same production function Server boot runs over the saved cards.
     protectAdopted: (nodeIds) => ptyManager.protectPersistedSessionsAtBoot(nodeIds),
-    mutationQueue: workspaceMutationQueue
+    mutationQueue: workspaceMutationQueue,
+    // Mass-sweep guard. A pass this large is a host event (a dead tmux server, a renamed socket),
+    // and the cards are the last record of the sessions, so the pass is refused whole rather than
+    // applied. POST /opsapi/sweep with "force": true is the deliberate override.
+    massLimit: {
+      maxCards: config.deadCardReapMassLimit ?? 5,
+      maxFraction: config.deadCardReapMassFraction ?? 0.5
+    }
   })
   const deadCardReaper = new ServerDeadCardReaper({
     intervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
@@ -906,7 +913,7 @@ export async function startServer(
   const opsApi = createOpsApiHandler({
     token: opsToken,
     nodes: () => nodeOps.list(),
-    sweep: (dryRun) => nodeOps.sweep(dryRun),
+    sweep: (dryRun, force) => nodeOps.sweep(dryRun, force),
     remove: (nodeId, force) => nodeOps.remove(nodeId, force),
     adoptOrphans: () => nodeOps.adoptOrphans(),
     health: () => ({

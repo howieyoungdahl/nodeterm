@@ -93,6 +93,37 @@ describe('ServerDeadCardReaper', () => {
     await vi.waitFor(() => expect(sweep).toHaveBeenCalledTimes(2))
   })
 
+  it('never reports a refused pass as reaped', async () => {
+    let tick: (() => void) | undefined
+    const sweep = vi.fn(async () => ({
+      dryRun: false,
+      affectedIds: ['a', 'b', 'c', 'd', 'e'],
+      scanned: 6,
+      refused: {
+        reason: 'mass_limit' as const,
+        deadCount: 5,
+        scanned: 6,
+        maxCards: 5,
+        maxFraction: 0.5
+      }
+    }))
+    const info = vi.fn()
+    const reaper = new ServerDeadCardReaper({
+      intervalMs: 10,
+      sweep,
+      info,
+      setInterval: (callback) => {
+        tick = callback
+        return 1
+      }
+    })
+
+    reaper.start()
+    tick!()
+    await vi.waitFor(() => expect(sweep).toHaveBeenCalledOnce())
+    expect(info).not.toHaveBeenCalled()
+  })
+
   it('can be disabled with zero and clears an enabled timer exactly once', () => {
     const disabledSet = vi.fn(() => 1)
     new ServerDeadCardReaper({

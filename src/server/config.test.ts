@@ -78,6 +78,44 @@ describe('resolveConfig', () => {
       .toBe(7 * 24 * 60)
   })
 
+  it('mass-sweep guard defaults to 5 cards / half the canvas and is configurable', () => {
+    const d = resolveConfig({}, [])
+    expect(d.deadCardReapMassLimit).toBe(5)
+    expect(d.deadCardReapMassFraction).toBe(0.5)
+    expect(
+      resolveConfig({ NODETERM_DEAD_CARD_REAP_MASS_LIMIT: '12' }, []).deadCardReapMassLimit
+    ).toBe(12)
+    expect(
+      resolveConfig(
+        { NODETERM_DEAD_CARD_REAP_MASS_LIMIT: '12' },
+        ['--dead-card-reap-mass-limit', '3']
+      ).deadCardReapMassLimit
+    ).toBe(3)
+    expect(
+      resolveConfig({}, ['--dead-card-reap-mass-fraction', '0.25']).deadCardReapMassFraction
+    ).toBe(0.25)
+    // Zero disables one rule without disabling the other.
+    expect(resolveConfig({ NODETERM_DEAD_CARD_REAP_MASS_LIMIT: '0' }, []).deadCardReapMassLimit)
+      .toBe(0)
+    expect(
+      resolveConfig({ NODETERM_DEAD_CARD_REAP_MASS_FRACTION: '0' }, []).deadCardReapMassFraction
+    ).toBe(0)
+  })
+
+  it('mass-sweep guard degrades a malformed edit to the default, never to a wider sweep', () => {
+    for (const value of ['', 'nope', '-1', 'NaN', 'Infinity']) {
+      expect(resolveConfig({ NODETERM_DEAD_CARD_REAP_MASS_LIMIT: value }, []).deadCardReapMassLimit)
+        .toBe(5)
+    }
+    // A fraction outside 0..1 is not clamped: >1 would silently disable the rule.
+    for (const value of ['', 'nope', '-0.5', '2', 'NaN', 'Infinity']) {
+      expect(
+        resolveConfig({ NODETERM_DEAD_CARD_REAP_MASS_FRACTION: value }, [])
+          .deadCardReapMassFraction
+      ).toBe(0.5)
+    }
+  })
+
   it('proxy trust: off by default', () => {
     expect(resolveConfig({}, []).trustProxy).toBeUndefined()
   })

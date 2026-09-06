@@ -24,7 +24,7 @@ export interface OpsHealth {
 export interface OpsApiDeps {
   token: string
   nodes(): Promise<OpsNodeInventoryItem[]>
-  sweep(dryRun: boolean): Promise<OpsSweepResult>
+  sweep(dryRun: boolean, force: boolean): Promise<OpsSweepResult>
   remove(nodeId: string, force: boolean): Promise<OpsRemoveResult>
   /** The sweep's mirror image: card a live `nt-<id>` session that no project still lists. */
   adoptOrphans(): Promise<OpsAdoptResult>
@@ -151,17 +151,21 @@ export function createOpsApiHandler(
           sendJson(res, tooLarge ? 413 : 400, { error: tooLarge ? 'body_too_large' : 'bad_json' })
           return
         }
+        // `force` is optional and defaults to false: the mass-sweep guard must be opted OUT of by
+        // a human typing the flag, never inherited by an operator script that predates it.
+        const sweepBody = body as { dryRun?: unknown; force?: unknown }
         if (
           !body ||
           typeof body !== 'object' ||
           Array.isArray(body) ||
-          typeof (body as { dryRun?: unknown }).dryRun !== 'boolean' ||
-          Object.keys(body).some((key) => key !== 'dryRun')
+          typeof sweepBody.dryRun !== 'boolean' ||
+          (sweepBody.force !== undefined && typeof sweepBody.force !== 'boolean') ||
+          Object.keys(body).some((key) => key !== 'dryRun' && key !== 'force')
         ) {
-          sendJson(res, 400, { error: 'body_must_be_exactly_dryRun_boolean' })
+          sendJson(res, 400, { error: 'body_must_be_dryRun_boolean_with_optional_force_boolean' })
           return
         }
-        sendJson(res, 200, await deps.sweep((body as { dryRun: boolean }).dryRun))
+        sendJson(res, 200, await deps.sweep(sweepBody.dryRun as boolean, sweepBody.force === true))
         return
       }
 
