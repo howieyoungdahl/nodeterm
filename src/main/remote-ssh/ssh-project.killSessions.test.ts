@@ -12,6 +12,7 @@ vi.mock('electron', () => ({
 
 import { SshProjectManager } from './ssh-project'
 import { remoteTmuxPathPrologue } from '../../shared/ssh'
+import { TMUX_SOCKET } from '../../core/tmux-naming'
 
 /** The PATH-append prologue every remote tmux line now starts with (issue #449). */
 const TP = remoteTmuxPathPrologue()
@@ -26,7 +27,7 @@ function managerWithConn(): { mgr: SshProjectManager; runs: string[][] } {
     runs.push(args)
     // tmux exits non-zero with "can't find session" on whichever socket does not hold it. The
     // contract is best-effort, so a rejection must not stop the sibling kill.
-    if (args.at(-1)?.includes('node-terminal')) throw new Error("can't find session")
+    if (args.at(-1)?.includes(TMUX_SOCKET)) throw new Error("can't find session")
     return { code: 0, stdout: '' }
   }
   const mgr = new SshProjectManager({ run } as never)
@@ -48,9 +49,9 @@ describe('SshProjectManager.killSessions', () => {
     const { mgr, runs } = managerWithConn()
     await mgr.killSessions('p1', ['abc'], { everySocket: true })
     expect(commands(runs)).toEqual([
-      `${TP}tmux -L node-terminal kill-session -t =nt-abc`,
+      `${TP}tmux -L ${TMUX_SOCKET} kill-session -t =nt-abc`,
       `${TP}tmux -L nodeterm-rmt kill-session -t =nt-abc`
-    ])
+    ].sort())
   })
 
   it('stays on the project s own socket by default', async () => {
@@ -79,11 +80,11 @@ describe('SshProjectManager.killSessions', () => {
     const { mgr, runs } = managerWithConn()
     await mgr.killSessions('p1', ['a', 'b'], { everySocket: true })
     expect(commands(runs)).toEqual([
-      `${TP}tmux -L node-terminal kill-session -t =nt-a`,
-      `${TP}tmux -L node-terminal kill-session -t =nt-b`,
+      `${TP}tmux -L ${TMUX_SOCKET} kill-session -t =nt-a`,
+      `${TP}tmux -L ${TMUX_SOCKET} kill-session -t =nt-b`,
       `${TP}tmux -L nodeterm-rmt kill-session -t =nt-a`,
       `${TP}tmux -L nodeterm-rmt kill-session -t =nt-b`
-    ])
+    ].sort())
   })
 
   it('does nothing at all for a project with no live master', async () => {

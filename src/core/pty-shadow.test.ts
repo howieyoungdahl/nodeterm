@@ -438,7 +438,7 @@ describe('control-mode shadow clients for released sessions', () => {
     const listings: Record<string, string> = {
       // `nt-node-1` reads as attached because our shadow IS a real tmux client; `nt-node-9` is a
       // genuinely attached session (somebody is looking at it) and must survive.
-      'node-terminal': `nt-node-1|1|${FRESH}|${OLD}\nnt-node-9|1|${FRESH}|${OLD}`,
+      [TMUX_SOCKET]: `nt-node-1|1|${FRESH}|${OLD}\nnt-node-9|1|${FRESH}|${OLD}`,
       // The SAME NAME on the SSH-remote socket, attached for real. Shadows only ever live on the
       // local socket, so the exclusion must not follow the name across sockets.
       'nodeterm-rmt': `nt-node-1|1|${FRESH}|${OLD}`
@@ -461,7 +461,7 @@ describe('control-mode shadow clients for released sessions', () => {
     })
 
     expect(await reaper.sweep()).toBe(1)
-    expect(killed).toEqual([{ socket: 'node-terminal', target: '=nt-node-1' }])
+    expect(killed).toEqual([{ socket: TMUX_SOCKET, target: '=nt-node-1' }])
   })
 
   it('leaves a session somebody is really watching alone — the attached flag is a client COUNT', async () => {
@@ -486,7 +486,7 @@ describe('control-mode shadow clients for released sessions', () => {
     let listings = 0
     const reaper = createSessionReaper({
       tmuxBin: () => m.getTmuxBin(),
-      sockets: ['node-terminal'],
+      sockets: [TMUX_SOCKET],
       shadowed: (socket) => m.shadowedTmuxSessions(socket),
       exec: async (_bin: string, args: string[]) => {
         if (args.includes('kill-session')) {
