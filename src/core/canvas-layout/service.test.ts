@@ -31,6 +31,20 @@ function lease(): LayoutLeaseStore {
 const ON = { settings: () => ({ enabled: true }) }
 
 describe('planForRequest', () => {
+  it('reports unavailable lease evidence instead of claiming another holder or granting a plan', async () => {
+    const broken = new LayoutLeaseStore({ read: () => null, write: async () => { throw new Error('EIO') } })
+    const plan = await planForRequest(request(), { ...ON, lease: broken })
+    expect(plan.stoodDown).toEqual({ reason: 'source-unavailable' })
+    expect(plan.leaseToken).toBeUndefined()
+    expect(plan.ops).toEqual([])
+  })
+
+  it('returns the persisted token with a successful plan', async () => {
+    const store = lease()
+    const plan = await planForRequest(request(), { ...ON, lease: store })
+    expect(plan.leaseToken).toBe(store.holder('p1')?.token)
+    expect(plan.leaseToken).toEqual(expect.any(String))
+  })
   it('is OFF unless the machine says otherwise — an absent settings block plans nothing', async () => {
     for (const settings of [undefined, () => undefined, () => ({}), () => ({ enabled: false })]) {
       const plan = await planForRequest(request(), { settings, lease: lease() })

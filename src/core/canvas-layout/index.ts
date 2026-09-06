@@ -13,3 +13,5 @@ export {
   type CanvasLayoutServiceDeps
 } from './service'
 export type { LayoutInput, LayoutNode } from './types'
+export { captureLayoutTransaction, applyLayoutTransaction } from './transaction'
+export type { LayoutRevision, LayoutTransaction, LayoutApplyState, LayoutApplyOutcome } from './transaction'

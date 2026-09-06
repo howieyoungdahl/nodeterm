@@ -76,11 +76,18 @@ export const LAYOUT_SKIP_LABELS: Record<LayoutSkipReason, string> = {
 }
 
 /** Why the engine produced no plan at all, as opposed to a plan that skipped nodes. */
-export type LayoutStandDownReason = 'disabled' | 'lease-held' | 'unknown-project'
+export type LayoutStandDownReason =
+  | 'disabled'
+  | 'lease-held'
+  | 'lease-stale'
+  | 'source-unavailable'
+  | 'unknown-project'
 
 export const LAYOUT_STAND_DOWN_LABELS: Record<LayoutStandDownReason, string> = {
   disabled: 'automatic layout is off for this machine',
   'lease-held': 'another instance holds this project’s layout lease',
+  'lease-stale': 'the layout lease expired or changed; preview again',
+  'source-unavailable': 'layout authority could not be verified; nothing was rearranged',
   'unknown-project': 'no project to plan for'
 }
 
@@ -124,6 +131,8 @@ export interface LayoutSkip {
 }
 
 export interface LayoutPlan {
+  /** Plan-time lease evidence only. The coordinator must validate it at the effect boundary. */
+  leaseToken?: string
   trigger: LayoutTrigger
   /** Ops in application order. Empty is a legitimate answer and is reported as such. */
   ops: LayoutOp[]

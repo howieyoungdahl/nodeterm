@@ -58,9 +58,9 @@ export async function planForRequest(
 
   const lease = deps.lease ?? new LayoutLeaseStore({ now: deps.now })
   const taken = await lease.acquire(request.projectId, request.holder)
-  if (!taken.ok) return standDownPlan(trigger, 'lease-held', taken.holder)
+  if (!taken.ok) return standDownPlan(trigger, taken.reason, taken.holder)
 
-  return plan({
+  const candidate = plan({
     trigger,
     nodes: Array.isArray(request.nodes) ? request.nodes : [],
     ropes: request.ropes ?? [],
@@ -72,6 +72,7 @@ export async function planForRequest(
     sizes: request.sizes,
     now: (deps.now ?? (() => Date.now()))()
   })
+  return { ...candidate, leaseToken: taken.lease.token }
 }
 
 /** The one registration for the layout-plan channel, called by both shells. */
