@@ -82,7 +82,7 @@ persistence refusal throws a named error and recovery path. Phone-side acceptanc
 An already caller-enrolled local v3 index supports exactly one new inline project
 per reconciled request via explicit `createInline: [projectId]`. The host derives
 `inline-projects/<validated-id>.json`; absence of an ordinary project base never
-implies creation. First-run index bootstrap, multi-create batches, folder adoption,
+implies creation. Multi-create batches, folder adoption,
 relocation, pre-file migration, SSH and relay projects remain unsupported.
 
 The existing caller-enrollment directory durably binds the complete creation
@@ -113,9 +113,41 @@ transport principal, registry, control grant or legacy fallback is introduced.
 Browser/process termination recovery is NOT implemented: the browser's pending
 object is in memory. Host intent/history survives as recovery evidence, but there
 is no restart UI that reconstructs that pending object. An unindexed retained file
-cannot be silently created again. Other metadata/index producers and first-run
-bootstrap remain distinct rollout gaps. These source fixtures establish neither
+cannot be silently created again. Other metadata/index producers remain distinct
+rollout gaps. These source fixtures establish neither
 live adoption nor Desktop/phone/SSH/Windows/power-loss conformance.
+
+### Genuinely first-run empty index
+
+A successful absent-index read can enroll a typed `bootstrap: { kind: 'empty-v3',
+token }` in the existing durable caller store. It does **not** publish a default
+workspace. Only an explicit save of exactly one new local inline project may use
+that enrollment. Ordinary empty revisions still refuse; no revision is fabricated.
+
+The host rechecks the workspace-owned namespace immediately before exclusive
+publication: workspace files/backups/temporary or corrupt copies, inline-file
+state, refusals, recovery history, and prior/unresolved caller records prevent
+bootstrap. Settings/auth files are not workspace history. Only valid absence
+enrollments may coexist, so two fresh callers can read without granting either
+permission to adopt the other's publication. Proof is bounded to 4096 directory
+entries / 32 MiB of evidence and refuses symlinks, malformed or oversized evidence.
+
+The same virgin-history coordinator journals the complete immutable logical
+request under deterministic `:bootstrap`, `:inline:<projectId>`, and
+`:inline:index` phase identities. Its distinct index constructor can publish only
+empty v3 through an exclusive hard link; it never displaces a destination. The
+exact own bootstrap receipt supplies the child phase's enrolled index base, not
+a mutable latest-index cache. Bootstrap, child, and final index outcomes remain
+separate: an empty index or an orphan child is not a saved workspace. Retry uses
+the same full intent even after host-store reopen; unknown outcomes never replay.
+Repeated initial load while a save is pending refuses instead of replacing its
+caller; refresh/tab changes and edits during delivery retain that pending intent.
+
+Managed absence, historical migration, folder/SSH/relay producers, multi-create
+and browser-termination intent reconstruction remain unsupported. A crash leaves
+its lock and journal for explicit recovery; neither a fresh renderer nor a new
+operation ID grants permission to clear them. Existing-file publication semantics
+are unchanged by this additive first-run constructor.
 
 `ProjectCommitStore` retains adjacent `.recovery/<filename>/` evidence on the same filesystem:
 immutable versions, operation request/candidate/receipt, displaced inodes and durable tombstones.

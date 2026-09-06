@@ -86,6 +86,7 @@ export class WorkspaceReconciliationClient {
   }
 
   async load(): Promise<Workspace> {
+    if (this.pending || this.inFlight) throw new Error('A pending save must retain its caller and intent; refresh the working copy instead.')
     if (!this.api.loadReconciled) throw new Error('This host does not support revision-bound saves.')
     this.view = await this.api.loadReconciled()
     this.bases = new Map(Object.entries(this.view.projects))
@@ -154,8 +155,9 @@ export class WorkspaceReconciliationClient {
       expected: Object.fromEntries([...this.bases].map(([id, base]) => [id, this.conflicts.has(id) ? '' : base.revision])),
       indexRevision: this.view.indexRevision, workspace: structuredClone(workspace),
       // A new local inline project is an explicit create intent, never an empty revision.
-      // Existing unsupported projects, first-run indexes, folder/SSH/relay paths stay refused.
-      createInline: this.view.indexRevision ? workspace.projects.filter((project) => !this.bases.has(project.id) &&
+      // A first-run save additionally requires the host's typed absence enrollment.
+      bootstrap: !this.view.indexRevision ? this.view.bootstrap : undefined,
+      createInline: (this.view.indexRevision || this.view.bootstrap) ? workspace.projects.filter((project) => !this.bases.has(project.id) &&
         !this.view!.workspace.projects.some((known) => known.id === project.id) && project.cwd === undefined &&
         project.ssh === undefined && project.remote === undefined && !project.unavailable).map((project) => project.id) : [] }
     this.pending = request
@@ -166,7 +168,7 @@ export class WorkspaceReconciliationClient {
     this.epoch++
     let latest = current()
     let saved = outcome.index.kind === 'committed' || outcome.index.kind === 'already-applied'
-    let unknown = outcome.index.kind === 'publication-unknown' ||
+    let unknown = outcome.bootstrap?.kind === 'publication-unknown' || outcome.index.kind === 'publication-unknown' ||
       Object.values(outcome.projects).some((result) => result.kind === 'publication-unknown')
     this.error = null
     latest = { ...latest, projects: latest.projects.map((local) => {
@@ -204,7 +206,7 @@ export class WorkspaceReconciliationClient {
     else if (!this.error) this.error = outcome.index.message ?? 'Workspace metadata remains unsaved.'
     // File success is not index success. Retain the exact create intent across a partial
     // result, including a busy index or lost index receipt; never mint a second creation.
-    if (!unknown && !(request.createInline?.length && !saved)) this.pending = undefined
+    if (!unknown && !((request.bootstrap || request.createInline?.length) && !saved)) this.pending = undefined
     if (this.refreshOwed && !this.pending) {
       this.refreshOwed = false
       const held = latest

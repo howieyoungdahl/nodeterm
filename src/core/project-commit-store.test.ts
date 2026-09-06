@@ -32,6 +32,72 @@ const request = (base: string, proposed: string, operationId = 'op') =>
 const creation = (operationId = 'create', proposed = original) => ({ clientId: 'client', operationId,
   expectedAbsence: true as const, indexRevision: revisionOf('fixture enrolled index'), proposed })
 
+describe('typed empty-v3 bootstrap uses the exclusive retained publisher', () => {
+  const bootstrap = (operationId = 'bootstrap') => ({ clientId: 'client', operationId,
+    expectedAbsence: true as const, bootstrapToken: revisionOf('enrolled absence'), intent: '{"child":"first"}' })
+  const fresh = async () => undefined
+
+  it('constructs only empty v3 and never relaxes the ordinary project gate', async () => {
+    const target = path.join(dir, 'workspace.json'), store = new ProjectCommitStore(target)
+    const result = await store.bootstrapIndex(bootstrap(), fresh)
+    expect(result.kind).toBe('committed')
+    expect(JSON.parse(result.current!.raw)).toMatchObject({ version: 3, entries: [], activeProjectId: '' })
+    expect(await store.known(result.current!.revision)).toBe(result.current!.raw)
+    expect((await store.bootstrapIndex({ ...bootstrap(), intent: '{"child":"different"}' }, fresh)).kind).toBe('stale-base')
+    expect((await new ProjectCommitStore(path.join(dir, 'ordinary.json')).create({ ...creation(), indexRevision: '' })).kind).toBe('stale-base')
+    expect((await new ProjectCommitStore(path.join(dir, 'wrong-schema.json')).create(creation('new', '{"version":3,"entries":[]}'))).kind).toBe('conflict')
+  })
+
+  it('two concurrent coordinators keep exactly one virgin-history claim', async () => {
+    const target = path.join(dir, 'workspace.json')
+    let reached!: () => void, release!: () => void
+    const paused = new Promise<void>((resolve) => { reached = resolve }), held = new Promise<void>((resolve) => { release = resolve })
+    const writing = new ProjectCommitStore(target, async (phase) => { if (phase === 'journaled') { reached(); await held } }).bootstrapIndex(bootstrap(), fresh)
+    await paused
+    try {
+      const loser = await new ProjectCommitStore(target).bootstrapIndex(bootstrap('loser'), fresh)
+      expect(loser.kind).toBe('busy'); expect(await fs.readFile(loser.recovery, 'utf8')).toContain('loser')
+    } finally { release() }
+    const result = await writing
+    expect(result.kind).toBe('committed'); expect(await fs.readFile(target, 'utf8')).toBe(result.current!.raw)
+  })
+
+  it.each(['before-publish', 'published'] as PublicationPhase[])('never overwrites an interposed index at %s', async (phase) => {
+    const target = path.join(dir, 'workspace.json'), winner = '{"version":3,"entries":[],"external":"keep"}'
+    const store = new ProjectCommitStore(target, async (at) => { if (at === phase) await fs.writeFile(target, winner) })
+    const result = await store.bootstrapIndex(bootstrap(), fresh)
+    expect(result.kind).toBe(phase === 'published' ? 'publication-unknown' : 'publication-refused')
+    expect(await fs.readFile(target, 'utf8')).toBe(winner)
+    expect(JSON.parse(await fs.readFile(path.join(result.recovery, 'candidate.json'), 'utf8')).entries).toEqual([])
+    expect((await new ProjectCommitStore(target).bootstrapIndex(bootstrap(), fresh)).kind).toBe(result.kind)
+  })
+
+  it.each(['creation-prepared', 'journaled', 'published', 'receipted'] as PublicationPhase[])
+  ('real disposable bootstrap writer kill at %s retains exact intent, lock, and receipt boundary', async (phase) => {
+    const target = path.join(dir, 'workspace.json'), input = bootstrap()
+    const bundle = buildSync({ entryPoints: [path.resolve('src/core/project-commit-store.ts')], bundle: true,
+      platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+    const code = bundle + `\nnew module.exports.ProjectCommitStore(${JSON.stringify(target)}, async phase => {
+      if (phase === ${JSON.stringify(phase)}) { process.send('paused'); await new Promise(() => {}) }
+    }).bootstrapIndex(${JSON.stringify(input)}, async () => undefined); setInterval(() => {}, 1000);`
+    const child = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    try {
+      expect(await once(child, 'message')).toEqual(['paused', undefined])
+      const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited
+      const reopened = new ProjectCommitStore(target), result = await reopened.bootstrapIndex(input, fresh)
+      expect(result.kind).toBe(phase === 'receipted' ? 'already-applied' : 'publication-unknown')
+      expect((await reopened.bootstrapIndex(bootstrap('hidden-retry'), fresh)).kind).toBe('busy')
+      expect((await fs.lstat(path.join(reopened.recovery, 'writer.lock'))).isDirectory()).toBe(true)
+      const op = path.join(reopened.recovery, 'operations', revisionOf('client\0bootstrap'))
+      expect(JSON.parse(await fs.readFile(path.join(op, 'request.json'), 'utf8'))).toEqual(input)
+      if (phase === 'published' || phase === 'receipted') expect(JSON.parse(await fs.readFile(target, 'utf8')).entries).toEqual([])
+      else await expect(fs.lstat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+      if (phase === 'receipted') expect(result.current!.raw).toBe(await fs.readFile(target, 'utf8'))
+      else await expect(fs.lstat(path.join(op, 'receipt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL') }
+  })
+})
+
 describe('exclusive first creation in the retained coordinator', () => {
   it('preserves unknown bytes in immutable history and returns only an exact durable receipt', async () => {
     const target = path.join(dir, 'new.json'), store = new ProjectCommitStore(target)

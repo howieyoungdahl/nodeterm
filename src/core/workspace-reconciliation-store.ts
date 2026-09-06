@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { promises as fs } from 'node:fs'
+import { constants as fsConstants, promises as fs } from 'node:fs'
 import type { Project, Workspace } from '../shared/types'
 import type { WorkspaceRevisionView, WorkspaceRevisionRequest, WorkspaceRevisionOutcome, ProjectRevisionOutcome } from '../shared/workspace-reconciliation'
 import { reconcileProjectDocuments, type ProjectDocument } from '../shared/project-reconciliation'
@@ -13,6 +13,7 @@ interface BoundView { file: string; snapshot: FileRevision; project: Project; en
 interface BoundClient {
   projects: Map<string, Map<string, BoundView>>
   indexes: Map<string, { snapshot: FileRevision; workspace: Workspace }>
+  bootstrap?: { kind: 'empty-v3'; token: string }
 }
 interface WorkspaceDriver {
   indexPath: string
@@ -59,6 +60,8 @@ export class WorkspaceReconciliationStore {
           const views = client.projects.get(value.id) ?? new Map()
           views.set(bound.snapshot.revision, bound); client.projects.set(value.id, views)
         } else if (value.kind === 'index') client.indexes.set(value.bound.snapshot.revision, value.bound)
+        else if (value.kind === 'bootstrap-absence' && value.indexPath === this.driver.indexPath &&
+          value.bootstrap?.kind === 'empty-v3' && /^[a-f0-9]{64}$/.test(value.bootstrap.token)) client.bootstrap = value.bootstrap
       }
     } catch { return undefined }
     this.clients.set(id, client)
@@ -79,7 +82,7 @@ export class WorkspaceReconciliationStore {
   async load(clientId?: string): Promise<WorkspaceRevisionView> {
     if (clientId && !await this.client(clientId)) throw new Error('E_UNKNOWN_RECONCILIATION_CLIENT')
     const id = clientId ?? randomUUID()
-    const client = this.clients.get(id) ?? { projects: new Map(), indexes: new Map() }
+    const client: BoundClient = this.clients.get(id) ?? { projects: new Map(), indexes: new Map() }
     this.clients.set(id, client)
     let indexSnapshot: FileRevision | undefined
     try { indexSnapshot = await new ProjectCommitStore(this.driver.indexPath, undefined, indexKeys).observe() }
@@ -127,11 +130,19 @@ export class WorkspaceReconciliationStore {
       const snapshot = indexSnapshot
       client.indexes.set(indexRevision, { snapshot, workspace: structuredClone(workspace) })
       await this.enroll(id, { kind: 'index', bound: client.indexes.get(indexRevision) })
+    } else if (!workspace.projects.length && !await this.freshWorkspaceScope()) {
+      if (!client.bootstrap) {
+        client.bootstrap = { kind: 'empty-v3', token: revisionOf(randomUUID()) }
+        await this.enroll(id, { kind: 'bootstrap-absence', indexPath: this.driver.indexPath, bootstrap: client.bootstrap })
+      }
+      // A read enrolls absence only. It never creates workspace.json or a default index.
+      if (!await this.freshWorkspaceScope()) return { clientId: id, workspace, projects, indexRevision, unsupported, bootstrap: client.bootstrap }
     }
     return { clientId: id, workspace, projects, indexRevision, unsupported }
   }
 
   async save(request: WorkspaceRevisionRequest): Promise<WorkspaceRevisionOutcome> {
+    if (request.bootstrap !== undefined) return this.bootstrapAndSave(request)
     const client = await this.client(request.clientId)
     const indexBase = client?.indexes.get(request.indexRevision)
     const outcomes: WorkspaceRevisionOutcome['projects'] = {}
@@ -236,6 +247,116 @@ export class WorkspaceReconciliationStore {
     } catch (error) {
       return { projects: outcomes, index: { kind: 'unavailable', recovery: await this.preserveRefusal(request.workspace), message: String(error) } }
     }
+  }
+
+  /** Workspace-owned evidence only: settings/auth are unrelated to workspace virginity.
+   * Bounded proof, no glob deletion, latest-cache admission or abandoned-lock adoption. */
+  private async freshWorkspaceScope(owner?: { operation: string; clientId: string; token: string }): Promise<string | undefined> {
+    const root = path.dirname(this.driver.indexPath)
+    let count = 0, bytes = 0, enrolled = false
+    const entries = async (dir: string): Promise<string[]> => {
+      if (!(await fs.lstat(dir)).isDirectory()) throw new Error('Workspace evidence directory is redirected.')
+      const found: string[] = []
+      for await (const entry of await fs.opendir(dir)) {
+        if (++count > 4096) throw new Error('Fresh workspace evidence exceeds 4096 entries.')
+        found.push(entry.name)
+      }
+      return found
+    }
+    const record = async (file: string): Promise<any> => {
+      const remaining = 32 * 1024 * 1024 - bytes, named = await fs.lstat(file)
+      if (!named.isFile()) throw new Error('Fresh workspace evidence is redirected.')
+      const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+      try {
+        const before = await handle.stat(), chunks: Buffer[] = []
+        if (!before.isFile() || before.dev !== named.dev || before.ino !== named.ino)
+          throw new Error('Fresh workspace evidence changed identity.')
+        if (before.size > remaining) throw new Error('Fresh workspace evidence exceeds 32 MiB.')
+        let read = 0
+        // Actual bytes, not a pre-stat estimate: one bounded sentinel detects growth.
+        while (read <= remaining) {
+          const chunk = Buffer.alloc(Math.min(64 * 1024, remaining + 1 - read))
+          const { bytesRead } = await handle.read(chunk, 0, chunk.length, null)
+          if (!bytesRead) break
+          read += bytesRead
+          if (read > remaining) throw new Error('Fresh workspace evidence exceeds 32 MiB during read.')
+          chunks.push(chunk.subarray(0, bytesRead))
+        }
+        bytes += read
+        const after = await handle.stat(), current = await fs.lstat(file)
+        if (!current.isFile() || current.dev !== before.dev || current.ino !== before.ino ||
+          after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs ||
+          current.size !== after.size || current.mtimeMs !== after.mtimeMs || current.ctimeMs !== after.ctimeMs)
+          throw new Error('Fresh workspace evidence changed during read.')
+        return JSON.parse(Buffer.concat(chunks, read).toString('utf8'))
+      } finally { await handle.close() }
+    }
+    try {
+      for (const name of await entries(root)) {
+        if (/^workspace(?:[.-]|$)/.test(name) || name === 'inline-projects' || name === 'reconciliation-refusals')
+          return `Prior workspace state exists: ${name}. Bootstrap cannot adopt or reset it.`
+        if (name === '.recovery') {
+          const recovered = await entries(path.join(root, name))
+          if (!owner || recovered.some((item) => item !== path.basename(this.driver.indexPath)))
+            return 'Retained workspace recovery state prevents first-run bootstrap.'
+          const recovery = path.join(root, name, path.basename(this.driver.indexPath))
+          for (const item of await entries(recovery)) {
+            if (item === 'operations') {
+              if ((await entries(path.join(recovery, item))).some((op) => op !== owner.operation))
+                return 'Another operation is retained in the bootstrap coordinator.'
+            } else if (item === 'writer.lock') {
+              const lockOwner = await record(path.join(recovery, item, 'owner.json'))
+              if (lockOwner.operation !== owner.operation || lockOwner.pid !== process.pid) return 'Bootstrap writer ownership changed.'
+            } else if (item !== 'refusals') return 'Prior index history prevents bootstrap.'
+          }
+        }
+        if (name === 'reconciliation-clients') {
+          const clients = path.join(root, name)
+          for (const id of await entries(clients)) {
+            if (!/^[a-f0-9-]{36}$/.test(id)) return 'Unrecognized retained workspace client.'
+            for (const file of await entries(path.join(clients, id))) {
+              const value = await record(path.join(clients, id, file))
+              if (value.kind !== 'bootstrap-absence' || value.indexPath !== this.driver.indexPath ||
+                value.bootstrap?.kind !== 'empty-v3' || !/^[a-f0-9]{64}$/.test(value.bootstrap.token))
+                return 'Prior or unresolved workspace client intent prevents bootstrap.'
+              if (owner && id === owner.clientId && value.bootstrap.token === owner.token) enrolled = true
+            }
+          }
+        }
+      }
+      if (owner && !enrolled) return 'Exact durable absence enrollment is unavailable; cached eligibility is not authority.'
+    } catch (error) { return `Fresh workspace evidence unavailable: ${String(error)}` }
+  }
+
+  private async bootstrapAndSave(request: WorkspaceRevisionRequest): Promise<WorkspaceRevisionOutcome> {
+    const refuse = async (message: string): Promise<WorkspaceRevisionOutcome> => ({ projects: {},
+      index: { kind: 'publication-refused', recovery: await this.preserveRefusal(request), message } })
+    const client = await this.client(request.clientId), project = request.workspace.projects[0]
+    if (!client?.bootstrap || request.bootstrap?.kind !== 'empty-v3' || request.bootstrap.token !== client.bootstrap.token ||
+      request.indexRevision !== '' || Object.keys(request.expected).length || request.workspace.projects.length !== 1 ||
+      !Array.isArray(request.createInline) || request.createInline.length !== 1 || request.createInline[0] !== project?.id ||
+      !isInlineProjectFileId(project.id) || project.cwd !== undefined || project.ssh !== undefined ||
+      project.remote !== undefined || project.unavailable || request.workspace.activeProjectId !== project.id)
+      return refuse('Bootstrap requires this caller\'s enrolled virgin absence and exactly one explicit new local inline project.')
+    const operationId = `${request.operationId}:bootstrap`
+    const result = await new ProjectCommitStore(this.driver.indexPath, undefined, indexKeys).bootstrapIndex({
+      clientId: request.clientId, operationId, expectedAbsence: true, bootstrapToken: client.bootstrap.token,
+      intent: JSON.stringify(request)
+    }, () => this.freshWorkspaceScope({ operation: revisionOf(`${request.clientId}\0${operationId}`),
+      clientId: request.clientId, token: client.bootstrap!.token }))
+    const bootstrap = { kind: result.kind, revision: result.current?.revision, recovery: result.recovery, message: result.message }
+    if ((result.kind !== 'committed' && result.kind !== 'already-applied') || !result.current)
+      return { projects: {}, bootstrap, index: { kind: result.kind === 'publication-unknown' ? 'publication-unknown' : 'stale-base',
+        recovery: result.recovery, message: 'Empty-index bootstrap is unresolved; no child or final index was published by this request.' } }
+    const raw = JSON.parse(result.current.raw)
+    if (raw.version !== 3 || raw.activeProjectId !== '' || !Array.isArray(raw.entries) || raw.entries.length)
+      return { ...await refuse('Bootstrap receipt is not the exact empty-v3 constructor.'), bootstrap }
+    const bound = { snapshot: result.current, workspace: { version: 2 as const, activeProjectId: '', projects: [] } }
+    client.indexes.set(result.current.revision, bound)
+    await this.enroll(request.clientId, { kind: 'index', bound })
+    // Only the exact own receipt supplies the base. Current disk/latest caches cannot grant it.
+    const { bootstrap: _bootstrap, ...original } = request
+    return { ...await this.save({ ...original, operationId: `${request.operationId}:inline`, indexRevision: result.current.revision }), bootstrap }
   }
 
   private indexCreationRefusal(index: { version?: number; entries?: IndexEntryV3[]; _reconciliation?: { deleted?: { entries?: unknown } } }, id: string): string | undefined {

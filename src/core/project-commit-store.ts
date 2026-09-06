@@ -19,6 +19,14 @@ export interface FileCreateRequest {
   indexRevision: string
   proposed: string
 }
+export interface IndexBootstrapRequest {
+  clientId: string
+  operationId: string
+  expectedAbsence: true
+  bootstrapToken: string
+  /** Immutable logical workspace request binds every subsequent phase, including child ID. */
+  intent: string
+}
 export interface FileCommitResult {
   kind: 'committed' | 'already-applied' | 'conflict' | 'stale-base' | 'busy' |
     'publication-refused' | 'publication-unknown' | 'unavailable'
@@ -210,6 +218,17 @@ export class ProjectCommitStore {
   /** Create only a virgin destination. The existing recovery directory is the retained
    * history fence, not permission to reset a missing file. No destination is displaced. */
   async create(request: FileCreateRequest, checkScope?: () => Promise<string | undefined>): Promise<FileCommitResult> {
+    return this.createVirgin(request, checkScope)
+  }
+
+  /** Distinct host-only empty-v3 constructor; ordinary project creation still requires a real index base. */
+  async bootstrapIndex(request: IndexBootstrapRequest, checkScope: () => Promise<string | undefined>): Promise<FileCommitResult> {
+    if (typeof checkScope !== 'function') return { kind: 'publication-refused', recovery: this.recovery, message: 'Fresh workspace scope is required.' }
+    return this.createVirgin(request, checkScope, true)
+  }
+
+  private async createVirgin(request: FileCreateRequest | IndexBootstrapRequest,
+    checkScope?: () => Promise<string | undefined>, bootstrap = false): Promise<FileCommitResult> {
     const op = path.join(this.recovery, 'operations', revisionOf(`${request.clientId}\0${request.operationId}`))
     const requestRaw = JSON.stringify(request)
     const result = (kind: FileCommitResult['kind'], extra: Partial<FileCommitResult> = {}): FileCommitResult =>
@@ -250,15 +269,18 @@ export class ProjectCommitStore {
       await this.durable(path.join(op, 'request.json'), requestRaw)
       await this.durable(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, operation: path.basename(op) }))
       await this.phase?.('creation-prepared')
-      if (request.expectedAbsence !== true || !/^[a-f0-9]{64}$/.test(request.indexRevision))
+      const projectRequest = request as FileCreateRequest, indexRequest = request as IndexBootstrapRequest
+      if (request.expectedAbsence !== true || !/^[a-f0-9]{64}$/.test(bootstrap ? indexRequest.bootstrapToken : projectRequest.indexRevision) ||
+        (bootstrap && typeof indexRequest.intent !== 'string'))
         return await this.finish(op, result('stale-base', { message: 'Explicit absence and enrolled index revision are required.' }))
       try {
         await fs.lstat(this.file)
         return await this.finish(op, result('publication-refused', { message: 'Creation destination already exists; it was not replaced.' }))
       } catch (error) { if (errorCode(error) !== 'ENOENT') throw error }
-      await this.durable(path.join(op, 'absence.json'), JSON.stringify({ file: this.file, indexRevision: request.indexRevision, absent: true }))
-      const proposed = jsonObject(request.proposed)
-      if (proposed.version !== 1 || typeof proposed.id !== 'string' || !Array.isArray(proposed.nodes) || proposed._reconciliation !== undefined)
+      await this.durable(path.join(op, 'absence.json'), JSON.stringify({ file: this.file, absent: true,
+        ...(bootstrap ? { bootstrapToken: indexRequest.bootstrapToken } : { indexRevision: projectRequest.indexRevision }) }))
+      const proposed = bootstrap ? { version: 3, activeProjectId: '', entries: [] } : jsonObject(projectRequest.proposed)
+      if (!bootstrap && (proposed.version !== 1 || typeof proposed.id !== 'string' || !Array.isArray(proposed.nodes) || proposed._reconciliation !== undefined))
         return await this.finish(op, result('conflict', { message: 'Creation requires a new version-1 project, not historical reconciliation metadata.' }))
       const validated = reconcileProjectDocuments(proposed, proposed, proposed)
       const invalid = graphRefusal(validated.document)
