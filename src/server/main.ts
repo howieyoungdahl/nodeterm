@@ -1,4 +1,4 @@
-import { resolveConfig } from './config'
+import { assertTmuxSocketBound, resolveConfig } from './config'
 import { startServer } from './index'
 
 /**
@@ -12,6 +12,14 @@ process.on('unhandledRejection', (e) => console.error('[nodeterm-server] unhandl
 
 async function main(): Promise<void> {
   const config = resolveConfig(process.env, process.argv.slice(2))
+  // A --tmux-socket that cannot take effect is a refusal, not a warning: an instance that thinks
+  // it is isolated and is not would be worse than one that never claimed to be.
+  assertTmuxSocketBound(config)
+  // Announced only when it is NOT the historical default, so an ordinary install's output stays
+  // byte-identical.
+  if (config.tmuxSocket && config.tmuxSocket !== 'node-terminal') {
+    console.log(`[nodeterm-server] tmux socket: ${config.tmuxSocket}`)
+  }
   const { port, close } = await startServer(config)
   // Headless binds no listener, so there is nothing to announce as "listening" (startServer already
   // logged the headless line). Only print the address in normal serving mode.
