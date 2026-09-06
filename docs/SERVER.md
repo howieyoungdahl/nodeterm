@@ -57,6 +57,10 @@ npm run server:start  # node out/server/main.cjs
 
 ## Configuration
 
+For automatic updates to an existing browser-server user service, see
+[Automatic browser-server updates](server-auto-updates.md). It builds merged changes separately
+and waits for browser viewers to disconnect before activating a verified release.
+
 Precedence: **CLI flag > environment variable > default.**
 
 | Flag | Env var | Default | Meaning |
@@ -686,8 +690,18 @@ as an inert dead card; the browser shows that state and never asks for a replace
 surviving or unreadable backend is guarded by an attach-only primitive (`tmux attach-session` or
 session-host attach-existing), so even a backend that disappears between the boot probe and browser
 mount cannot fall through to attach-or-create. Only node ids created during the current Server run
-may take the normal fresh-spawn path. Plain terminals carry no agent identity or canvas-control
-grant; missing `agentId` never means Claude.
+may take the normal fresh-spawn path.
+
+A plain terminal starts with no agent identity or canvas-control grant. When an operator launches
+an agent in it by hand, the generated shim repairs only the missing discovery variables; the Server
+still requires a verified hook registration. That registration promotes the card for the node's
+remaining process lifetime, so status, delivery queueing, dependency arming, and self-card metadata
+updates behave like a spawned agent. It does not grant ownership of another node: everything the
+node created keeps its original creator, and unrelated targets remain refused. A stale,
+unversioned whole-workspace save can remove a card without killing its independently managed pane;
+the next verified hook restores that card only when both the backend is alive and current-run
+pane-to-project provenance identifies exactly one project, logging one warning. Otherwise the error
+names the node and tells the operator to open the terminal from the canvas inside the target project.
 
 Immediately after that classification, boot runs the same orphan adoption the operator endpoint
 exposes. It lists live local `nt-<id>` sessions whose id no project still carries, resolves each

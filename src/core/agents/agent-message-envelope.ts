@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto'
 import { sanitizePasteText } from '../paste-injection'
+import type { MessageIdentity } from './message-integrity'
 
 /**
  * THE ENVELOPE — an app-owned frame around one agent-to-agent message.
@@ -52,6 +53,8 @@ export const FRAME_NONCE_BYTES = 9
 const FRAME_WORD = 'NODETERM MESSAGE'
 
 export interface EnvelopeParts {
+  /** Canonical correlation claims, checked through the assignment adapter before sending. */
+  message?: MessageIdentity
   /** Per-delivery, app-generated. Never supplied by, and never shown to, the sender. */
   nonce: string
   sourceId: string
@@ -127,6 +130,7 @@ export function buildEnvelope(p: EnvelopeParts): string {
     `--- ${FRAME_WORD} ${nonce} ---`,
     `from: ${oneLine(p.sourceTitle)} (${oneLine(p.sourceId)})`,
     `reply-to: ${oneLine(p.replyTo)}`,
+    ...(p.message ? [`message-metadata: ${oneLine(JSON.stringify(p.message))}`] : []),
     sanitizePasteText(p.body),
     `--- END ${FRAME_WORD} ${nonce} ---`
   ].join('\n')

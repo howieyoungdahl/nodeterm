@@ -85,6 +85,7 @@
  * which no other agent's tool shell sets, and one builder beats a codex-only fork of it.
  */
 import { codexThreadIdentityResolverSh } from '../../codex-thread-identity-sh'
+import { codexHookIdentityBootstrapSh } from '../../codex-hook-identity-sh'
 import { codexThreadIdentityRoot } from '../../codex-identity-proxy'
 import { HOOK_CURL_HEADERS_SH } from '../hook-curl-config-sh'
 import { NODE_TOKEN_READ_SH } from '../node-token-sh'
@@ -131,7 +132,9 @@ export function buildManagedScript(
 ): string {
   return [
     '#!/bin/sh',
-    ...(identityRoot ? [codexThreadIdentityResolverSh(identityRoot)] : []),
+    ...(agentId === 'codex' && identityRoot ? [codexHookIdentityBootstrapSh()] : []),
+    // Identity refusal precedes the node gate too: drain the writer and keep hook stdout empty.
+    ...(identityRoot ? [codexThreadIdentityResolverSh(identityRoot, 'hook')] : []),
     '# GATE FIRST, and drain stdin before bailing (issues #186/#187). Order is load-bearing twice:',
     '#  - The codex thread-identity prelude above may DERIVE the node id (and endpoint) from its',
     '#    thread id, so the gate cannot move above it — but nothing below needs to run for a',
@@ -184,7 +187,7 @@ export function buildManagedScript(
     NODE_TOKEN_READ_SH,
     'nt_read_node_token',
     HOOK_CURL_HEADERS_SH,
-    'payload=$(cat)',
+    ...(agentId === 'codex' && identityRoot ? [] : ['payload=$(cat)']),
     'if [ -z "$payload" ]; then',
     '  exit 0',
     'fi',
@@ -316,10 +319,18 @@ export function buildManagedScript(
     'if [ -n "$nt_pending" ]; then',
     '  nt_send_request',
     'else',
+    ...(agentId === 'codex' && identityRoot ? [
+      '  if [ "$nt_codex_payload_recovered" = 1 ]; then',
+      '    # The next tool may be canvas control: finish bounded registration before hook exit.',
+      '    nt_send_request',
+      '    rm -f "$nt_payload_file" 2>/dev/null || :',
+      '  else'
+    ] : []),
     '  # Background the POST (a live session\'s hot path never blocks) and delete the payload temp',
     '  # file only AFTER it — and its one fallback retry — have finished reading it, so the file',
     '  # never outlives its reader. The perm-wait branch keeps the file for its "answered" POST.',
     '  { nt_send_request; rm -f "$nt_payload_file" 2>/dev/null || :; } &',
+    ...(agentId === 'codex' && identityRoot ? ['  fi'] : []),
     'fi',
     // The poll/decision section below is claude-only at BUILD time, like the arm above: with
     // nt_pending permanently empty it was already unreachable in other agents' scripts, but

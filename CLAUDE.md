@@ -43,6 +43,8 @@ means — and what you may assume when writing a feature — is three tiers, not
 
 ## Commands
 
+Messaging queue integrity: `docs/message-delivery-integrity.md` defines the optional assignment-validation callback, logical message receipts, and legacy compatibility boundary. A target turn hook does not establish message-specific work acceptance. Queue expiry must be checked at the send boundary as well as by timers.
+
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall hook)
 npm run dev        # dev mode with renderer HMR
@@ -150,6 +152,24 @@ remote access / paid tiers can be added without touching the canvas or terminal 
 adding terminal-session features, extend the interface — do not reach around it.
 
 ## State & persistence model
+
+Workspace saves report partial local-project write failures after saving the remaining projects
+and index. A successful index write alone is not proof that the canvas reached disk. The renderer's
+`useSavePersistence` and `useAutosave` hooks retain failed delivery state and schedule five bounded
+retries, including failures before the first edit. An exhausted schedule leaves a visible Retry
+button; an unresolved external-change conflict pauses saving. Regression tests mount the hooks and
+exercise real timers under fake time, and drive failed project writes through the store IPC handler.
+This protects both desktop and Server Edition; it does not create or restart terminal backends.
+
+The optional browser-server updater (`core/server-updater.ts`, `server/update-main.ts`) builds
+one configured integration ref in detached release worktrees. It uses an updater-private fetched
+ref because FETCH_HEAD is shared with concurrent worktrees. Activation checks browser/spawn/message
+quiescence twice, backs up saved canvases, retains original tmux pane ids/PIDs, and verifies both
+process and card continuity after switching a stable symlink. A failed activation rolls back the
+release and rechecks continuity. It never restores old workspace data over newer writes. Open
+browsers defer updates; this is not a coordinated browser-save protocol. The install helper only
+sets up user units and a current-build symlink; it does not restart the live service. Details and
+limits: `docs/server-auto-updates.md`.
 
 **React Flow is the single live source of truth** for nodes. There is intentionally no
 separate store mirroring node state — earlier dual-source designs caused sync bugs.
@@ -1133,14 +1153,22 @@ else, and its context links must keep classifying across restarts).
     layout by construction on all three surfaces) and then the well-known data dirs; it is monotone
     — advertised dir first, keyed by node-id filename in every candidate, and a foreign instance's
     dir yields a foreign `kid` = `legacy` = exactly what presenting nothing already gave.
-  - **Every LOCAL generated sh client recovers shared-Codex identity before its env gate.** A tool
-    shell forked by the account-scoped app-server carries `CODEX_THREAD_ID`, not the pane's
-    `NODETERM_*`. Managed hooks, local `nodeterm.sh`, and local `context.sh` therefore prepend
-    `codexThreadIdentityResolverSh(codexThreadIdentityRoot())` before testing
-    `NODETERM_NODE_ID`/`NODETERM_CANVAS_CONTROL`. Before this was shared, status hooks recovered the
-    node while both user-facing shims declared that same first-class Codex session outside
-    nodeterm. The SSH constants remain machine-neutral: the local record root is not valid on a
-    remote host and must never be baked into its copy.
+  - **Every LOCAL generated sh client resolves shared-Codex identity before its env gate.** A
+    reused daemon can carry absent, incomplete or complete foreign `NODETERM_*`. Always look up the
+    exact thread/account binding: recover incomplete context, accept matching complete context,
+    preserve complete direct launches only when records are absent, and refuse conflicts or
+    existing invalid/unreadable/ambiguous evidence by name before transport. Complete means a valid
+    node and endpoint plus any nonempty client `NODETERM_CANVAS_CONTROL`; agent-role metadata and
+    `NODETERM_SERVER_CANVAS_CONTROL` are not substitutes. Recovery clears inherited transport and
+    credentials before loading the bound endpoint. Managed hooks pass `'hook'` to the shared
+    prelude so refusal drains stdin and exits 0 with empty stdout; commands exit 1. Shape/scope
+    checking is not HMAC verification. See `docs/shared-codex-node-identity.md` for account semantics
+    and exact comparisons. SSH constants stay machine-neutral; never bake in the local record root.
+    Codex hooks additionally parse their top-level JSON-stdin `session_id` before the missing-node
+    gate, since a daemon hook need not carry the tool shell's `CODEX_THREAD_ID`. Keep the original
+    body for delivery, use the same scoped binding resolver and refuse payload/env disagreement.
+    A payload is not authority. No-parser direct launches retain their old path; payload-only
+    unavailability is explicit. Other providers must not inherit this Codex payload bootstrap.
   - **Every generated sh client walks the SAME endpoint failover** (`nt_candidates`/`nt_adopt`,
     `core/agents/hook-endpoint-failover-sh.ts`) — issue #445, the endpoint-level twin of #384: a
     session is pinned for life to the endpoint PATH it got at tmux creation, so an app
@@ -1383,8 +1411,11 @@ else, and its context links must keep classifying across restarts).
   **form-urlencoded** (`nodeId` + `arg.<flag>` fields; `curl --data-urlencode` is the only
   escaping sh can be trusted with — `parseControlBody` reads both this and the JSON dialect) to
   the hook server's `/control/<verb>` routes; `Accept: text/plain` makes the server render the
-  reply (sh has no JSON parser). Env-gated on `NODETERM_CANVAS_CONTROL` (set by
-  `buildPtyEnv`/`remoteHookEnvArgs` per `canControlCanvas`). Discovery: claude gets a
+  reply (sh has no JSON parser). Normally env-gated on `NODETERM_CANVAS_CONTROL` (set by
+  `buildPtyEnv`/`remoteHookEnvArgs` per `canControlCanvas`). A hand-relaunched agent in a terminal
+  has node + hook discovery but no spawn-time grant, so the shim repairs the missing discovery bit
+  and agent id (parent-process `claude`/`codex`/`gemini`, otherwise Claude); the Server still owns
+  authorization. Discovery: claude gets a
   `skills/manage-nodeterm-canvas/SKILL.md` (system `~/.claude` + each managed account dir);
   codex/gemini/opencode plus Copilot's `copilot-instructions.md` get a marker block
   (`<!-- nodeterm:manage-canvas:start/end -->`); **grok needs
@@ -1416,9 +1447,15 @@ else, and its context links must keep classifying across restarts).
   (`tmux attach-session` / session-host attach-existing). Neither path can create a context-free
   shell, including if the backend disappears between boot and browser mount. Only node ids created
   during the current Server run retain the normal fresh-spawn path. `open-terminal` and
-  `open-agent` are verified-only at the Server handler boundary. A plain terminal keeps generic
-  node hook wiring but receives neither `NODETERM_AGENT_ID` nor `NODETERM_CANVAS_CONTROL`; missing
-  identity never defaults to Claude.
+  `open-agent` are verified-only at the Server handler boundary. A plain terminal starts with only
+  generic node hook wiring. Its first verified hand-launched-agent registration durably marks the
+  card for the process lifetime, enables status/queue/dependency semantics, and permits self-card
+  metadata updates without changing creator ownership of any other node. If an unversioned stale
+  whole-workspace save removed its card while the pane survived, that verified registration may
+  restore the card only from an alive backend plus the current-run pane-to-project provenance and
+  emits one warning. With no such provenance, control returns an actionable instruction to open the
+  terminal from the canvas inside the target project. Hook history, a tmux name, and project JSON
+  never reconstruct creator ownership.
   **Orphan adoption is the mirror image of that classification, not an exception to it (2026-09):**
   right after `protectPersistedSessionsAtBoot`, and on demand via `POST /opsapi/adopt-orphans`,
   `ServerNodeOps.adoptOrphans` lists live `nt-<id>` tmux sessions whose id NO local project still

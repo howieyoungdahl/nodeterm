@@ -121,6 +121,15 @@ bug.
 different facts and must stay distinguishable at every layer. Collapsing them is how a panel ends up
 reporting "no sessions" on a host running thirty.
 
+**A workspace save must reject if any local project write fails.** The renderer uses that result
+to keep changes unsaved, show a warning, and retry on a bounded schedule. Swallowing a per-project
+error can leave new terminal cards only in browser memory until a refresh removes them. Keep
+initial saves on the same failure path, and never let retries override an unresolved conflict.
+Browser-server updates must build in isolated release worktrees and preserve tmux. The optional
+updater waits for all browser clients to disconnect, verifies exact pane ids/PIDs and saved cards,
+and rolls back failed activation. Never replace those checks with an HTTP-only health check.
+See `docs/server-auto-updates.md` for the deployment contract and its remaining connection race.
+
 **Degrade to nothing, never to something wrong.** A probe that fails means the bare, safe command —
 never a substituted nearest match. A hand-editable value that is unrecognised must yield the safe
 default, never something more destructive than the default.
@@ -171,9 +180,13 @@ composed pane after Enter; if it did not advance, send one bounded retry and cap
 target's verified next-turn hook remains the delivery receipt. Never report the paste as delivered
  from a successful tmux command alone, and never loop Enter against somebody else's composer.
 
-**A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
-a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
-`NODETERM_CANVAS_CONTROL` until the serialized node explicitly names an agent.
+**A plain terminal starts without an agent identity or canvas-control grant.** It carries only the
+generic node/endpoint wiring needed for a hand-launched agent to report hooks. A generated shim may
+repair its missing discovery variables, but the Server remains authoritative: only a verified hook
+promotes that terminal to the reporting agent for the node's remaining lifetime. Promotion permits
+self-card metadata updates and preserves the node's existing creator ledger; it never adopts another
+node. If a stale whole-workspace save dropped the live card, recovery additionally requires the
+current-run pane-to-project provenance and an alive backend.
 
 **Re-validate hand-editable values at the point of use**, not by their TypeScript type. Settings
 come from git-shared JSON and can end up interpolated into a shell command line.
@@ -253,12 +266,25 @@ that file advertises presents nothing forever when the file is old or unreadable
 hook script alone could heal itself, the same node proved itself through one client and was refused
 through another for the life of the session.
 
-**Local generated sh clients recover shared-Codex identity before their env gate.** A Codex tool
-shell is forked by the account-scoped app-server, so it has `CODEX_THREAD_ID` but not the pane's
-`NODETERM_*`. Managed hooks, local `nodeterm.sh`, and local `context.sh` must prepend
-`codexThreadIdentityResolverSh(codexThreadIdentityRoot())` before checking `NODETERM_NODE_ID` or
-`NODETERM_CANVAS_CONTROL`. Keep the SSH shim constants machine-neutral: baking the desktop/server
-record path into a remote host is both wrong and a local-layout leak.
+**Local generated sh clients resolve shared-Codex identity before their env gate.** A reused
+account-scoped app-server can give a tool shell absent, incomplete, or complete foreign
+`NODETERM_*`. Always look up its exact thread/account binding: recover incomplete context, accept
+matching complete context, preserve complete direct launches only when records are absent, and
+refuse conflicts or existing invalid/unreadable/ambiguous evidence by name before transport.
+Complete means a valid node and endpoint plus any nonempty client `NODETERM_CANVAS_CONTROL`;
+agent-role metadata and `NODETERM_SERVER_CANVAS_CONTROL` are not substitutes. Recovery clears
+inherited transport/credential fields before loading the bound endpoint. Managed hooks must pass
+`'hook'` to `codexThreadIdentityResolverSh` so refusal drains stdin and exits 0 with empty stdout;
+commands exit 1. The shell checks protected-record shape/scope, not HMAC signatures. See
+`docs/shared-codex-node-identity.md` for account semantics and exact comparisons. Keep the SSH shim
+constants machine-neutral: a local record root must never be baked into a remote host's copy.
+
+Codex hooks must also recover a mapped session from their JSON stdin before the missing-node
+gate. A daemon hook need not carry the tool shell's `CODEX_THREAD_ID`. Parse the top-level
+`session_id` with a real JSON parser, retain the original body for delivery, and pass that ID
+through the same scoped resolver. Payload/env disagreements refuse; a payload is not authority.
+Keep no-parser direct launches compatible and make payload-only unavailability explicit. Other
+providers must not inherit Codex's payload bootstrap.
 
 **A stream error is not a throw you can catch.** When a write to `process.stdout`/`stderr` fails —
 `EPIPE` down a closed pipe, `EIO` after macOS revokes a closed terminal's tty — node reports it by
@@ -315,6 +341,8 @@ that probe runs only after the free permission/status checks. Test fixtures disa
 and instruction installation; temporary test paths must never reach live provider homes.
 
 ## Testing
+
+Messaging queue changes must preserve deadlines at the actual send boundary and keep transport delivery separate from recipient work acceptance. The opt-in assignment adapter, receipt bounds, and remaining legacy integration are documented in `docs/message-delivery-integrity.md`.
 
 `npm test` must pass, and `npm run typecheck` is the fastest gate.
 
