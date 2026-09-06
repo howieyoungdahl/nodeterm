@@ -151,6 +151,7 @@ import {
   type SaveDelivery
 } from '../lib/savePersistence'
 import { SaveFailureBar } from '../components/SaveFailureBar'
+import { WorkspaceReconciliationClient } from '../state/workspaceReconciliation'
 import {
   adoptedNodesNotice,
   decideExternalChange,
@@ -893,6 +894,8 @@ export function Canvas() {
   // For the local session it IS window.nodeTerminal, so every call resolves identically.
   const session = useSession()
   const { api } = session
+  const reconciler = useMemo(() => new WorkspaceReconciliationClient(api.workspace), [api.workspace])
+  const [, showReconciliation] = useState(0)
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
   // Persistent context links between Claude nodes (separate from ephemeral subagent/loop edges).
   const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
@@ -2224,20 +2227,20 @@ export function Canvas() {
           markMobileLaunchSeen()
         }
       })
-    api.workspace.load().then((ws) => {
+    reconciler.load().then((ws) => {
       if (cancelled) return
       // One-time unification: fold legacy free-text node `tags` into board labels (idempotent —
-      // a project with no tagged nodes is returned unchanged). The unconditional save below then
-      // persists the conversion, so the next load is a no-op.
+      // a project with no tagged nodes is returned unchanged). A changed view is marked dirty;
+      // persistence still has to pass the same revision-bound contract as an ordinary edit.
       const projects = ws.projects.map(migrateProjectTags)
       useProjects.getState().hydrate({ ...ws, projects })
-      // Upgrade the on-disk format (e.g. v1 -> v2 migration) right away. Reported like every
-      // other save: a `void` here used to make the very first write of the session the one write
-      // that could fail with no signal at all — including the format migration.
-      api.workspace.save(useProjects.getState().toWorkspace()).catch((err: unknown) => {
-        console.warn('[canvas] initial workspace save failed', err)
-        setSaveDelivery((prev) => nextSaveDelivery(prev, Date.now()))
-      })
+      // A load is not permission for a blind migration write. Unsupported formats remain
+      // visible/read-only until a revision-aware migration adapter is installed.
+      showReconciliation((value) => value + 1)
+      if (projects.some((project, index) => project !== ws.projects[index])) bumpDirty()
+    }).catch((err: unknown) => {
+      reconciler.error = `Workspace revision load failed: ${String(err)}`
+      showReconciliation((value) => value + 1)
     })
     return () => {
       cancelled = true
@@ -2551,6 +2554,29 @@ export function Canvas() {
         )
   }, [])
 
+  const readReconciliationWorkspace = useCallback(() => {
+    commitActiveToStore()
+    return useProjects.getState().toWorkspace()
+  }, [commitActiveToStore])
+
+  const adoptReconciliationWorkspace = useCallback((workspace: ReturnType<typeof readReconciliationWorkspace>) => {
+    for (const project of workspace.projects) useProjects.getState().replaceProject(project)
+    // Update refs synchronously: another event/save can run before React's reload effect.
+    const active = useProjects.getState().getProject(useProjects.getState().activeProjectId)
+    const changed = active && (JSON.stringify(active.nodes) !== JSON.stringify(flowToNodeStates(nodesRef.current)) ||
+      JSON.stringify(active.bridges ?? []) !== JSON.stringify(linkEdgesRef.current.map(({ id, source, target }) => ({ id, source, target }))) ||
+      JSON.stringify(active.ropes ?? []) !== JSON.stringify(controlEdgesRef.current.map(({ id, source, target }) => ({ id, source, target }))))
+    if (active && changed && canCommitCanvas(nodesProjectIdRef.current, active.id)) {
+      nodesRef.current = nodeStatesToFlow(active.nodes)
+      setNodes(nodesRef.current)
+      linkEdgesRef.current = (active.bridges ?? []).map((edge) => ({ ...edge }))
+      controlEdgesRef.current = (active.ropes ?? []).map((edge) => ({ ...edge }))
+      preserveViewportRef.current = true
+      useProjects.getState().requestReload()
+    }
+    showReconciliation((value) => value + 1)
+  }, [readReconciliationWorkspace, setNodes])
+
   const writeDisk = useCallback(async () => {
     // Captured BEFORE the snapshot is built (`toWorkspace()` runs synchronously on this line), so
     // it names exactly the edits this save carries. A save is not instant — an SSH mirror write
@@ -2558,7 +2584,12 @@ export function Canvas() {
     // await as saved, which let the watcher's not-dirty branch clobber them (field bug 2026-08-10).
     const gen = dirtyGenRef.current
     try {
-      await api.workspace.save(useProjects.getState().toWorkspace())
+      const result = await reconciler.save(readReconciliationWorkspace(), readReconciliationWorkspace)
+      adoptReconciliationWorkspace(result.workspace)
+      if (!result.saved) {
+        setSaveDelivery((prev) => nextSaveDelivery(prev, Date.now()))
+        return
+      }
     } catch (err) {
       // The save was refused, or the socket carrying it closed (the ws bridge synthesises
       // E_DISCONNECTED so an await fails rather than hanging). Both used to be thrown away by the
@@ -2567,6 +2598,7 @@ export function Canvas() {
       // scheduled again. Record the refusal (it is a dep, so this re-arms the effect at the
       // backoff delay) and let the strip say so. Never clear `dirty` — nothing reached disk.
       console.warn('[canvas] workspace save failed', err)
+      showReconciliation((value) => value + 1)
       setSaveDelivery((prev) => nextSaveDelivery(prev, Date.now()))
       return
     }
@@ -2579,7 +2611,7 @@ export function Canvas() {
     // debounce effect only re-arms when one of its deps changes, and `dirty` never went false —
     // nudge it explicitly, or the racing edit would wait for an unrelated later edit to be saved.
     setResaveTick((v) => v + 1)
-  }, [])
+  }, [reconciler, readReconciliationWorkspace, adoptReconciliationWorkspace])
 
   const persist = useCallback(async () => {
     commitActiveToStore()
@@ -2676,6 +2708,13 @@ export function Canvas() {
   // the phone registering a session it started).
   useEffect(() => {
     return api.workspace.onExternalChange((project) => {
+      if (api.workspace.loadReconciled) {
+        void reconciler.refresh(readReconciliationWorkspace).then(adoptReconciliationWorkspace).catch((error) => {
+          reconciler.error = `Incoming revision could not be reconciled: ${String(error)}`
+          showReconciliation((value) => value + 1)
+        })
+        return
+      }
       const { activeProjectId: current } = useProjects.getState()
       if (project.id !== current) {
         // Background project: adopt silently — it reloads into React Flow on next switch.
@@ -2716,7 +2755,7 @@ export function Canvas() {
       }
       // 'ignore': a self-write echo / a change we already hold. Nothing to do, and above all no bar.
     })
-  }, [reloadActiveProject, adoptIncomingNodes])
+  }, [reloadActiveProject, adoptIncomingNodes, reconciler, readReconciliationWorkspace, adoptReconciliationWorkspace])
 
   // One-shot note after an on-disk migration (dismissible, non-blocking strip). Both kinds change
   // where the user's data lives, so neither may happen silently.
@@ -13074,6 +13113,20 @@ export function Canvas() {
             }}
           />
         )}
+        {reconciler.error && <div role="alert" style={{ padding: 8 }}>{reconciler.error}</div>}
+        {(reconciler.conflicts.get(activeProjectId) ?? []).map((field) => (
+          <div role="alert" key={JSON.stringify(field.path)} style={{ padding: 8 }}>
+            Unresolved field: {field.path.join(' / ')}. Other incoming additions are retained.
+            {(['local', 'incoming'] as const).map((side) => (
+              <button key={side} onClick={() => {
+                const next = reconciler.resolve(readReconciliationWorkspace(), activeProjectId, field, side)
+                adoptReconciliationWorkspace(next)
+                bumpDirty()
+                setResaveTick((value) => value + 1)
+              }}>{field.kind === 'deleted-node' ? 'Keep deletion' : side === 'local' ? 'Use my field' : 'Use incoming field'}</button>
+            ))}
+          </div>
+        ))}
         {conflict && (
           <ConflictBar
             addedCount={conflict.added}

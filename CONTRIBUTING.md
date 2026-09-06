@@ -367,7 +367,7 @@ user gesture on a settled canvas.
 
 Project reconciliation must retain a committed raw common base independently of pending renderer
 edits. Unknown fields need a raw-base overlay before typed serialization; a conflict preview is not
-a writable resolution. The pure helpers and their current integration limits are documented in
+a writable resolution. The revision-bound adapters and their explicit rollout limits are documented in
 `docs/project-reconciliation.md`. A successful atomic rename is not a compare-and-swap against an
 external editor, and only a durable operation receipt establishes a recovered save acknowledgment.
 

@@ -365,6 +365,8 @@ export const IPC = {
   /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */
   workspaceCorruptRecovered: 'workspace:corrupt-recovered',
   workspaceExternalChange: 'workspace:external-change',
+  workspaceLoadReconciled: 'workspace:load-reconciled',
+  workspaceSaveReconciled: 'workspace:save-reconciled',
   githubIssuesSubscribe: 'githubIssues:subscribe',
   githubIssuesUnsubscribe: 'githubIssues:unsubscribe',
   githubIssuesQuery: 'githubIssues:query',

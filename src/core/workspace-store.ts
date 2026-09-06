@@ -27,6 +27,9 @@ import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 import { collisionSeed, derivedProjectId, freshProjectId } from '../shared/project-id'
 import { appendProjectNode, removeProjectNode, type RemoteNodeInput } from './project-node-append'
+import { WorkspaceReconciliationStore } from './workspace-reconciliation-store'
+import { ProjectCommitStore } from './project-commit-store'
+import type { WorkspaceRevisionRequest } from '../shared/workspace-reconciliation'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
  *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
@@ -80,6 +83,12 @@ interface LoadedEntry {
 }
 
 export async function writeAtomic(filePath: string, content: string): Promise<void> {
+  // Once enrolled, EVERY legacy producer must refuse, including another WorkspaceStore/process.
+  // A current global cache is not evidence of the calling producer's acknowledged revision.
+  const recovery = path.join(path.dirname(filePath), '.recovery', path.basename(filePath))
+  let managed = false
+  try { await fs.access(recovery); managed = true } catch { /* not enrolled */ }
+  if (managed) throw new Error(`E_EXPECTED_REVISION_REQUIRED: managed file at ${filePath}; recovery at ${recovery}`)
   // Unique temp per write: writers that bypass each other's queue (a second app instance, the SSH
   // poll's index write) must never share a tmp file — interleaved writes into one shared tmp
   // published spliced JSON under the atomic rename. writeFileAtomic also removes its own temp on
@@ -194,9 +203,38 @@ export class WorkspaceStore {
     return path.join(platform().userDataDir, 'workspace.json')
   }
 
+  private versioned?: WorkspaceReconciliationStore
+  private reconciliation(): WorkspaceReconciliationStore {
+    return this.versioned ??= new WorkspaceReconciliationStore({
+      indexPath: this.indexPath,
+      load: () => this.load({ sideline: false }),
+      entry: (id) => this.index?.entries.find((entry) => entry.id === id),
+      published: async (id, raw) => {
+        const entry = this.index?.entries.find((item) => item.id === id)
+        if (!entry) return
+        const file = entry.cwd ? projectFilePath(entry.cwd) : entry.dataFile ? inlineFilePath(id) : undefined
+        // An enrollment/ack can finish after another producer publishes. An old receipt must
+        // not roll host caches back or label newer external bytes as our own watcher echo.
+        if (file && await fs.readFile(file, 'utf8').catch(() => undefined) === raw) {
+          this.lastWritten.set(file, raw)
+          this.revs.set(id, (JSON.parse(raw) as ProjectFileV1).rev)
+        }
+        this.onPersist?.()
+      }
+    })
+  }
+
+  loadReconciled(clientId?: string) { return this.reconciliation().load(clientId) }
+  saveReconciled(request: WorkspaceRevisionRequest) { return this.reconciliation().save(request) }
+
   registerIpc(): void {
     platform().handle(IPC.workspaceLoad, () => this.load())
-    platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
+    platform().handle(IPC.workspaceSave, async (workspace: Workspace) => {
+      const recovery = await this.reconciliation().preserveRefusal(workspace)
+      throw new Error(`E_EXPECTED_REVISION_REQUIRED: legacy save refused; proposal retained at ${recovery}`)
+    })
+    platform().handle(IPC.workspaceLoadReconciled, (clientId?: string) => this.loadReconciled(clientId))
+    platform().handle(IPC.workspaceSaveReconciled, (request: WorkspaceRevisionRequest) => this.saveReconciled(request))
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
     platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
       typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
@@ -911,6 +949,14 @@ export class WorkspaceStore {
   }
 
   private async saveNow(workspace: Workspace): Promise<void> {
+    try {
+      await fs.access(new ProjectCommitStore(this.indexPath).recovery)
+    } catch { return this.saveLegacyNow(workspace) }
+    const recovery = await this.reconciliation().preserveRefusal(workspace)
+    throw new Error(`E_EXPECTED_REVISION_REQUIRED: legacy workspace proposal retained at ${recovery}`)
+  }
+
+  private async saveLegacyNow(workspace: Workspace): Promise<void> {
     if (!workspace.projects.length && !this.index) {
       // A store that never read the index may not replace a populated one with "no projects":
       // that is the boot-save wipe — load() failed transiently, the renderer hydrated zero
@@ -1201,7 +1247,7 @@ export class WorkspaceStore {
   }
 
   async readLocalRef(projectId: string): Promise<Project | null> {
-    const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
+    const e = this.index?.entries.find((x) => x.id === projectId && x.cwd && !x.ssh)
     if (!e?.cwd) return null
     const read = await this.readProjectFile(e.cwd, false)
     if (!read) return null
@@ -1552,24 +1598,25 @@ export class WorkspaceStore {
     const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
     if (!e?.cwd) return false
     const file = projectFilePath(e.cwd)
-    let raw: string
+    const coordinator = new ProjectCommitStore(file)
+    let base: Awaited<ReturnType<ProjectCommitStore['observe']>>
     try {
-      raw = await fs.readFile(file, 'utf-8')
+      base = await coordinator.observe()
     } catch {
       return false
     }
-    const updated = appendProjectNode(raw, input, now, accountColor)
+    const updated = appendProjectNode(base.raw, input, now, accountColor)
     if (updated === null) return false
-    try {
-      await writeAtomic(file, updated)
-    } catch {
-      return false
-    }
-    this.lastWritten.set(file, updated)
+    const receipt = await coordinator.commit({ clientId: 'host-registrar', operationId: randomUUID(),
+      expectedRevision: base.revision, proposed: updated })
+    if (receipt.kind !== 'committed' || !receipt.current)
+      throw new Error(`E_REGISTRATION_NOT_PERSISTED: ${receipt.kind}; recovery at ${receipt.recovery}`)
+    const committed = receipt.current.raw
+    this.lastWritten.set(file, committed)
     // appendProjectNode only returns a string it produced from a valid ProjectFileV1, so this parse
     // cannot realistically fail — but a throw here would turn a landed write into a `false`.
     try {
-      const parsed = JSON.parse(updated) as ProjectFileV1
+      const parsed = JSON.parse(committed) as ProjectFileV1
       this.revs.set(e.id, parsed.rev)
       platform().broadcast(
         IPC.workspaceExternalChange,
@@ -1612,22 +1659,23 @@ export class WorkspaceStore {
       // machine (and a relay `pty.attach` only ever reaches THIS machine's tmux anyway).
       if (!e.cwd || e.ssh) continue
       const file = projectFilePath(e.cwd)
-      let raw: string
+      const coordinator = new ProjectCommitStore(file)
+      let base: Awaited<ReturnType<ProjectCommitStore['observe']>>
       try {
-        raw = await fs.readFile(file, 'utf-8')
+        base = await coordinator.observe()
       } catch {
         continue
       }
-      const updated = removeProjectNode(raw, nodeId, now)
+      const updated = removeProjectNode(base.raw, nodeId, now)
       if (updated === null) continue // not in this project (or unreadable file) — keep looking
+      const receipt = await coordinator.commit({ clientId: 'host-removal', operationId: randomUUID(),
+        expectedRevision: base.revision, proposed: updated })
+      if (receipt.kind !== 'committed' || !receipt.current)
+        throw new Error(`E_REMOVAL_NOT_PERSISTED: ${receipt.kind}; recovery at ${receipt.recovery}`)
+      const committed = receipt.current.raw
+      this.lastWritten.set(file, committed)
       try {
-        await writeAtomic(file, updated)
-      } catch {
-        return false
-      }
-      this.lastWritten.set(file, updated)
-      try {
-        const parsed = JSON.parse(updated) as ProjectFileV1
+        const parsed = JSON.parse(committed) as ProjectFileV1
         this.revs.set(e.id, parsed.rev)
         platform().broadcast(
           IPC.workspaceExternalChange,

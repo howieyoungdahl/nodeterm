@@ -170,11 +170,12 @@ adding terminal-session features, extend the interface — do not reach around i
 
 ## State & persistence model
 
-The shared pure reconciliation and acknowledgment helpers are described in
-`docs/project-reconciliation.md`. They are not yet wired into WorkspaceStore/IPC/Canvas. Retain raw
-base bytes separately from a pending typed view, preserve unknown keys through `applyProjectViewEdits`,
-and never publish a conflicted preview. The storage adapter must establish ancestry and durable
-operation receipts; a filesystem rename alone cannot establish external-writer CAS.
+The revision-bound WorkspaceStore/IPC/Canvas integration is described in
+`docs/project-reconciliation.md`, including its explicit rollout blockers. Existing local files
+use retained raw bases, caller enrollment, durable receipts/tombstones, and preserve-then-exclusive
+publication. Never route a refused legacy save around its fence or steal an abandoned writer lock.
+The typed entity view must match the actual Flow serializer; omission of an unknown field is not
+deletion. A filesystem replacement rename alone is not external-writer compare-and-swap.
 
 **React Flow is the single live source of truth** for nodes. There is intentionally no
 separate store mirroring node state — earlier dual-source designs caused sync bugs.

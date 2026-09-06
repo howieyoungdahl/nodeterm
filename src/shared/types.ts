@@ -947,6 +947,8 @@ export interface PtyApi {
 export type WorkspaceMigrationKind = 'v2' | 'exec'
 
 export interface WorkspaceApi {
+  loadReconciled?(clientId?: string): Promise<import('./workspace-reconciliation').WorkspaceRevisionView>
+  saveReconciled?(request: import('./workspace-reconciliation').WorkspaceRevisionRequest): Promise<import('./workspace-reconciliation').WorkspaceRevisionOutcome>
   load(): Promise<Workspace>
   save(workspace: Workspace): Promise<void>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */

@@ -280,6 +280,8 @@ export function buildRealApi(
   }
 
   const workspace: WorkspaceApi = {
+    loadReconciled: (clientId?: string) => client.request(IPC.workspaceLoadReconciled, clientId) as Promise<import('@shared/workspace-reconciliation').WorkspaceRevisionView>,
+    saveReconciled: (request) => client.request(IPC.workspaceSaveReconciled, request) as Promise<import('@shared/workspace-reconciliation').WorkspaceRevisionOutcome>,
     load: () => client.request(IPC.workspaceLoad) as Promise<Workspace>,
     save: (ws: Workspace) => client.request(IPC.workspaceSave, ws) as Promise<void>,
     // REAL: WorkspaceStore (core) registers IPC.workspaceProbeFolder, so the server serves it.

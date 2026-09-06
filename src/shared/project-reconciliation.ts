@@ -104,7 +104,8 @@ export function reconcileProjectDocuments(
   base: ProjectDocument,
   local: ProjectDocument,
   incoming: ProjectDocument,
-  deletedNodeIds: ReadonlySet<string> = new Set()
+  deletedNodeIds: ReadonlySet<string> = new Set(),
+  keyedLists: ReadonlySet<string> = entityLists
 ): ProjectMerge {
   const conflicts: ProjectConflict[] = []
   const conflict = (path: string[], kind: ProjectConflict['kind'], b: ProjectValue,
@@ -115,7 +116,7 @@ export function reconcileProjectDocuments(
   const merge = (b: ProjectValue, l: ProjectValue, r: ProjectValue, path: string[]): ProjectValue => {
     // Entity identity and tombstones are checked even on equal snapshots. An unchanged delayed
     // registration cannot be accepted simply because the latest base no longer knows its ID.
-    if (path.length === 1 && entityLists.has(path[0])) {
+    if (path.length === 1 && keyedLists.has(path[0])) {
       const maps = [b, l, r].map(entities)
       if (maps.some((map) => map === null)) return conflict(path, 'identity', b, l, r)
       const [bm, lm, rm] = maps as Map<string, ProjectDocument>[]
