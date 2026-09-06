@@ -11,6 +11,7 @@ import {
   type SessionInfo,
   type SessionBudgetConfig
 } from './session-budget'
+import { TMUX_SOCKET } from './tmux-naming'
 
 const NOW = 1_753_000_000 // fixed epoch seconds for every test
 
@@ -410,14 +411,14 @@ describe('createSessionReaper (service)', () => {
 
   it('sweeps every socket, kills planned sessions on the right socket with exact-match targets', async () => {
     const w = fakeWorld({
-      'node-terminal': [row('nt-local', 0, OLD)],
+      [TMUX_SOCKET]: [row('nt-local', 0, OLD)],
       'nodeterm-rmt': [row('nt-remote', 0, OLD)]
     })
     const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', exec: w.exec })
     expect(await reaper.sweep()).toBe(2)
     const kills = w.calls.filter((c) => c.args[2] === 'kill-session')
     expect(kills).toEqual([
-      { args: ['-L', 'node-terminal', 'kill-session', '-t', '=nt-local'] },
+      { args: ['-L', TMUX_SOCKET, 'kill-session', '-t', '=nt-local'] },
       { args: ['-L', 'nodeterm-rmt', 'kill-session', '-t', '=nt-remote'] }
     ])
   })
@@ -429,11 +430,11 @@ describe('createSessionReaper (service)', () => {
     // The numbers are pinned, not just the words — 100.0h of silence against a 0.0h-old attach is
     // exactly the two-clock disagreement the whole change rests on.
     const lines: string[] = []
-    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({ ...base, log: (m) => lines.push(m), tmuxBin: () => 'tmux', exec: w.exec })
     expect(await reaper.sweep()).toBe(1)
     expect(lines).toEqual([
-      '[session-budget] reaped detached session nt-x — no pane output for 100.0h; last attach 0.0h ago (socket node-terminal)'
+      `[session-budget] reaped detached session nt-x — no pane output for 100.0h; last attach 0.0h ago (socket ${TMUX_SOCKET})`
     ])
   })
 
@@ -441,7 +442,7 @@ describe('createSessionReaper (service)', () => {
     let first = true
     const w = fakeWorld({})
     const exec = async (bin: string, args: string[]): Promise<string> => {
-      if (args[2] === 'list-windows' && args[1] === 'node-terminal') {
+      if (args[2] === 'list-windows' && args[1] === TMUX_SOCKET) {
         if (first) {
           first = false
           return row('nt-x', 0, OLD)
@@ -450,7 +451,7 @@ describe('createSessionReaper (service)', () => {
       }
       return w.exec(bin, args)
     }
-    const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', sockets: ['node-terminal'], exec })
+    const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', sockets: [TMUX_SOCKET], exec })
     expect(await reaper.sweep()).toBe(0)
     expect(w.calls.filter((c) => c.args[2] === 'kill-session')).toHaveLength(0)
   })
@@ -464,7 +465,7 @@ describe('createSessionReaper (service)', () => {
   })
 
   it('kill switch: disabled env runs no tmux commands at all', async () => {
-    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({
       ...base,
       env: { NODETERM_SESSION_REAP_DISABLED: '1' },
@@ -476,24 +477,24 @@ describe('createSessionReaper (service)', () => {
   })
 
   it('tmux unavailable (bin=null) → quiet no-op', async () => {
-    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({ ...base, tmuxBin: () => null, exec: w.exec })
     expect(await reaper.sweep()).toBe(0)
     expect(w.calls).toHaveLength(0)
   })
 
   it('a failing kill is tolerated and does not abort the rest of the batch', async () => {
-    const w = fakeWorld({ 'node-terminal': [row('nt-a', 0, OLD), row('nt-b', 0, NOW - 99 * 3600)] })
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-a', 0, OLD), row('nt-b', 0, NOW - 99 * 3600)] })
     const exec = async (bin: string, args: string[]): Promise<string> => {
       if (args[2] === 'kill-session' && args[4] === '=nt-a') throw new Error('gone already')
       return w.exec(bin, args)
     }
-    const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', sockets: ['node-terminal'], exec })
+    const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', sockets: [TMUX_SOCKET], exec })
     expect(await reaper.sweep()).toBe(1) // nt-b still dies
   })
 
   it('healthy memory + under cap → lists but never kills', async () => {
-    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({
       ...base,
       readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
@@ -505,12 +506,12 @@ describe('createSessionReaper (service)', () => {
   })
 
   it('…but the same host sweeps under an explicit external pressure reason', async () => {
-    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({
       ...base,
       readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
       tmuxBin: () => 'tmux',
-      sockets: ['node-terminal'],
+      sockets: [TMUX_SOCKET],
       exec: w.exec
     })
     expect(await reaper.sweep({ pressure: 'pty' })).toBe(1)
@@ -518,13 +519,13 @@ describe('createSessionReaper (service)', () => {
 
   it('an external reason never overrides the attached/grace exemptions', async () => {
     const w = fakeWorld({
-      'node-terminal': [row('nt-watched', 1, OLD), row('nt-fresh', 0, NOW - 60)]
+      [TMUX_SOCKET]: [row('nt-watched', 1, OLD), row('nt-fresh', 0, NOW - 60)]
     })
     const reaper = createSessionReaper({
       ...base,
       readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
       tmuxBin: () => 'tmux',
-      sockets: ['node-terminal'],
+      sockets: [TMUX_SOCKET],
       exec: w.exec
     })
     expect(await reaper.sweep({ pressure: 'pty' })).toBe(0)
@@ -607,11 +608,11 @@ describe('darwin default reader: no byte reading may ever reap (behavioural)', (
     // produce bytes at all (hostMemReader's darwin null) keeps these sessions alive. This encodes
     // "memory fullness must never reap on macOS" without depending on the host's current load.
     const w = fakeWorld({
-      'node-terminal': Array.from({ length: 20 }, (_, i) => row(`nt-idle-${i}`, 0, OLD))
+      [TMUX_SOCKET]: Array.from({ length: 20 }, (_, i) => row(`nt-idle-${i}`, 0, OLD))
     })
     const reaper = createSessionReaper({
       tmuxBin: () => 'tmux',
-      sockets: ['node-terminal'],
+      sockets: [TMUX_SOCKET],
       exec: w.exec,
       env: { NODETERM_SESSION_MIN_AVAILABLE_MB: '1000000000' },
       nowSec: () => NOW,

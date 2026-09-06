@@ -20,9 +20,16 @@ export default defineConfig({
       'test/acceptance/**/*.test.ts',
       // Opt-in end-to-end tests against a real sshd in Docker. They self-skip unless
       // NODETERM_SSH_DOCKER is set, so a machine without Docker still runs a green suite.
-      'test/ssh-docker/**/*.test.ts'
+      'test/ssh-docker/**/*.test.ts',
+      // The setup file's own ordering proof (env set before the test file's static imports).
+      'test/setup/**/*.test.ts'
     ],
     environment: 'node',
+    // Every worker gets a PRIVATE tmux socket (`NODETERM_TMUX_SOCKET=nt-vitest-<pid>`) unless the
+    // operator set one, so the `test/server/*` suites that boot a real PtyManager never touch the
+    // `node-terminal` socket carrying this machine's live nodeterm sessions. Must run before the
+    // test file's imports — see the file's header and its sibling test.
+    setupFiles: ['test/setup/private-tmux-socket.ts'],
     // Issue #160: with the default (one worker per core), a 10-core Mac runs ~10 fs-heavy suites
     // at once and transient fd exhaustion (EMFILE) turns into silent test flakiness — probes like
     // `fs.existsSync` swallow the error and answer false, so whole files fail in ways that never

@@ -7,6 +7,7 @@ import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform, type FakePlatform } from './platform-fake'
 import { startSessionMemoryService, sshScopePredicate } from './session-memory-service'
 import type { MemInfo, SessionMemoryReport, SessionMemoryQuery } from '../shared/types'
+import { TMUX_SOCKET } from './tmux-naming'
 
 // The repo's own platform fake (src/core/platform-fake.ts) — a plain recording object whose
 // `handlers` map holds whatever the service registered. Same setup as usage-service.remote.test.ts.
@@ -20,7 +21,7 @@ const host = (q: SessionMemoryQuery): Promise<MemInfo | null> =>
 /** One socket answering "no server running" — the per-socket fence the sweep now emits. A `##PANES`
  *  section with NO fence in it means no socket answered, which is `ok:false` by design (see
  *  session-memory-remote.ts): "every tmux call failed" must not render as "this host has nothing". */
-const IDLE_SOCKET = '##SOCK node-terminal\nno server running on /tmp/x\n##SOCKRC 1\n'
+const IDLE_SOCKET = `##SOCK ${TMUX_SOCKET}\nno server running on /tmp/x\n##SOCKRC 1\n`
 
 /** A remote reply the parser accepts: all three markers, in order, one answered socket, one
  *  process row. */
