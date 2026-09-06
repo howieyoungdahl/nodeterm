@@ -150,6 +150,9 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
   // The guard's two thresholds. Same degrade-to-default rule as the interval above: a hand-edited
   // service env that cannot be read as a number must never end up SWEEPING MORE than the shipped
   // default, so anything unparseable, negative, or (for the fraction) outside 0..1 falls back.
+  // The count is a whole number of cards: a fraction typed into THIS flag (the two mass flags sit
+  // side by side, and `0.5` is the other one's default) used to floor to 0, which is the value
+  // that switches the count rule OFF — the one degrade the comment above forbids.
   const massLimitRaw = pick(
     'dead-card-reap-mass-limit',
     'NODETERM_DEAD_CARD_REAP_MASS_LIMIT',
@@ -157,8 +160,8 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
   ).trim()
   const massLimitParsed = Number(massLimitRaw)
   const deadCardReapMassLimit =
-    massLimitRaw !== '' && Number.isFinite(massLimitParsed) && massLimitParsed >= 0
-      ? Math.floor(massLimitParsed)
+    massLimitRaw !== '' && Number.isInteger(massLimitParsed) && massLimitParsed >= 0
+      ? massLimitParsed
       : 5
   const massFractionRaw = pick(
     'dead-card-reap-mass-fraction',

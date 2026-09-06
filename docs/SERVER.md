@@ -727,6 +727,16 @@ refusal. The override is deliberate and manual: `POST /opsapi/sweep` with
 removed nothing either way. On 2026-09-06 the tmux server died at 06:39 and the 07:07 pass removed
 16 terminal cards; this guard is why that pass would now be refused.
 
+A refusal is **sticky by design**: dead sessions do not come back, so the dead set only grows, and
+every later timer pass is refused the same way — one line per refused pass, every
+`--dead-card-reap-minutes` (default 30), until an operator forces the sweep, raises the thresholds,
+or removes the cards by hand (`DELETE /opsapi/nodes/<id>`, or the browser). A card whose session
+dies by ordinary attrition AFTER the mass event is held behind the same refusal. Both thresholds
+are measured across ALL local projects in one pass, not per project: a small project losing every
+card while a larger one stays alive is caught only if the total crosses the count threshold. The
+count threshold is a whole number of cards; a fraction typed into it (`0.5` is the OTHER flag's
+default) is treated as malformed and falls back to `5`, never to `0` (which would disable the rule).
+
 Server message delivery verifies submission in two stages. It waits until the complete framed
 message is visible in the target pane, sends Enter, then re-captures the pane. If the composer did
 not advance, it retries Enter once and verifies again. A verified target next-turn hook is still
