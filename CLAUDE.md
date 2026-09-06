@@ -1136,6 +1136,11 @@ else, and its context links must keep classifying across restarts).
     prelude so refusal drains stdin and exits 0 with empty stdout; commands exit 1. Shape/scope
     checking is not HMAC verification. See `docs/shared-codex-node-identity.md` for account semantics
     and exact comparisons. SSH constants stay machine-neutral; never bake in the local record root.
+    Codex hooks additionally parse their top-level JSON-stdin `session_id` before the missing-node
+    gate, since a daemon hook need not carry the tool shell's `CODEX_THREAD_ID`. Keep the original
+    body for delivery, use the same scoped binding resolver and refuse payload/env disagreement.
+    A payload is not authority. No-parser direct launches retain their old path; payload-only
+    unavailability is explicit. Other providers must not inherit this Codex payload bootstrap.
   - **Every generated sh client walks the SAME endpoint failover** (`nt_candidates`/`nt_adopt`,
     `core/agents/hook-endpoint-failover-sh.ts`) — issue #445, the endpoint-level twin of #384: a
     session is pinned for life to the endpoint PATH it got at tmux creation, so an app

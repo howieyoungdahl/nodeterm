@@ -333,7 +333,10 @@ describe('local Codex tool-shell identity recovery', () => {
       const writeError = new Promise<Error | null>((resolve) => {
         // Observe the stream error before writing; execFile/communicate can swallow EPIPE.
         child.stdin.on('error', resolve)
-        child.stdin.end(Buffer.alloc(2_000_000, 0x41), (error?: Error | null) => resolve(error ?? null))
+        // Hooks now parse their top-level session before resolving a binding. Keep this a real
+        // (large) hook body so the binding refusal, not malformed JSON, is the branch under test.
+        const body = JSON.stringify({ session_id: 'fixture-thread-current', prompt: 'A'.repeat(2_000_000) })
+        child.stdin.end(body, (error?: Error | null) => resolve(error ?? null))
       })
       expect(await writeError).toBeNull()
       expect(await exit).toBe(0)
