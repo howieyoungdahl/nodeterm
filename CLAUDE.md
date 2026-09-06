@@ -170,6 +170,12 @@ adding terminal-session features, extend the interface — do not reach around i
 
 ## State & persistence model
 
+The shared pure reconciliation and acknowledgment helpers are described in
+`docs/project-reconciliation.md`. They are not yet wired into WorkspaceStore/IPC/Canvas. Retain raw
+base bytes separately from a pending typed view, preserve unknown keys through `applyProjectViewEdits`,
+and never publish a conflicted preview. The storage adapter must establish ancestry and durable
+operation receipts; a filesystem rename alone cannot establish external-writer CAS.
+
 **React Flow is the single live source of truth** for nodes. There is intentionally no
 separate store mirroring node state — earlier dual-source designs caused sync bugs.
 `src/renderer/state/workspace.ts` holds only pure helpers: the color palette, the node

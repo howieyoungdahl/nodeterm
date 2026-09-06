@@ -48,6 +48,10 @@ const NOT_SHARED_STATE: ReadonlySet<string> = new Set([
   'nodes',
   'viewport',
   'defaultAccountId',
+  'breadcrumbs',
+  'capabilityAck',
+  'closedAt',
+  'closedSessions',
   'closed',
   'unavailable',
   'remote'

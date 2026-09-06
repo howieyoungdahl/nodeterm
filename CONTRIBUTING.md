@@ -365,6 +365,12 @@ user gesture on a settled canvas.
 
 ## Testing
 
+Project reconciliation must retain a committed raw common base independently of pending renderer
+edits. Unknown fields need a raw-base overlay before typed serialization; a conflict preview is not
+a writable resolution. The pure helpers and their current integration limits are documented in
+`docs/project-reconciliation.md`. A successful atomic rename is not a compare-and-swap against an
+external editor, and only a durable operation receipt establishes a recovered save acknowledgment.
+
 `npm test` must pass, and `npm run typecheck` is the fastest gate.
 
 Beyond that, one habit is worth more than any other here:
