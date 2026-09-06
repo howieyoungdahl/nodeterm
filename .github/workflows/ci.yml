@@ -1,11 +1,13 @@
 name: CI
 
-# Verify typecheck, tests, and the production build on every PR and push to main.
+# Verify typecheck, tests, and the production build on every PR and push to main, and on the
+# fork's integration branches: the browser server on the canvas host is updated from
+# integration/server-fixes-*, so a PR into it needs a check before auto-merge can trust it.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'integration/**']
   push:
-    branches: [main]
+    branches: [main, 'integration/**']
 
 permissions:
   contents: read
