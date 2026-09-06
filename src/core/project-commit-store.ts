@@ -11,6 +11,14 @@ export interface FileCommitRequest {
   expectedRevision: string
   proposed: string
 }
+export interface FileCreateRequest {
+  clientId: string
+  operationId: string
+  expectedAbsence: true
+  /** Caller-enrolled workspace index revision, retained as part of the immutable intent. */
+  indexRevision: string
+  proposed: string
+}
 export interface FileCommitResult {
   kind: 'committed' | 'already-applied' | 'conflict' | 'stale-base' | 'busy' |
     'publication-refused' | 'publication-unknown' | 'unavailable'
@@ -19,7 +27,7 @@ export interface FileCommitResult {
   merge?: ProjectMerge
   message?: string
 }
-export type PublicationPhase = 'journaled' | 'before-displace' | 'displaced' | 'before-publish' | 'published' | 'receipted'
+export type PublicationPhase = 'creation-prepared' | 'journaled' | 'before-displace' | 'displaced' | 'before-publish' | 'published' | 'receipted'
 export const revisionOf = (raw: string): string => createHash('sha256').update(raw).digest('hex')
 const errorCode = (error: unknown): string => (error as NodeJS.ErrnoException)?.code ?? ''
 export class PublicationReadError extends Error {
@@ -84,6 +92,26 @@ function ids(document: ProjectDocument, key: string): string[] {
 function content(document: ProjectDocument): ProjectDocument {
   const { rev: _rev, savedAt: _saved, _reconciliation: _meta, ...rest } = document
   return rest
+}
+
+/** Shared by updates and first creation; a syntactic merge need not be a valid graph. */
+function graphRefusal(document: ProjectDocument): string | undefined {
+  const nodes = Array.isArray(document.nodes) ? document.nodes as ProjectDocument[] : []
+  const nodeIds = new Set(nodes.map((node) => node.id))
+  const parents = new Map(nodes.map((node) => [node.id, node.parentId]))
+  for (const node of nodes) {
+    const seen = new Set([node.id])
+    let parent = node.parentId
+    while (parent) {
+      if (!nodeIds.has(parent) || seen.has(parent)) return 'Merged parent graph is dangling or cyclic.'
+      seen.add(parent); parent = parents.get(parent) ?? null
+    }
+  }
+  for (const key of ['bridges', 'ropes']) {
+    const edges = document[key]
+    if (Array.isArray(edges) && edges.some((edge) => edge && typeof edge === 'object' && !Array.isArray(edge) &&
+      (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)))) return 'Merged edge graph has a missing endpoint.'
+  }
 }
 
 /** Cooperative cross-process coordinator. It NEVER replaces a publication destination with the
@@ -179,9 +207,103 @@ export class ProjectCommitStore {
     catch { return undefined }
   }
 
+  /** Create only a virgin destination. The existing recovery directory is the retained
+   * history fence, not permission to reset a missing file. No destination is displaced. */
+  async create(request: FileCreateRequest, checkScope?: () => Promise<string | undefined>): Promise<FileCommitResult> {
+    const op = path.join(this.recovery, 'operations', revisionOf(`${request.clientId}\0${request.operationId}`))
+    const requestRaw = JSON.stringify(request)
+    const result = (kind: FileCommitResult['kind'], extra: Partial<FileCommitResult> = {}): FileCommitResult =>
+      ({ kind, recovery: op, ...extra })
+    for (const parent of [path.dirname(this.file), path.dirname(this.recovery), this.recovery]) {
+      try { if (!(await fs.lstat(parent)).isDirectory()) return result('publication-refused', { message: 'Creation history and parents must be real directories.' }) }
+      catch (error) { if (errorCode(error) !== 'ENOENT') return result('unavailable', { message: String(error) }) }
+    }
+    // Read-back is allowed even with a retained crash lock. Never replay a journaled effect.
+    try {
+      const prior = await fs.readFile(path.join(op, 'request.json'), 'utf8')
+      if (prior !== requestRaw) return result('stale-base', { message: 'Operation ID was reused with different input.' })
+      const receipt = await this.receipt(request.clientId, request.operationId)
+      return receipt ? { ...receipt, kind: receipt.kind === 'committed' ? 'already-applied' : receipt.kind } :
+        result('publication-unknown', { message: 'An interrupted creation needs recovery; it was not replayed.' })
+    } catch (error) { if (errorCode(error) !== 'ENOENT') return result('unavailable', { message: String(error) }) }
+    // A host-derived leaf is not a license to follow a redirected inline/recovery directory.
+    for (const parent of [path.dirname(this.file), path.dirname(this.recovery)]) {
+      try { if (!(await fs.lstat(parent)).isDirectory()) return result('publication-refused', { message: 'Creation parent must be a real directory.' }) }
+      catch (error) { if (errorCode(error) !== 'ENOENT') return result('unavailable', { message: String(error) }) }
+    }
+    await this.directory(path.dirname(this.recovery))
+    try { await fs.mkdir(this.recovery, { mode: 0o700 }); await this.syncDirectory(path.dirname(this.recovery)) }
+    catch (error) {
+      if (errorCode(error) !== 'EEXIST') return result('unavailable', { message: String(error) })
+      if (!(await fs.lstat(this.recovery)).isDirectory()) return result('publication-refused', { message: 'Creation history is not a real directory.' })
+      const refused = path.join(this.recovery, 'refusals', `${revisionOf(requestRaw)}.json`)
+      await this.durable(refused, requestRaw)
+      let busy = false
+      try { await fs.lstat(path.join(this.recovery, 'writer.lock')); busy = true } catch { /* history still refuses */ }
+      return result(busy ? 'busy' : 'publication-refused', { recovery: refused,
+        message: 'Creation requires virgin absence; retained history or another creation already owns this destination.' })
+    }
+    const lock = path.join(this.recovery, 'writer.lock')
+    await fs.mkdir(lock)
+    let published = false
+    try {
+      await this.durable(path.join(op, 'request.json'), requestRaw)
+      await this.durable(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, operation: path.basename(op) }))
+      await this.phase?.('creation-prepared')
+      if (request.expectedAbsence !== true || !/^[a-f0-9]{64}$/.test(request.indexRevision))
+        return await this.finish(op, result('stale-base', { message: 'Explicit absence and enrolled index revision are required.' }))
+      try {
+        await fs.lstat(this.file)
+        return await this.finish(op, result('publication-refused', { message: 'Creation destination already exists; it was not replaced.' }))
+      } catch (error) { if (errorCode(error) !== 'ENOENT') throw error }
+      await this.durable(path.join(op, 'absence.json'), JSON.stringify({ file: this.file, indexRevision: request.indexRevision, absent: true }))
+      const proposed = jsonObject(request.proposed)
+      if (proposed.version !== 1 || typeof proposed.id !== 'string' || !Array.isArray(proposed.nodes) || proposed._reconciliation !== undefined)
+        return await this.finish(op, result('conflict', { message: 'Creation requires a new version-1 project, not historical reconciliation metadata.' }))
+      const validated = reconcileProjectDocuments(proposed, proposed, proposed)
+      const invalid = graphRefusal(validated.document)
+      if (validated.kind === 'conflict' || invalid)
+        return await this.finish(op, result('conflict', { merge: validated, message: invalid }))
+      const candidate = JSON.stringify({ ...validated.document, rev: 1, savedAt: new Date().toISOString(),
+        _reconciliation: { version: 1, deleted: { nodes: [], bridges: [], ropes: [] } } }, null, 2) + '\n'
+      await this.durable(path.join(op, 'candidate.json'), candidate)
+      await this.phase?.('journaled')
+      const publication = path.join(op, 'publication.json')
+      await this.durable(publication, candidate)
+      await this.phase?.('before-publish')
+      if (checkScope) {
+        let refusal: string | undefined
+        try { refusal = await checkScope() } catch (error) { refusal = `Creation index scope unavailable: ${String(error)}` }
+        if (refusal) return await this.finish(op, result('publication-refused', { message: refusal }))
+      }
+      try { await fs.link(publication, this.file) }
+      catch (error) { return await this.finish(op, result('publication-refused', { message: `Exclusive creation refused (${errorCode(error)}); no destination was overwritten.` })) }
+      published = true
+      await this.syncDirectory(path.dirname(this.file))
+      await this.phase?.('published')
+      const observed = await fs.readFile(this.file, 'utf8')
+      if (observed !== candidate) {
+        await this.durable(path.join(this.recovery, 'versions', `${revisionOf(observed)}.json`), observed)
+        return await this.finish(op, result('publication-unknown', { message: 'Destination changed after creation; candidate and competing bytes retained.' }))
+      }
+      const current = { revision: revisionOf(candidate), raw: candidate }
+      await this.durable(path.join(this.recovery, 'versions', `${current.revision}.json`), candidate)
+      const receipt = await this.finish(op, result('committed', { current }))
+      await this.phase?.('receipted')
+      return receipt
+    } catch (error) {
+      return result(published ? 'publication-unknown' : 'unavailable', { message: String(error) })
+    } finally {
+      // Only this creation's own lock. A killed process retains it and never loses history.
+      await fs.rm(lock, { recursive: true, force: true })
+    }
+  }
+
   async commit(request: FileCommitRequest, conditional?: {
     /** Trusted coordinator guard, not request data. Runs under writer.lock and before publication. */
     check(current: FileRevision): string | undefined
+    /** Creation's index delta keeps the normal retained-base merge; organizer CAS stays exact. */
+    mergeRetainedBase?: boolean
   }): Promise<FileCommitResult> {
     const op = path.join(this.recovery, 'operations', revisionOf(`${request.clientId}\0${request.operationId}`))
     const requestRaw = JSON.stringify(request)
@@ -211,7 +333,7 @@ export class ProjectCommitStore {
       const baseRaw = await this.known(request.expectedRevision)
       if (!baseRaw) return await this.finish(op, result('stale-base', { message: 'The exact acknowledged base is not retained.' }))
       const current = await this.observeUnlocked()
-      if (conditional && current.revision !== request.expectedRevision)
+      if (conditional && !conditional.mergeRetainedBase && current.revision !== request.expectedRevision)
         return await this.finish(op, result('publication-refused', { current, message: 'stale-revision' }))
       const check = (): void => {
         const refusal = conditional?.check(current)
@@ -233,25 +355,8 @@ export class ProjectCommitStore {
         }
       }
       if (merged.kind === 'conflict') return await this.finish(op, result('conflict', { current, merge: merged }))
-      // Independent parent/edge edits may merge syntactically but form an invalid graph.
-      const nodes = Array.isArray(merged.document.nodes) ? merged.document.nodes as ProjectDocument[] : []
-      const nodeIds = new Set(nodes.map((node) => node.id))
-      const parents = new Map(nodes.map((node) => [node.id, node.parentId]))
-      for (const node of nodes) {
-        const seen = new Set([node.id])
-        let parent = node.parentId
-        while (parent) {
-          if (!nodeIds.has(parent) || seen.has(parent))
-            return await this.finish(op, result('conflict', { current, message: 'Merged parent graph is dangling or cyclic.' }))
-          seen.add(parent); parent = parents.get(parent) ?? null
-        }
-      }
-      for (const key of ['bridges', 'ropes']) {
-        const edges = merged.document[key]
-        if (Array.isArray(edges) && edges.some((edge) => edge && typeof edge === 'object' && !Array.isArray(edge) &&
-          (!nodeIds.has(edge.source) || !nodeIds.has(edge.target))))
-          return await this.finish(op, result('conflict', { current, message: 'Merged edge graph has a missing endpoint.' }))
-      }
+      const invalid = graphRefusal(merged.document)
+      if (invalid) return await this.finish(op, result('conflict', { current, message: invalid }))
       for (const key of collections) {
         const retained = new Set(ids(merged.document, key))
         deleted[key] = [...new Set([...deleted[key], ...ids(base, key).filter((id) => !retained.has(id)),

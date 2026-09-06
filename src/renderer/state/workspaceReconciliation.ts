@@ -90,7 +90,9 @@ export class WorkspaceReconciliationClient {
     this.view = await this.api.loadReconciled()
     this.bases = new Map(Object.entries(this.view.projects))
     if (this.view.unsupported.length) this.error = 'Some projects are read-only because their revision or publication adapter is unavailable.'
-    return this.view.workspace
+    // The caller owns mutable UI state, never the enrollment evidence used to decide
+    // whether a project existed at load. In-place additions must not enroll themselves.
+    return structuredClone(this.view.workspace)
   }
 
   private merge(id: string, before: Project, local: Project, incoming: Project): Project {
@@ -150,7 +152,12 @@ export class WorkspaceReconciliationClient {
     if (!this.view || !this.api.saveReconciled) throw new Error('A caller-bound workspace load is required before saving.')
     const request = this.pending ?? { clientId: this.view.clientId, operationId: crypto.randomUUID(),
       expected: Object.fromEntries([...this.bases].map(([id, base]) => [id, this.conflicts.has(id) ? '' : base.revision])),
-      indexRevision: this.view.indexRevision, workspace: structuredClone(workspace) }
+      indexRevision: this.view.indexRevision, workspace: structuredClone(workspace),
+      // A new local inline project is an explicit create intent, never an empty revision.
+      // Existing unsupported projects, first-run indexes, folder/SSH/relay paths stay refused.
+      createInline: this.view.indexRevision ? workspace.projects.filter((project) => !this.bases.has(project.id) &&
+        !this.view!.workspace.projects.some((known) => known.id === project.id) && project.cwd === undefined &&
+        project.ssh === undefined && project.remote === undefined && !project.unavailable).map((project) => project.id) : [] }
     this.pending = request
     this.epoch++
     let outcome
@@ -159,7 +166,8 @@ export class WorkspaceReconciliationClient {
     this.epoch++
     let latest = current()
     let saved = outcome.index.kind === 'committed' || outcome.index.kind === 'already-applied'
-    let unknown = false
+    let unknown = outcome.index.kind === 'publication-unknown' ||
+      Object.values(outcome.projects).some((result) => result.kind === 'publication-unknown')
     this.error = null
     latest = { ...latest, projects: latest.projects.map((local) => {
       const result = outcome.projects[local.id]
@@ -194,7 +202,9 @@ export class WorkspaceReconciliationClient {
     if (outcome.index.revision && (outcome.index.kind === 'committed' || outcome.index.kind === 'already-applied'))
       this.view.indexRevision = outcome.index.revision
     else if (!this.error) this.error = outcome.index.message ?? 'Workspace metadata remains unsaved.'
-    if (!unknown) this.pending = undefined
+    // File success is not index success. Retain the exact create intent across a partial
+    // result, including a busy index or lost index receipt; never mint a second creation.
+    if (!unknown && !(request.createInline?.length && !saved)) this.pending = undefined
     if (this.refreshOwed && !this.pending) {
       this.refreshOwed = false
       const held = latest

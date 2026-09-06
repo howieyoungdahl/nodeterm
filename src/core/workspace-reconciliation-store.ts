@@ -5,7 +5,7 @@ import type { Project, Workspace } from '../shared/types'
 import type { WorkspaceRevisionView, WorkspaceRevisionRequest, WorkspaceRevisionOutcome, ProjectRevisionOutcome } from '../shared/workspace-reconciliation'
 import { reconcileProjectDocuments, type ProjectDocument } from '../shared/project-reconciliation'
 import { projectEntityView } from '../shared/project-view'
-import { ProjectCommitStore, revisionOf, isPublicationReadError, type FileRevision, type FileCommitResult } from './project-commit-store'
+import { ProjectCommitStore, revisionOf, readPublicationFile, isPublicationReadError, type FileRevision, type FileCommitResult } from './project-commit-store'
 import { fileToProject, projectToFile, splitWorkspace, inlineProjectFileRelPath, isInlineProjectFileId,
   type IndexEntryV3, type ProjectFileV1 } from './workspace-files'
 
@@ -133,8 +133,57 @@ export class WorkspaceReconciliationStore {
 
   async save(request: WorkspaceRevisionRequest): Promise<WorkspaceRevisionOutcome> {
     const client = await this.client(request.clientId)
+    const indexBase = client?.indexes.get(request.indexRevision)
     const outcomes: WorkspaceRevisionOutcome['projects'] = {}
+    if (request.createInline !== undefined && !Array.isArray(request.createInline))
+      return { projects: outcomes, index: { kind: 'publication-refused', recovery: await this.preserveRefusal(request), message: 'Invalid explicit inline creation intent.' } }
+    const creating = new Set(request.createInline ?? [])
+    if (creating.size) {
+      const ids = request.workspace.projects.map((project) => project.id)
+      const entries = indexBase && JSON.parse(indexBase.snapshot.raw).entries as IndexEntryV3[] | undefined
+      const invalid = creating.size !== 1 || creating.size !== request.createInline!.length ||
+        new Set(ids).size !== ids.length || !indexBase || JSON.parse(indexBase.snapshot.raw).version !== 3 ||
+        !Array.isArray(entries) || [...creating].some((id) => typeof id !== 'string' || !ids.includes(id) || !isInlineProjectFileId(id) ||
+          entries.some((entry) => entry.id === id) || indexBase.workspace.projects.some((project) => project.id === id))
+      if (invalid) return { projects: outcomes, index: { kind: 'publication-refused', recovery: await this.preserveRefusal(request),
+        message: 'Inline creation requires exactly one unique new identity and this caller\'s enrolled local v3 index; batches/bootstrap/adoption/migration are unsupported.' } }
+      // The existing durable caller-enrollment store also retains immutable workspace intent.
+      // Bind the WHOLE request: changing a project ID must not create a second effect on retry.
+      const intent = path.join(this.clientDir(request.clientId), `creation-${revisionOf(request.operationId)}.json`)
+      const raw = JSON.stringify({ kind: 'creation-intent', request })
+      try {
+        let handle
+        try { handle = await fs.open(intent, 'wx', 0o600) }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await fs.readFile(intent, 'utf8') !== raw) throw new Error('Creation operation identity is unresolved or reused with different input.')
+        }
+        if (handle) {
+          try { await handle.writeFile(raw); await handle.sync() } finally { await handle.close() }
+          const parent = await fs.open(path.dirname(intent), 'r')
+          try { await parent.sync() } finally { await parent.close() }
+        }
+      } catch (error) { return { projects: outcomes, index: { kind: 'publication-refused', recovery: await this.preserveRefusal(request), message: String(error) } } }
+    }
     for (const project of request.workspace.projects) {
+      if (creating.has(project.id)) {
+        try {
+          if (project.cwd !== undefined || project.ssh !== undefined || project.remote !== undefined || project.unavailable)
+            throw new Error('Only new local inline files are supported; folder, SSH, relay and unavailable projects require their own adapter.')
+          const file = path.join(path.dirname(this.driver.indexPath), inlineProjectFileRelPath(project.id))
+          const entry = splitWorkspace({ version: 2, activeProjectId: project.id, projects: [project] }, () => 0, 'creation').index.entries[0]
+          const raw = await new ProjectCommitStore(file).create({ clientId: request.clientId,
+            operationId: `${request.operationId}:${project.id}`, expectedAbsence: true, indexRevision: request.indexRevision,
+            proposed: JSON.stringify(projectToFile(project, 0, 'creation', project.id)) }, async () => {
+            return this.creationScope(project.id)
+          })
+          if ((raw.kind === 'committed' || raw.kind === 'already-applied') && raw.current) {
+            const bound = { file, entry, snapshot: raw.current, project }
+            if (!client!.projects.has(project.id)) client!.projects.set(project.id, new Map())
+            outcomes[project.id] = await this.projectResult(request.clientId, client!, project.id, bound, raw)
+          } else outcomes[project.id] = raw as ProjectRevisionOutcome
+        } catch (error) { outcomes[project.id] = { kind: 'publication-refused', recovery: await this.preserveRefusal(project), message: String(error) } }
+        continue
+      }
       const bound = client?.projects.get(project.id)?.get(request.expected[project.id])
       if (!bound) {
         outcomes[project.id] = { kind: 'stale-base', recovery: await this.preserveRefusal(project),
@@ -156,7 +205,6 @@ export class WorkspaceReconciliationStore {
           await this.driver.published(project.id, raw.current.raw)
       } catch (error) { outcomes[project.id] = { kind: 'unavailable', recovery: await this.preserveRefusal(project), message: String(error) } }
     }
-    const indexBase = client?.indexes.get(request.indexRevision)
     if (!indexBase || Object.values(outcomes).some((item) => item.kind !== 'committed' && item.kind !== 'already-applied')) {
       return { projects: outcomes, index: { kind: 'stale-base', recovery: await this.preserveRefusal(request.workspace),
         message: 'Workspace metadata was not written while a project or index base remains unresolved.' } }
@@ -166,7 +214,20 @@ export class WorkspaceReconciliationStore {
       const proposed = overlay(indexBase.snapshot.raw, knownIndex(indexBase.workspace), knownIndex(request.workspace), indexKeys)
       const result = await new ProjectCommitStore(this.driver.indexPath, undefined, indexKeys).commit({
         clientId: request.clientId, operationId: `${request.operationId}:index`, expectedRevision: request.indexRevision, proposed
-      })
+      }, creating.size ? { mergeRetainedBase: true, check: (current) => {
+        for (const id of creating) {
+          const refusal = this.indexCreationRefusal(JSON.parse(current.raw), id)
+          if (refusal) return refusal
+        }
+      } } : undefined)
+      if (creating.size && (result.kind === 'committed' || result.kind === 'already-applied')) {
+        const entries = result.current && JSON.parse(result.current.raw).entries as IndexEntryV3[] | undefined
+        if (!Array.isArray(entries) || [...creating].some((id) => {
+          const matches = entries.filter((entry) => entry.id === id)
+          return matches.length !== 1 || !matches[0].dataFile || !!matches[0].cwd || !!matches[0].ssh
+        })) return { projects: outcomes, index: { kind: 'publication-unknown', recovery: result.recovery,
+          message: 'Index receipt does not register the exact created inline identity; file and intent remain retained.' } }
+      }
       if (result.current) {
         client!.indexes.set(result.current.revision, { snapshot: result.current, workspace: structuredClone(request.workspace) })
         await this.enroll(request.clientId, { kind: 'index', bound: client!.indexes.get(result.current.revision) })
@@ -174,6 +235,36 @@ export class WorkspaceReconciliationStore {
       return { projects: outcomes, index: { kind: result.kind, revision: result.current?.revision, recovery: result.recovery, message: result.message } }
     } catch (error) {
       return { projects: outcomes, index: { kind: 'unavailable', recovery: await this.preserveRefusal(request.workspace), message: String(error) } }
+    }
+  }
+
+  private indexCreationRefusal(index: { version?: number; entries?: IndexEntryV3[]; _reconciliation?: { deleted?: { entries?: unknown } } }, id: string): string | undefined {
+    if (index.version !== 3 || !Array.isArray(index.entries)) return 'Creation requires an available local v3 index.'
+    const deleted = index._reconciliation?.deleted?.entries
+    if (deleted !== undefined && (!Array.isArray(deleted) || deleted.includes(id))) return 'Creation identity has retained index deletion evidence.'
+    if (index.entries.some((entry) => entry.id === id)) return 'Creation identity is already registered or retained in index history.'
+  }
+
+  /** Virgin file absence does not erase prior index membership (including pre-file entries).
+   * Bounded read of the EXISTING immutable version store; no new registry or history pruning. */
+  private async creationScope(id: string): Promise<string | undefined> {
+    const current = JSON.parse(await readPublicationFile(this.driver.indexPath))
+    const refusal = this.indexCreationRefusal(current, id)
+    if (refusal) return refusal
+    const store = new ProjectCommitStore(this.driver.indexPath, undefined, indexKeys)
+    const versions = path.join(store.recovery, 'versions')
+    const files = await fs.readdir(versions)
+    if (files.length > 4096) return 'Creation index history exceeds the bounded 4096-version proof; no history was pruned.'
+    let bytes = 0
+    for (const file of files) {
+      if (!/^[a-f0-9]{64}\.json$/.test(file)) return 'Creation index history is unverifiable.'
+      const stat = await fs.lstat(path.join(versions, file))
+      bytes += stat.size
+      if (!stat.isFile() || bytes > 32 * 1024 * 1024) return 'Creation index history exceeds the bounded 32 MiB proof or is not regular.'
+      const raw = await store.known(file.slice(0, -5))
+      if (!raw) return 'Creation index history is unavailable or corrupt.'
+      const retained = this.indexCreationRefusal(JSON.parse(raw), id)
+      if (retained) return retained
     }
   }
 

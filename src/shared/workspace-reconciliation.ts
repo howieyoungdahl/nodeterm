@@ -15,6 +15,8 @@ export interface WorkspaceRevisionRequest {
   expected: Record<string, string>
   indexRevision: string
   workspace: Workspace
+  /** Explicit virgin inline-file intent; missing expected revisions never imply creation. */
+  createInline?: string[]
 }
 export interface ProjectRevisionOutcome {
   kind: 'committed' | 'already-applied' | 'conflict' | 'stale-base' | 'busy' |

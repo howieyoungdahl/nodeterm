@@ -590,7 +590,11 @@ invariant that only lives in a commit message is one refactor away from being vi
 who never saw it.
 
 The 2026-09-05 combined fork recovery source is a local prototype, not rollout acceptance.
-See `docs/project-reconciliation.md` for the active new-file/migration/SSH refusal boundaries
+Exactly one explicit new inline project can be created in an already enrolled local v3 index,
+with exclusive virgin-file publication and separate file/index receipts. Keep partial intents
+and retained index history; never infer creation from a missing base. Browser-termination
+recovery and first-run/folder creation remain unsupported.
+See `docs/project-reconciliation.md` for the active first-run/migration/SSH refusal boundaries
 and the still-unavailable qualified message and trusted organizer-runtime integrations.
 Do not restore legacy save fallback to make a fixture pass. Public organizer lease release
 must carry the exact acquisition token; holder identity alone is insufficient.

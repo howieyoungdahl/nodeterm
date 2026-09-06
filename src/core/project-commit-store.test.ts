@@ -29,6 +29,109 @@ afterEach(async () => {
 const request = (base: string, proposed: string, operationId = 'op') =>
   ({ clientId: 'client', operationId, expectedRevision: base, proposed })
 
+const creation = (operationId = 'create', proposed = original) => ({ clientId: 'client', operationId,
+  expectedAbsence: true as const, indexRevision: revisionOf('fixture enrolled index'), proposed })
+
+describe('exclusive first creation in the retained coordinator', () => {
+  it('preserves unknown bytes in immutable history and returns only an exact durable receipt', async () => {
+    const target = path.join(dir, 'new.json'), store = new ProjectCommitStore(target)
+    const result = await store.create(creation())
+    expect(result.kind).toBe('committed')
+    expect(JSON.parse(result.current!.raw)).toMatchObject({ rev: 1, future: { retained: true }, nodes: [{ id: 'n1' }] })
+    expect(await store.known(result.current!.revision)).toBe(result.current!.raw)
+    expect((await new ProjectCommitStore(target).create(creation())).kind).toBe('already-applied')
+    expect((await store.create(creation('create', edit(original, (d) => { d.name = 'changed' })))).kind).toBe('stale-base')
+    expect(await fs.readFile(target, 'utf8')).toBe(result.current!.raw)
+  })
+
+  it('allows one of two stores to win creation without replacing either proposal', async () => {
+    const target = path.join(dir, 'new.json')
+    let reached!: () => void, release!: () => void
+    const paused = new Promise<void>((resolve) => { reached = resolve })
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const first = new ProjectCommitStore(target, async (phase) => { if (phase === 'journaled') { reached(); await held } })
+    const writing = first.create(creation())
+    await paused
+    try {
+      const losing = await new ProjectCommitStore(target).create(creation('loser', edit(original, (d) => { d.name = 'Loser retained' })))
+      expect(losing.kind).toBe('busy')
+      expect(await fs.readFile(losing.recovery, 'utf8')).toContain('Loser retained')
+    } finally { release() }
+    expect((await writing).kind).toBe('committed')
+    expect(JSON.parse(await fs.readFile(target, 'utf8')).name).toBe('Base')
+  })
+
+  it.each(['before-publish', 'published'] as PublicationPhase[])('retains an interposed raw writer at creation %s', async (phase) => {
+    const target = path.join(dir, 'new.json'), external = edit(original, (d) => { d.name = 'External winner' })
+    const store = new ProjectCommitStore(target, async (at) => { if (at === phase) await fs.writeFile(target, external) })
+    const result = await store.create(creation())
+    expect(result.kind).toBe(phase === 'published' ? 'publication-unknown' : 'publication-refused')
+    expect(await fs.readFile(target, 'utf8')).toBe(external)
+    expect(JSON.parse(await fs.readFile(path.join(result.recovery, 'candidate.json'), 'utf8')).name).toBe('Base')
+    expect((await new ProjectCommitStore(target).create(creation())).kind).toBe(result.kind)
+    expect((await new ProjectCommitStore(target).create(creation('hidden-retry'))).kind).toBe('publication-refused')
+  })
+
+  it.each(['file', 'directory', 'symlink', 'history', 'lock'])('refuses non-virgin %s without replacing or clearing it', async (kind) => {
+    const target = path.join(dir, 'new.json'), store = new ProjectCommitStore(target)
+    if (kind === 'file' || kind === 'history') await fs.writeFile(target, original)
+    if (kind === 'directory') await fs.mkdir(target)
+    if (kind === 'symlink') await fs.symlink(file, target)
+    if (kind === 'history') { await store.observe(); await fs.unlink(target) }
+    if (kind === 'lock') await fs.mkdir(path.join(store.recovery, 'writer.lock'), { recursive: true })
+    const result = await store.create(creation())
+    expect(result.kind).toBe(kind === 'lock' ? 'busy' : 'publication-refused')
+    if (kind === 'history') { expect(await store.known(revisionOf(original))).toBe(original); await expect(fs.lstat(target)).rejects.toMatchObject({ code: 'ENOENT' }) }
+    if (kind === 'lock') expect((await fs.stat(path.join(store.recovery, 'writer.lock'))).isDirectory()).toBe(true)
+    if (kind === 'symlink') expect((await fs.lstat(target)).isSymbolicLink()).toBe(true)
+    if (kind === 'directory') expect((await fs.lstat(target)).isDirectory()).toBe(true)
+    expect(await fs.readFile(file, 'utf8')).toBe(original)
+  })
+
+  it.each(['duplicate', 'parent', 'edge', 'historical'])('uses canonical identity/graph validation for %s creation', async (kind) => {
+    const target = path.join(dir, 'new.json')
+    const proposed = edit(original, (d) => {
+      if (kind === 'duplicate') d.nodes.push(d.nodes[0])
+      if (kind === 'parent') d.nodes[0].parentId = 'n1'
+      if (kind === 'edge') d.bridges = [{ id: 'edge', source: 'n1', target: 'missing' }]
+      if (kind === 'historical') d._reconciliation = { version: 1, deleted: { nodes: ['old'] } }
+    })
+    expect((await new ProjectCommitStore(target).create(creation('invalid', proposed))).kind).toBe('conflict')
+    await expect(fs.lstat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.each(['published', 'receipted'] as PublicationPhase[])('distinguishes missing receipt from missing ACK at %s', async (phase) => {
+    const target = path.join(dir, 'new.json')
+    const store = new ProjectCommitStore(target, async (at) => { if (at === phase) throw new Error('fixture interruption') })
+    expect((await store.create(creation())).kind).toBe('publication-unknown')
+    const bytes = await fs.readFile(target, 'utf8')
+    expect((await new ProjectCommitStore(target).create(creation())).kind).toBe(phase === 'receipted' ? 'already-applied' : 'publication-unknown')
+    expect(await fs.readFile(target, 'utf8')).toBe(bytes)
+  })
+
+  it.each(['creation-prepared', 'journaled', 'published'] as PublicationPhase[])('retains a real killed creation writer at %s without replay', async (phase) => {
+    const target = path.join(dir, 'new.json'), input = creation()
+    const bundle = buildSync({ entryPoints: [path.resolve('src/core/project-commit-store.ts')], bundle: true,
+      platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+    const code = bundle + `\nnew module.exports.ProjectCommitStore(${JSON.stringify(target)}, async phase => {
+      if (phase === ${JSON.stringify(phase)}) { process.send('paused'); await new Promise(() => {}) }
+    }).create(${JSON.stringify(input)}); setInterval(() => {}, 1000);`
+    const child = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    try {
+      expect(await once(child, 'message')).toEqual(['paused', undefined])
+      const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited
+      const reopened = new ProjectCommitStore(target)
+      expect((await reopened.create(input)).kind).toBe('publication-unknown')
+      expect((await reopened.create(creation('new-id'))).kind).toBe('busy')
+      const op = path.join(reopened.recovery, 'operations', revisionOf('client\0create'))
+      expect(await fs.readFile(path.join(op, 'request.json'), 'utf8')).toContain('expectedAbsence')
+      if (phase !== 'creation-prepared') expect(await fs.readFile(path.join(op, 'candidate.json'), 'utf8')).toContain('Base')
+      if (phase === 'published') expect(JSON.parse(await fs.readFile(target, 'utf8')).name).toBe('Base')
+      else await expect(fs.lstat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL') }
+  }, 15000)
+})
+
 describe('retained publication, using real disposable files', () => {
   it('merges independent edits from different loaded bases and retains exact unknown fields', async () => {
     const a = new ProjectCommitStore(file), b = new ProjectCommitStore(file)

@@ -53,6 +53,227 @@ afterEach(async () => {
 })
 
 describe('actual store → IPC → renderer state → Flow serialization → store', () => {
+  const inlineInput = (view: WorkspaceRevisionView, id = 'new-inline', operationId = 'create') => {
+    const { cwd: _cwd, ...inline } = project(id, '')
+    const workspace = structuredClone(view.workspace); workspace.projects.push(inline)
+    return { ...request(view, workspace, operationId), createInline: [id] }
+  }
+
+  it('keeps two independent registered-store creations and unrelated index data', async () => {
+    const a = await api.loadReconciled!(), other = new WorkspaceStore(), b = await other.loadReconciled()
+    const indexFile = path.join(dir, 'user', 'workspace.json')
+    const raw = JSON.parse(await fs.readFile(indexFile, 'utf8')); raw.futureIndex = { keep: true }
+    await fs.writeFile(indexFile, JSON.stringify(raw))
+    // Separate acknowledged bases, with an external index field introduced after both reads.
+    const first = await api.saveReconciled!(inlineInput(a, 'inline-a', 'a'))
+    const second = await other.saveReconciled(inlineInput(b, 'inline-b', 'b'))
+    expect(first.index.kind).toBe('committed'); expect(second.index.kind).toBe('committed')
+    const disk = JSON.parse(await fs.readFile(indexFile, 'utf8'))
+    expect(disk.futureIndex).toEqual({ keep: true })
+    expect(disk.entries.map((e: any) => e.id).sort()).toEqual(['inline-a', 'inline-b', 'p1', 'p2'])
+  })
+
+  it('refuses a second caller creation at the same identity and preserves the winner', async () => {
+    const a = await api.loadReconciled!(), other = new WorkspaceStore(), b = await other.loadReconciled()
+    const first = await api.saveReconciled!(inlineInput(a))
+    const winningBytes = await fs.readFile(path.join(dir, 'user', 'inline-projects', 'new-inline.json'), 'utf8')
+    const losing = inlineInput(b, 'new-inline', 'loser'); losing.workspace.projects.at(-1)!.name = 'Do not overwrite'
+    const result = await other.saveReconciled(losing)
+    expect(first.index.kind).toBe('committed')
+    expect(result.projects['new-inline'].kind).toBe('publication-refused')
+    expect(result.index.kind).toBe('stale-base')
+    expect(await fs.readFile(path.join(dir, 'user', 'inline-projects', 'new-inline.json'), 'utf8')).toBe(winningBytes)
+  })
+
+  it('binds the whole creation request so changing project ID or payload cannot replay it', async () => {
+    const view = await api.loadReconciled!(), input = inlineInput(view)
+    expect((await api.saveReconciled!(input)).index.kind).toBe('committed')
+    store = new WorkspaceStore(); store.registerIpc()
+    const changed = inlineInput(view, 'different-id')
+    expect((await api.saveReconciled!(changed)).index.kind).toBe('publication-refused')
+    await expect(fs.lstat(path.join(dir, 'user', 'inline-projects', 'different-id.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const payload = structuredClone(input); payload.workspace.projects.at(-1)!.name = 'Changed'
+    expect((await api.saveReconciled!(payload)).index.kind).toBe('publication-refused')
+    expect((await api.saveReconciled!(input)).index.kind).toBe('already-applied')
+  })
+
+  it('retains file success and the exact client intent while the real index lock is busy', async () => {
+    const client = new WorkspaceReconciliationClient(api)
+    let workspace = await client.load()
+    const { cwd: _cwd, ...inline } = project('partial-inline', '')
+    workspace.projects.push(inline)
+    const lock = path.join(new ProjectCommitStore(path.join(dir, 'user', 'workspace.json')).recovery, 'writer.lock')
+    const create = ProjectCommitStore.prototype.create
+    const spy = vi.spyOn(ProjectCommitStore.prototype, 'create').mockImplementation(async function (input, scope) {
+      const result = await create.call(this, input, scope)
+      if (result.kind === 'committed') await fs.mkdir(lock)
+      return result
+    })
+    const seen: WorkspaceRevisionRequest[] = [], save = api.saveReconciled!.bind(api)
+    api.saveReconciled = async (input) => { seen.push(structuredClone(input)); return save(input) }
+    try {
+      const partial = await client.save(workspace, () => workspace)
+      expect(partial.saved).toBe(false); workspace = partial.workspace
+      const file = path.join(dir, 'user', 'inline-projects', 'partial-inline.json')
+      const before = await fs.readFile(file, 'utf8')
+      expect(JSON.parse(await fs.readFile(path.join(dir, 'user', 'workspace.json'), 'utf8')).entries.some((e: any) => e.id === inline.id)).toBe(false)
+      await fs.rmdir(lock) // this fixture created this exact empty lock
+      store = new WorkspaceStore(); store.registerIpc()
+      const complete = await client.save(workspace, () => workspace)
+      expect(complete.saved).toBe(true)
+      expect(seen[1]).toEqual(seen[0])
+      expect(await fs.readFile(file, 'utf8')).toBe(before)
+    } finally { spy.mockRestore(); await fs.rmdir(lock).catch(() => {}) }
+  })
+
+  it('retains unknown index publication without replaying creation under a fresh operation', async () => {
+    const client = new WorkspaceReconciliationClient(api)
+    let workspace = await client.load()
+    const { cwd: _cwd, ...inline } = project('unknown-index', '')
+    workspace.projects.push(inline)
+    const original = ProjectCommitStore.prototype.commit
+    const spy = vi.spyOn(ProjectCommitStore.prototype, 'commit').mockImplementation(function (input, guard) {
+      const target = this.file.endsWith('workspace.json') ? new ProjectCommitStore(this.file,
+        async (phase) => { if (phase === 'published') throw new Error('index receipt lost') }, new Set(['entries'])) : this
+      return original.call(target, input, guard)
+    })
+    const seen: WorkspaceRevisionRequest[] = [], save = api.saveReconciled!.bind(api)
+    api.saveReconciled = async (input) => { seen.push(structuredClone(input)); return save(input) }
+    try {
+      const partial = await client.save(workspace, () => workspace)
+      expect(partial.saved).toBe(false); workspace = partial.workspace
+      const file = path.join(dir, 'user', 'inline-projects', `${inline.id}.json`)
+      const before = await fs.readFile(file, 'utf8')
+      spy.mockRestore(); store = new WorkspaceStore(); store.registerIpc()
+      expect((await client.save(workspace, () => workspace)).saved).toBe(false)
+      expect(seen[1]).toEqual(seen[0]); expect(client.error).toContain('interrupted')
+      expect(await fs.readFile(file, 'utf8')).toBe(before)
+    } finally { spy.mockRestore() }
+  })
+
+  it('keeps late edits and the same creation after lost ACK, refresh, and host reopen', async () => {
+    const seen: WorkspaceRevisionRequest[] = []
+    let lose = true
+    const wrapped = { ...api, saveReconciled: async (input: WorkspaceRevisionRequest) => {
+      seen.push(structuredClone(input)); const result = await api.saveReconciled!(input)
+      if (lose) { lose = false; throw new Error('creation ACK lost') }
+      return result
+    } } as WorkspaceApi
+    const client = new WorkspaceReconciliationClient(wrapped)
+    let workspace = await client.load()
+    const { cwd: _cwd, ...inline } = project('late-inline', '')
+    ;(inline.nodes[0] as any).futureNode = { keep: true }
+    workspace.projects.push(inline)
+    await expect(client.save(workspace, () => workspace)).rejects.toThrow('creation ACK lost')
+    workspace.projects.at(-1)!.nodes[0].title = 'Edit after delivery'
+    workspace.activeProjectId = 'p2'
+    workspace = await client.refresh(() => workspace)
+    expect(workspace.projects.at(-1)!.nodes[0].title).toBe('Edit after delivery')
+    store = new WorkspaceStore(); store.registerIpc()
+    const ack = await client.save(workspace, () => workspace)
+    expect(ack.saved).toBe(true); expect(seen[1]).toEqual(seen[0])
+    expect(ack.workspace.projects.at(-1)!.nodes[0].title).toBe('Edit after delivery')
+    workspace = ack.workspace
+    expect((await client.save(workspace, () => workspace)).saved).toBe(true)
+    const disk = JSON.parse(await fs.readFile(path.join(dir, 'user', 'inline-projects', `${inline.id}.json`), 'utf8'))
+    expect(disk.nodes[0]).toMatchObject({ title: 'Edit after delivery', futureNode: { keep: true } })
+    expect((await new WorkspaceStore().loadReconciled()).workspace.projects.filter((p) => p.id === inline.id)).toHaveLength(1)
+  })
+
+  it.each(['folder', 'ssh', 'relay', 'unavailable', 'existing', 'invalid-id', 'guessed-index'])('keeps %s creation explicitly unsupported', async (kind) => {
+    const view = await api.loadReconciled!(), input = inlineInput(view)
+    const target = input.workspace.projects.at(-1)!
+    if (kind === 'folder') target.cwd = path.join(dir, 'unadopted')
+    if (kind === 'ssh') target.ssh = {} as any
+    if (kind === 'relay') target.remote = {} as any
+    if (kind === 'unavailable') target.unavailable = true
+    if (kind === 'existing') { input.createInline = ['p1']; input.workspace.projects.pop() }
+    if (kind === 'invalid-id') { target.id = '../escape'; input.createInline = [target.id] }
+    if (kind === 'guessed-index') input.indexRevision = 'a'.repeat(64)
+    const index = path.join(dir, 'user', 'workspace.json'), before = await fs.readFile(index, 'utf8')
+    const result = await api.saveReconciled!(input)
+    expect(['stale-base', 'publication-refused']).toContain(result.index.kind)
+    expect(await fs.readFile(index, 'utf8')).toBe(before)
+    await expect(fs.lstat(path.join(dir, 'user', 'inline-projects', 'new-inline.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('does not turn first-run index absence into creation enrollment', async () => {
+    await fs.unlink(path.join(dir, 'user', 'workspace.json'))
+    const view = await new WorkspaceStore().loadReconciled()
+    expect(view.indexRevision).toBe('')
+    expect((await new WorkspaceStore().saveReconciled(inlineInput(view))).index.kind).toBe('publication-refused')
+    await expect(fs.lstat(path.join(dir, 'user', 'workspace.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('refuses a multi-create batch before publishing any project or index', async () => {
+    const view = await api.loadReconciled!(), input = inlineInput(view)
+    const { cwd: _cwd, ...second } = project('second-inline', '')
+    input.workspace.projects.push(second); input.createInline.push(second.id)
+    const index = path.join(dir, 'user', 'workspace.json'), before = await fs.readFile(index, 'utf8')
+    const result = await api.saveReconciled!(input)
+    expect(result.index.kind).toBe('publication-refused'); expect(result.index.message).toContain('exactly one')
+    expect(result.projects).toEqual({}); expect(await fs.readFile(index, 'utf8')).toBe(before)
+    await expect(fs.lstat(path.join(dir, 'user', 'inline-projects'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.each(['prior-member', 'tombstone'])('does not confuse virgin file absence with retained index %s evidence', async (kind) => {
+    const index = path.join(dir, 'user', 'workspace.json'), before = await fs.readFile(index, 'utf8')
+    const old = JSON.parse(before)
+    if (kind === 'prior-member') old.entries.push({ id: 'new-inline', name: 'Historical inline', project: { nodes: [] } })
+    else old._reconciliation = { version: 1, deleted: { entries: ['new-inline'] } }
+    await fs.writeFile(index, JSON.stringify(old)); await new ProjectCommitStore(index, undefined, new Set(['entries'])).observe()
+    await fs.writeFile(index, before)
+    const view = await api.loadReconciled!(), result = await api.saveReconciled!(inlineInput(view))
+    expect(result.projects['new-inline'].kind).toBe('publication-refused')
+    expect(result.projects['new-inline'].message).toContain('index')
+    expect(result.index.kind).toBe('stale-base'); expect(await fs.readFile(index, 'utf8')).toBe(before)
+    await expect(fs.lstat(path.join(dir, 'user', 'inline-projects', 'new-inline.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('refuses an index tombstone arriving after file success and never acknowledges resurrection', async () => {
+    const view = await api.loadReconciled!(), input = inlineInput(view)
+    const index = path.join(dir, 'user', 'workspace.json'), create = ProjectCommitStore.prototype.create
+    const spy = vi.spyOn(ProjectCommitStore.prototype, 'create').mockImplementation(async function (request, scope) {
+      const result = await create.call(this, request, scope)
+      if (result.kind === 'committed') {
+        const raw = JSON.parse(await fs.readFile(index, 'utf8'))
+        raw._reconciliation = { version: 1, deleted: { entries: ['new-inline'] } }
+        await fs.writeFile(index, JSON.stringify(raw))
+      }
+      return result
+    })
+    try {
+      const result = await api.saveReconciled!(input)
+      expect(result.projects['new-inline'].kind).toBe('committed')
+      expect(result.index.kind).toBe('publication-refused')
+      expect(result.index.message).toContain('deletion evidence')
+      const file = path.join(dir, 'user', 'inline-projects', 'new-inline.json'), retained = await fs.readFile(file, 'utf8')
+      expect(JSON.parse(await fs.readFile(index, 'utf8')).entries.some((e: any) => e.id === 'new-inline')).toBe(false)
+      expect((await api.saveReconciled!(input)).index.kind).toBe('publication-refused')
+      expect(await fs.readFile(file, 'utf8')).toBe(retained)
+    } finally { spy.mockRestore() }
+  })
+
+  it('creates a new inline project only through explicit enrolled creation, then reopens it', async () => {
+    const view = await api.loadReconciled!()
+    const { cwd: _cwd, ...inline } = project('new-inline', '')
+    const next = structuredClone(view.workspace); next.projects.push(inline)
+    const refused = await api.saveReconciled!(request(view, next, 'not-creation'))
+    expect(refused.projects[inline.id].kind).toBe('stale-base')
+    const input = { ...request(view, next, 'explicit-creation'), createInline: [inline.id] }
+    const result = await api.saveReconciled!(input)
+    expect(result.projects[inline.id].kind).toBe('committed')
+    expect(result.index.kind).toBe('committed')
+    const disk = JSON.parse(await fs.readFile(path.join(dir, 'user', 'inline-projects', `${inline.id}.json`), 'utf8'))
+    expect(disk.rev).toBe(1)
+    expect(disk.nodes[0].shell).toBeUndefined()
+    const reopened = await new WorkspaceStore().loadReconciled()
+    expect(reopened.workspace.projects.map((p) => p.id)).toEqual(['p1', 'p2', inline.id])
+    expect(reopened.projects[inline.id].project.nodes[0].shell).toBe('/bin/bash')
+    expect((await api.saveReconciled!(input)).projects[inline.id].kind).toBe('already-applied')
+    expect(await fs.readFile(path.join(dir, 'user', 'inline-projects', `${inline.id}.json`), 'utf8')).toBe(JSON.stringify(disk, null, 2) + '\n')
+  })
+
   it.each(['project', 'index'])('refuses a displaced %s read across independent stores, then retries the exact published state', async (kind) => {
     const target = kind === 'project' ? file : path.join(dir, 'user', 'workspace.json')
     let displaced!: () => void, release!: () => void

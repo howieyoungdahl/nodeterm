@@ -192,7 +192,12 @@ adding terminal-session features, extend the interface — do not reach around i
 ## State & persistence model
 
 The revision-bound WorkspaceStore/IPC/Canvas integration is described in
-`docs/project-reconciliation.md`, including its explicit rollout blockers. Existing local files
+`docs/project-reconciliation.md`, including its explicit rollout blockers. One explicit new inline
+project per request is supported inside an already enrolled v3 local index, using virgin-history
+exclusive creation and separate file/index receipts. Partial outcomes retain the exact request;
+browser-termination intent recovery, first-run, migration, folder/SSH and other metadata producers
+remain unsupported. The absence proof refuses oversized/unverifiable index history, never prunes it.
+Existing local files
 use retained raw bases, caller enrollment, durable receipts/tombstones, and preserve-then-exclusive
 publication. Never route a refused legacy save around its fence or steal an abandoned writer lock.
 Ordinary workspace reads and coordinator observations guard the publication interval, with at most
@@ -3734,7 +3739,7 @@ acquisition token so delayed same-holder cleanup cannot revoke a successor. This
 protection alone does not implement conditional host layout apply/inverse; the coordinator
 consumer now does, but actual shells still lack its trusted runtime adapter. Canonical message
 validation and identified host routes exist, but qualified issuer/recipient/durable-intent
-adapters remain unavailable; new-file, legacy migration and SSH persistence remain refused.
+adapters remain unavailable; first-run/folder creation, legacy migration and SSH persistence remain refused.
 Source containment and disposable fixture success are not live rollout or device acceptance.
 
 Browser startup license/saved-SSH hydration catches rejected reads into explicit `readError`

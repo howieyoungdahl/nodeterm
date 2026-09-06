@@ -77,6 +77,46 @@ persistence refusal throws a named error and recovery path. Phone-side acceptanc
 
 ## Preserve-then-exclusive publication
 
+### Bounded first creation: one inline project
+
+An already caller-enrolled local v3 index supports exactly one new inline project
+per reconciled request via explicit `createInline: [projectId]`. The host derives
+`inline-projects/<validated-id>.json`; absence of an ordinary project base never
+implies creation. First-run index bootstrap, multi-create batches, folder adoption,
+relocation, pre-file migration, SSH and relay projects remain unsupported.
+
+The existing caller-enrollment directory durably binds the complete creation
+request to its operation ID. The existing file coordinator exclusively establishes
+virgin recovery history, journals an observed absence/request/candidate, and links
+a separate publication file only into an absent destination. Existing files,
+nonregular/redirected parents, retained history/locks and competing creations refuse;
+no old file is displaced or overwritten. Shared identity/graph checks still apply.
+The host vetoes IDs found in current or retained index entries/deletion evidence.
+This proof reads at most 4096 retained index versions / 32 MiB; unavailable, corrupt,
+legacy-shaped or larger history refuses, never truncates or garbage-collects it.
+
+File and index receipts remain separate. The file can be durable while index
+publication is busy, conflicted or unknown; no whole-workspace success is reported
+and the orphan file is retained, not deleted as rollback. Index creation guards
+revalidate scope at the existing durable publication boundary while retaining the
+ordinary index merge for unrelated edits; organizer exact-revision CAS is unchanged.
+Success requires the index receipt to contain the exact new inline entry.
+
+The renderer keeps the exact pending request across partial results, lost ACKs,
+refreshes/tab switches and host-store reopen, rebasing edits made during delivery.
+Only an exact durable receipt confirms already-applied; journal-without-receipt is
+unknown and never replayed. The returned load workspace is detached from enrollment
+evidence so in-place UI additions cannot enroll themselves. Existing browser and
+preload bridges carry the typed request through their existing channels; no new
+transport principal, registry, control grant or legacy fallback is introduced.
+
+Browser/process termination recovery is NOT implemented: the browser's pending
+object is in memory. Host intent/history survives as recovery evidence, but there
+is no restart UI that reconstructs that pending object. An unindexed retained file
+cannot be silently created again. Other metadata/index producers and first-run
+bootstrap remain distinct rollout gaps. These source fixtures establish neither
+live adoption nor Desktop/phone/SSH/Windows/power-loss conformance.
+
 `ProjectCommitStore` retains adjacent `.recovery/<filename>/` evidence on the same filesystem:
 immutable versions, operation request/candidate/receipt, displaced inodes and durable tombstones.
 No history or tombstones are garbage-collected. Keep this machine-local directory out of Git/sync.
