@@ -124,3 +124,36 @@ it('switching projects never submits another project\'s retained edit', async ()
   expect(sessionStorage.getItem('nodeterm.local-settings.intent.p1')).toBe(intent)
   expect(JSON.parse(await disk()).entries[0].localSettings).toEqual({ terminal: { theme: 'old' } })
 })
+
+it('late ACK from an unmounted hook cannot clear a remounted editor\'s newer retained operation', async () => {
+  await mount(); const real = browser.updateLocal
+  let release!: () => void, durable!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const committed = new Promise<void>((resolve) => { durable = resolve })
+  browser.updateLocal = async (id, request) => { const result = await real(id, request); durable(); await held; return result }
+  let old!: Promise<boolean>
+  await act(async () => { old = hook.saveLocal((local) => ({ ...local, ignoreShared: { terminal: true } })); await committed })
+  const oldIntent = sessionStorage.getItem('nodeterm.local-settings.intent.p1')
+  await act(async () => root!.unmount()); root = undefined; browser.updateLocal = real; await mount()
+  await act(async () => { expect(await hook.retryLocal()).toBe(true) })
+  browser.updateLocal = async () => { throw new Error('newer request disconnected') }
+  await act(async () => { expect(await hook.saveLocal((local) => ({ ...local, terminal: { ...local?.terminal, fontFamily: 'monospace' } }))).toBe(false) })
+  const newer = sessionStorage.getItem('nodeterm.local-settings.intent.p1')
+  expect(newer).not.toBe(oldIntent); expect(newer).toContain('fontFamily')
+  await act(async () => { release(); expect(await old).toBe(false) })
+  expect(sessionStorage.getItem('nodeterm.local-settings.intent.p1')).toBe(newer)
+  expect(hook.localError).toContain('newer request disconnected')
+})
+
+it('a failed retention write cannot send even on retry until the same request is verifiably retained', async () => {
+  await mount()
+  const retention = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage unavailable') })
+  await act(async () => { expect(await hook.saveLocal((local) => ({ ...local, ignoreShared: { terminal: true } }))).toBe(false) })
+  const intended = JSON.parse(retention.mock.calls[0][1])
+  await act(async () => { expect(await hook.retryLocal()).toBe(false) })
+  expect(calls.filter((call) => call.channel === IPC.projectSettingsUpdateLocalReconciled)).toHaveLength(0)
+  retention.mockRestore()
+  await act(async () => { expect(await hook.retryLocal()).toBe(true) })
+  const writes = calls.filter((call) => call.channel === IPC.projectSettingsUpdateLocalReconciled)
+  expect(writes).toHaveLength(1); expect(writes[0].args[1]).toEqual(intended.request)
+})

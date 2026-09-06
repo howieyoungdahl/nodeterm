@@ -270,6 +270,8 @@ immutable request. The panel catches IPC rejection, displays the reason and offe
 it serializes subsequent edits on acknowledgments, not speculative bases. Same-tab session storage
 retains pending operations across reload/remount; lost/cleared browser storage and abandoned locks
 still require explicit recovery. A conflict cannot be overwritten by retrying with a fresh ID.
+Every retry verifies retention before RPC; a storage failure cannot become an unretained send.
+Unmount generation and exact-request cleanup fences prevent a late ACK from deleting a newer edit.
 Opaque enrollment is an operator-read binding, not an authenticated agent principal. Desktop/mobile/
 Windows/live acceptance is not established by the disposable registered-core and mounted-hook tests.
 

@@ -96,7 +96,12 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
   currentProject.current = projectId
   const readProject = useRef(projectId)
   const generation = useRef(0)
+  const active = useRef(true)
   const intentKey = `nodeterm.local-settings.intent.${projectId}`
+  useEffect(() => {
+    active.current = true
+    return () => { active.current = false; generation.current += 1 }
+  }, [])
   /** Counts successful writes, so a read can tell whether it started before or after the last one. */
   const writeSeqRef = useRef(0)
 
@@ -188,12 +193,17 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
   const retryLocal = useCallback((): Promise<boolean> => {
     if (localFlight.current) return localFlight.current
     const intent = localIntent.current
-    if (!intent || intent.projectId !== projectId || currentProject.current !== projectId) return Promise.resolve(false)
+    if (!active.current || !intent || intent.projectId !== projectId || currentProject.current !== projectId) return Promise.resolve(false)
     const gen = generation.current
     const run = (async () => {
       try {
+        // Every attempt, including retry after a failed setItem, needs exact tab retention
+        // BEFORE transport. A different retained intent belongs to a newer editor instance.
+        const owned = JSON.stringify(intent), stored = sessionStorage.getItem(intentKey)
+        if (stored === null) sessionStorage.setItem(intentKey, owned)
+        if (sessionStorage.getItem(intentKey) !== owned) throw new Error('Retained local operation changed; this attempt was not sent')
         const result = await window.nodeTerminal.projectSettings.updateLocal(projectId, intent.request)
-        if (currentProject.current !== projectId || generation.current !== gen) return false
+        if (!active.current || currentProject.current !== projectId || generation.current !== gen) return false
         if (result.operationId !== intent.request.operationId || !['committed', 'already-applied'].includes(result.kind) ||
             !result.receiptRevision || !result.current || result.current.projectId !== projectId) {
           setLocalError(`${result.kind ?? 'unavailable'}: ${result.message ?? 'The edit is retained; retry the same operation.'}`)
@@ -201,19 +211,21 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
         }
         const previous = snapshotRef.current
         if (!previous || previous === 'loading') return false
+        if (sessionStorage.getItem(intentKey) !== owned) throw new Error('Retained local operation changed; late acknowledgment did not clear it')
+        sessionStorage.removeItem(intentKey)
         const next = { ...previous, local: result.current.local,
           localBase: { clientId: result.current.clientId, indexRevision: result.current.indexRevision } }
         writeSeqRef.current += 1
         snapshotRef.current = next
         setSnapshot(next)
-        sessionStorage.removeItem(intentKey)
         localIntent.current = null
         setLocalError(null)
         invalidateProjectLaunchInfo(projectId)
         void ensureProjectLaunchInfo(projectId)
         return true
       } catch (error) {
-        if (currentProject.current === projectId) setLocalError(`unavailable: ${String(error)}. The edit and operation are retained.`)
+        if (active.current && currentProject.current === projectId && generation.current === gen)
+          setLocalError(`unavailable: ${String(error)}. The edit and operation are retained.`)
         return false
       }
     })()
@@ -224,7 +236,7 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
 
   const saveLocal = useCallback((update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined): Promise<boolean> => {
     const run = localQueue.current.then(async () => {
-      if (currentProject.current !== projectId) return false
+      if (!active.current || currentProject.current !== projectId) return false
       // No new operation can pass an unresolved intent. Explicit retry uses its original ID.
       if (localIntent.current) { setLocalError('An earlier local edit is retained. Retry it before submitting another edit.'); return false }
       const snap = snapshotRef.current
