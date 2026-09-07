@@ -644,10 +644,37 @@ workspace mutation lock: `list` is what an agent runs when it suspects a spawn i
 queueing it behind that spawn would make the diagnosis wait on the thing being diagnosed.
 
 Ownership is intentionally narrower than the desktop confirmation UI: an agent may mutate, message,
-or close only a node it opened through this Server. Link, group, rename, resize, color,
-sticky updates, dependency targets, message delivery, and close validate their complete target set
-before any write or PTY kill; an unowned member refuses the whole operation. Queued messages repeat
-the creator check at flush time in addition to the existing verified and per-project switch gates.
+or close only a node it opened through this Server. Link, group, ungroup, move, arrange, align,
+rename, resize, color, sticky updates, dependency targets, message delivery, and close validate their
+complete target set before any write or PTY kill; an unowned member refuses the whole operation.
+Queued messages repeat the creator check at flush time in addition to the existing verified and
+per-project switch gates.
+
+#### The structural quartet: `ungroup`, `move`, `arrange`, `align`
+
+`group` only ever wraps loose siblings, so until these landed a canvas the spawn tray had collected
+could only get **more** grouped: a director's attempt to take one of its own cards back out answered
+`control-unsupported-on-this-edition`, and the operator had to drag it by hand. They are the recovery
+path, and they carry desktop's semantics: `move` keeps every root-space position fixed and refuses a
+cycle, `ungroup` promotes a frame's direct children into the frame's **own** parent (never to the
+root), and `arrange`/`align` run in ONE coordinate space — all top-level, or all children of one
+frame — then re-hug that frame. The geometry itself is `@shared/canvas-arrange`, the same module the
+renderer's `arrangeNodes`/`alignNodes` run, so the one-container rule cannot drift between the two
+canvases; the persisted reparent/ungroup transforms already existed in `headless-node-factory.ts`.
+
+**Their ownership gate is wider than "the ids you named", and deliberately so.** Re-hugging a frame
+moves the frame and re-bases every child it keeps; promoting a frame's members rewrites each of them.
+So each verb computes its plan against a copy first and asks the ledger about **every record the
+transaction would actually rewrite** — compared by value, because re-hugging rebuilds child records
+whose numbers did not change and an identity-based gate would refuse over nodes nothing moved. An
+unowned member anywhere in that set refuses the whole request and applies nothing, exactly like
+`close`. The honest consequence is stated in the agent-facing skill text: a frame the operator made
+is not a `move` destination, and a tray holding somebody else's card cannot be tidied. `ungroup`
+additionally asks about the frame by name, since a removed record never appears in that diff.
+
+All four also repeat the verified-identity gate inside the factory rather than relying on the
+control-handler boundary alone — they rewrite the parentage and geometry of nodes the caller did not
+name, and a gate that exists in one place is a gate one refactor away from being gone.
 
 Node geometry is durable canvas state: Server control writes `CanvasNodeState.size`, the browser
 hydrates that exact rectangle into React Flow, and later saves measured geometry back. Consequently,

@@ -1184,6 +1184,393 @@ describe('HeadlessNodeFactory', () => {
     expect(publishedProjects).toEqual([])
   })
 
+  /**
+   * The recovery half of grouping. `group` only ever wraps loose siblings, so before these four a
+   * Server-Edition canvas the spawn tray had collected could not be un-collected from inside a
+   * session at all — a director's attempt to take one card back out answered
+   * `control-unsupported-on-this-edition`, and the operator had to drag it by hand.
+   */
+  describe('the structural quartet: move, ungroup, arrange and align', () => {
+    /** Absolute (root-space) position, which is what every one of these transforms preserves. */
+    const rootOf = (nodes: CanvasNodeState[], id: string): { x: number; y: number } => {
+      const node = nodes.find((candidate) => candidate.id === id)!
+      let { x, y } = node.position
+      let parentId = node.parentId
+      const seen = new Set<string>()
+      while (parentId && !seen.has(parentId)) {
+        seen.add(parentId)
+        const parent = nodes.find((candidate) => candidate.id === parentId)
+        if (!parent) break
+        x += parent.position.x
+        y += parent.position.y
+        parentId = parent.parentId
+      }
+      return { x, y }
+    }
+    const nodesNow = async (): Promise<CanvasNodeState[]> =>
+      (await new WorkspaceStore().load({ sideline: false })).projects[0].nodes
+
+    /** A node this Server did not open: present on the canvas, absent from the creator ledger. */
+    const addForeign = async (id: string, parentId?: string): Promise<void> => {
+      const workspace = await store.load({ sideline: false })
+      const node = terminal(id, 'Foreign', 'claude', 1500)
+      if (parentId) node.parentId = parentId
+      workspace.projects[0].nodes.push(node)
+      await store.save(workspace)
+    }
+
+    const groupOwned = async (nodes: string, label?: string): Promise<string> => {
+      const reply = await factory.group('term-source', { nodes, ...(label ? { label } : {}) })
+      return (reply.result as { groupId: string }).groupId
+    }
+
+    it('takes a card back OUT of a frame, keeping where it sits and re-hugging what it left', async () => {
+      const groupId = await groupOwned('term-upstream,term-owned', 'Spawn tray')
+      const before = await nodesNow()
+      const wasAt = rootOf(before, 'term-owned')
+      const frameBefore = before.find((node) => node.id === groupId)!
+      published.length = 0
+      publishedProjects.length = 0
+
+      await expect(
+        factory.move('term-source', { nodes: 'term-owned' }, true)
+      ).resolves.toMatchObject({
+        ok: true,
+        result: { moved: ['term-owned'], group: null }
+      })
+
+      const after = await nodesNow()
+      const moved = after.find((node) => node.id === 'term-owned')!
+      expect(moved.parentId).toBeUndefined()
+      expect(rootOf(after, 'term-owned')).toEqual(wasAt)
+      // The frame it left is now sized around the one card it kept, not around the gap.
+      const frameAfter = after.find((node) => node.id === groupId)!
+      expect(frameAfter.size.width).toBeLessThan(frameBefore.size.width)
+      expect(rootOf(after, 'term-upstream')).toEqual(rootOf(before, 'term-upstream'))
+      expect(published.map((node) => node.id)).toEqual(
+        expect.arrayContaining(['term-owned', groupId])
+      )
+      expect(publishedProjects).toHaveLength(1)
+      expect(pty.sends).toEqual([])
+      expect(pty.destroys).toEqual([])
+    })
+
+    it('moves a card from one frame into another, and a whole frame subtree with it', async () => {
+      const from = await groupOwned('term-upstream,term-owned', 'From')
+      const opened = await factory.openTerminal('term-source', {}, true)
+      const strayId = (opened.result as { id: string }).id
+      const into = await groupOwned(strayId, 'Into')
+      const before = await nodesNow()
+      const wasAt = rootOf(before, 'term-owned')
+
+      await expect(
+        factory.move('term-source', { nodes: 'term-owned', group: into }, true)
+      ).resolves.toMatchObject({ ok: true, result: { moved: ['term-owned'], group: into } })
+
+      const after = await nodesNow()
+      expect(after.find((node) => node.id === 'term-owned')?.parentId).toBe(into)
+      expect(rootOf(after, 'term-owned')).toEqual(wasAt)
+      // Frames precede their descendants, or React Flow hydrates an orphan.
+      expect(after.findIndex((node) => node.id === into)).toBeLessThan(
+        after.findIndex((node) => node.id === 'term-owned')
+      )
+
+      // …and a FRAME travels as one unit, its own children keeping their places.
+      const nested = rootOf(after, 'term-upstream')
+      await expect(
+        factory.move('term-source', { nodes: from, group: into }, true)
+      ).resolves.toMatchObject({ ok: true, result: { moved: [from] } })
+      const nestedAfter = await nodesNow()
+      expect(nestedAfter.find((node) => node.id === from)?.parentId).toBe(into)
+      expect(nestedAfter.find((node) => node.id === 'term-upstream')?.parentId).toBe(from)
+      expect(rootOf(nestedAfter, 'term-upstream')).toEqual(nested)
+    })
+
+    it('refuses a cycle — a frame into itself or its own descendant — and writes nothing', async () => {
+      const inner = await groupOwned('term-upstream,term-owned', 'Inner')
+      const outer = await groupOwned(inner, 'Outer')
+      const before = structuredClone(await nodesNow())
+      published.length = 0
+      publishedProjects.length = 0
+
+      // An ancestor into its own descendant, and a frame into itself.
+      for (const nodes of [outer, inner]) {
+        const reply = await factory.move('term-source', { nodes, group: inner }, true)
+        expect(reply, nodes).toMatchObject({ ok: false })
+        expect(reply.error, nodes).toContain('would nest a frame in itself')
+      }
+      expect(await nodesNow()).toEqual(before)
+      expect(published).toEqual([])
+      expect(publishedProjects).toEqual([])
+    })
+
+    it('refuses move against an unowned card, an unowned destination, and unowned collateral', async () => {
+      await addForeign('term-foreign')
+      const groupId = await groupOwned('term-upstream,term-owned', 'Owned tray')
+      // A frame this Server did not open, offered as a destination.
+      const workspace = await store.load({ sideline: false })
+      workspace.projects[0].nodes.unshift({
+        id: 'group-foreign',
+        kind: 'group',
+        position: { x: 2000, y: 20 },
+        size: { width: 400, height: 300 },
+        title: 'Operator frame',
+        color: '#32d74b',
+        group: null
+      })
+      await store.save(workspace)
+      const before = structuredClone(await nodesNow())
+      published.length = 0
+      publishedProjects.length = 0
+
+      await expect(
+        factory.move('term-source', { nodes: 'term-foreign' }, true)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('move-not-owner')
+      })
+      await expect(
+        factory.move('term-source', { nodes: 'term-owned', group: 'group-foreign' }, true)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('move-not-owner')
+      })
+
+      // Collateral: the card named is owned and so is the destination, but re-hugging the frame it
+      // LEAVES re-bases a sibling this caller never opened. The whole request refuses.
+      await addForeign('term-foreign-child', groupId)
+      const opened = await factory.openTerminal('term-source', {}, true)
+      const into = await groupOwned((opened.result as { id: string }).id, 'Into')
+      published.length = 0
+      publishedProjects.length = 0
+      const beforeCollateral = structuredClone(await nodesNow())
+      await expect(
+        factory.move('term-source', { nodes: 'term-owned', group: into }, true)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('move-not-owner')
+      })
+      expect(await nodesNow()).toEqual(beforeCollateral)
+      expect(beforeCollateral.map((node) => node.id)).toEqual(
+        expect.arrayContaining(before.map((node) => node.id))
+      )
+      expect(published).toEqual([])
+      expect(publishedProjects).toEqual([])
+    })
+
+    it('dissolves a frame into ITS parent, keeping the cards exactly where they look', async () => {
+      const inner = await groupOwned('term-upstream,term-owned', 'Inner')
+      const outer = await groupOwned(inner, 'Outer')
+      const before = await nodesNow()
+      const roots = new Map(
+        ['term-upstream', 'term-owned'].map((id) => [id, rootOf(before, id)])
+      )
+      published.length = 0
+      publishedProjects.length = 0
+      removed.length = 0
+
+      await expect(factory.ungroup('term-source', { group: inner }, true)).resolves.toMatchObject({
+        ok: true,
+        result: { freed: ['term-upstream', 'term-owned'], group: inner }
+      })
+
+      const after = await nodesNow()
+      expect(after.some((node) => node.id === inner)).toBe(false)
+      for (const id of ['term-upstream', 'term-owned']) {
+        // Promoted one level — to the frame's OWN parent, never to the root.
+        expect(after.find((node) => node.id === id)?.parentId).toBe(outer)
+        expect(rootOf(after, id)).toEqual(roots.get(id))
+      }
+      expect(removed).toEqual([inner])
+      expect(published.map((node) => node.id)).toEqual(['term-upstream', 'term-owned'])
+      // The ledger entry goes with the frame: a dissolved frame is not a node anyone still owns.
+      await expect(factory.rename('term-source', { node: inner, title: 'Ghost' })).resolves
+        .toMatchObject({ ok: false })
+      expect(pty.destroys).toEqual([])
+    })
+
+    it('promotes a frame’s children to the top level when the frame had no parent', async () => {
+      const groupId = await groupOwned('term-upstream,term-owned', 'Flat')
+      const before = await nodesNow()
+      const roots = new Map(
+        ['term-upstream', 'term-owned'].map((id) => [id, rootOf(before, id)])
+      )
+
+      await expect(factory.ungroup('term-source', { group: groupId }, true)).resolves.toMatchObject(
+        { ok: true }
+      )
+      const after = await nodesNow()
+      for (const id of ['term-upstream', 'term-owned']) {
+        expect(after.find((node) => node.id === id)?.parentId).toBeUndefined()
+        expect(rootOf(after, id)).toEqual(roots.get(id))
+      }
+    })
+
+    it('refuses to dissolve a frame it does not own, or one holding a card it does not own', async () => {
+      const workspace = await store.load({ sideline: false })
+      workspace.projects[0].nodes.unshift({
+        id: 'group-foreign',
+        kind: 'group',
+        position: { x: 2000, y: 20 },
+        size: { width: 400, height: 300 },
+        title: 'Operator frame',
+        color: '#32d74b',
+        group: null
+      })
+      await store.save(workspace)
+      const owned = await groupOwned('term-upstream,term-owned', 'Owned tray')
+      await addForeign('term-foreign-child', owned)
+      const before = structuredClone(await nodesNow())
+      published.length = 0
+      publishedProjects.length = 0
+      removed.length = 0
+
+      await expect(
+        factory.ungroup('term-source', { group: 'group-foreign' }, true)
+      ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('ungroup-not-owner') })
+      // The frame IS owned here; the refusal is about the card promotion would rewrite.
+      await expect(factory.ungroup('term-source', { group: owned }, true)).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('ungroup-not-owner')
+      })
+      expect(await nodesNow()).toEqual(before)
+      expect(removed).toEqual([])
+      expect(published).toEqual([])
+      expect(publishedProjects).toEqual([])
+    })
+
+    it('tidies a frame’s children into a row and shrinks the frame around them', async () => {
+      const groupId = await groupOwned('term-upstream,term-owned', 'Wide tray')
+      const before = await nodesNow()
+      const frameBefore = before.find((node) => node.id === groupId)!
+      published.length = 0
+      publishedProjects.length = 0
+
+      await expect(
+        factory.arrange('term-source', { nodes: 'term-upstream,term-owned', layout: 'row' }, true)
+      ).resolves.toMatchObject({
+        ok: true,
+        message: expect.stringContaining('as row'),
+        result: { count: 2, container: groupId }
+      })
+
+      const after = await nodesNow()
+      const [a, b] = ['term-upstream', 'term-owned'].map(
+        (id) => after.find((node) => node.id === id)!
+      )
+      expect(a.position.y).toBe(b.position.y)
+      expect(b.position.x).toBe(a.position.x + a.size.width + 40)
+      // Grouping keeps each card's scattered spot, so a fresh frame is too wide; this is the fix.
+      const frameAfter = after.find((node) => node.id === groupId)!
+      expect(frameAfter.size.width).toBeLessThan(frameBefore.size.width)
+      // Only what actually MOVED is published: the row's first card was already at the origin the
+      // arrange picked, and re-hugging a frame rebuilds every child record whether or not its
+      // numbers changed. The fanout follows the value diff, not object identity.
+      expect(published.map((node) => node.id)).toEqual(
+        expect.arrayContaining([groupId, 'term-owned'])
+      )
+      expect(published.map((node) => node.id)).not.toContain('term-upstream')
+    })
+
+    it('aligns top-level cards without inventing a container to shrink', async () => {
+      const before = await nodesNow()
+      expect(before.find((node) => node.id === 'term-upstream')?.parentId).toBeUndefined()
+
+      await expect(
+        factory.align('term-source', { nodes: 'term-upstream,term-owned', edge: 'left' }, true)
+      ).resolves.toMatchObject({
+        ok: true,
+        message: expect.stringContaining('to left'),
+        result: { count: 2, container: null }
+      })
+      const after = await nodesNow()
+      const xs = ['term-upstream', 'term-owned'].map(
+        (id) => after.find((node) => node.id === id)!.position.x
+      )
+      expect(xs[0]).toBe(xs[1])
+      expect(after.filter((node) => node.kind === 'group')).toEqual([])
+    })
+
+    it('refuses a mixed-container set, a bad edge, and an unowned member', async () => {
+      const groupId = await groupOwned('term-owned', 'One card')
+      await addForeign('term-foreign')
+      const before = structuredClone(await nodesNow())
+      published.length = 0
+      publishedProjects.length = 0
+
+      await expect(
+        factory.arrange('term-source', { nodes: 'term-owned,term-upstream' }, true)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('different containers')
+      })
+      await expect(
+        factory.arrange('term-source', { nodes: 'nope-1,nope-2' }, true)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('none of the given node ids exist')
+      })
+      await expect(
+        factory.align('term-source', { nodes: 'term-upstream', edge: 'diagonal' }, true)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('align requires --edge')
+      })
+      await expect(
+        factory.arrange('term-source', { nodes: 'term-upstream,term-foreign' }, true)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('arrange-not-owner')
+      })
+      await expect(
+        factory.arrange('term-source', { nodes: 'term-upstream', layout: 'spiral' }, true)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('arrange requires --layout')
+      })
+      expect(groupId).toMatch(/^group-/)
+      expect(await nodesNow()).toEqual(before)
+      expect(published).toEqual([])
+      expect(publishedProjects).toEqual([])
+    })
+
+    it('takes the identity gate at the factory too, not only at the control boundary', async () => {
+      const groupId = await groupOwned('term-upstream,term-owned', 'Tray')
+      const before = structuredClone(await nodesNow())
+      published.length = 0
+      publishedProjects.length = 0
+
+      const replies = [
+        await factory.move('term-source', { nodes: 'term-owned' }, false),
+        await factory.ungroup('term-source', { group: groupId }, false),
+        await factory.arrange('term-source', { nodes: 'term-upstream,term-owned' }, false),
+        await factory.align('term-source', { nodes: 'term-upstream,term-owned', edge: 'left' }, false)
+      ]
+      expect(replies.map((reply) => reply.error)).toEqual([
+        expect.stringContaining('move-identity-refused'),
+        expect.stringContaining('ungroup-identity-refused'),
+        expect.stringContaining('arrange-identity-refused'),
+        expect.stringContaining('align-identity-refused')
+      ])
+      expect(await nodesNow()).toEqual(before)
+      expect(published).toEqual([])
+      expect(publishedProjects).toEqual([])
+      expect(pty.destroys).toEqual([])
+    })
+
+    it('refuses an unsupported flag by name instead of silently ignoring it', async () => {
+      for (const [reply, verb] of [
+        [await factory.move('term-source', { nodes: 'term-owned', label: 'x' }, true), 'move'],
+        [await factory.ungroup('term-source', { group: 'g', nodes: 'x' }, true), 'ungroup'],
+        [await factory.arrange('term-source', { nodes: 'x', edge: 'left' }, true), 'arrange'],
+        [await factory.align('term-source', { nodes: 'x', edge: 'left', cols: '2' }, true), 'align']
+      ] as const) {
+        expect(reply, verb).toMatchObject({ ok: false, error: expect.stringContaining(verb) })
+        expect(reply.error, verb).toContain('is not supported by Server Edition canvas control')
+      }
+    })
+  })
+
   it('renames a node, group, and sticky durably without ever writing into their panes', async () => {
     const grouped = await factory.group('term-source', {
       nodes: 'term-upstream,term-owned',

@@ -388,6 +388,12 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  `align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter` — tidy a layout. Works on',
     '  top-level nodes OR on the children of ONE frame (all ids must share a container — you cannot',
     '  arrange across frames in one call); arranging a frame\'s children also shrinks the frame to fit.',
+    '  On Server Edition `ungroup`, `move`, `arrange` and `align` reach further than the ids you name,',
+    '  so ownership is asked about everything the change would rewrite: re-hugging a frame moves the',
+    '  frame and re-bases every card it keeps, and dissolving one rewrites each child it promotes.',
+    '  Every one of those must be a node you opened during this server run — so a frame the operator',
+    '  made is not a `move` destination, and a tray holding somebody else\'s card cannot be tidied.',
+    '  An unowned member refuses the whole request and nothing is applied.',
     '- `link --to <id,id> [--from <id>]` — context-link nodes so each can READ the other\'s transcript',
     '  on demand (nodeterm linked-context CLI). `--from` defaults to you; nothing is pushed into the',
     '  linked sessions. Agent sessions you open are linked to you automatically — use `link` for nodes',
@@ -867,6 +873,13 @@ Verbs:
   node's scattered position, a fresh frame is usually too wide: \`arrange\` its children to fix that.
 - \`align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter\` — align edges/centers. Same
   one-container rule as \`arrange\`.
+  On Server Edition \`ungroup\`, \`move\`, \`arrange\` and \`align\` reach further than the ids you name,
+  so ownership is asked about everything the change would rewrite: re-hugging a frame moves the
+  frame and re-bases every card it keeps, and dissolving one rewrites each child it promotes. Every
+  one of those must be a node you opened during this server run — so a frame the operator made is
+  not a \`move\` destination, and a tray holding somebody else's card cannot be tidied. An unowned
+  member refuses the whole request and nothing is applied; move that card out first, or work in a
+  frame you opened.
 - \`link --to <id,id> [--from <id>]\` — context-link nodes, so each can READ the other's
   transcript on demand with the get-linked-context skill. \`--from\` defaults to you. Nothing is
   pushed into the linked sessions — reading is on demand, so linking never interrupts anyone.

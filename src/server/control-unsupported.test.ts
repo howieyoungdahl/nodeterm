@@ -181,6 +181,10 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     close: vi.fn(async () => ({ ok: true as const, result: { id: 'closed' } })),
     link: vi.fn(async () => ({ ok: true as const, result: { linked: ['term-target'] } })),
     group: vi.fn(async () => ({ ok: true as const, result: { groupId: 'group-new' } })),
+    ungroup: vi.fn(async () => ({ ok: true as const, result: { freed: ['term-a'] } })),
+    move: vi.fn(async () => ({ ok: true as const, result: { moved: ['term-a'] } })),
+    arrange: vi.fn(async () => ({ ok: true as const, result: { count: 2 } })),
+    align: vi.fn(async () => ({ ok: true as const, result: { count: 2 } })),
     rename: vi.fn(async () => ({ ok: true as const, result: { id: 'renamed' } })),
     resize: vi.fn(async () => ({ ok: true as const, result: { id: 'resized' } })),
     color: vi.fn(async () => ({ ok: true as const, result: { colored: ['term-target'] } })),
@@ -361,6 +365,91 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     })
   })
 
+  it('dispatches the structural quartet, forwarding verified identity to each', async () => {
+    // These four are the recovery path out of a frame, so a wiring miss here is exactly the bug
+    // being fixed: the verb parses, the set admits it, and the switch still answers "unsupported".
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(handler({
+      verb: 'move',
+      nodeId: 'term-source',
+      args: { nodes: 'term-a,term-b', group: 'top' },
+      verified: true
+    })).resolves.toMatchObject({ ok: true })
+    await expect(handler({
+      verb: 'ungroup',
+      nodeId: 'term-source',
+      args: { group: 'group-a' },
+      verified: true
+    })).resolves.toMatchObject({ ok: true })
+    await expect(handler({
+      verb: 'arrange',
+      nodeId: 'term-source',
+      args: { nodes: 'term-a,term-b', layout: 'row' },
+      verified: true
+    })).resolves.toMatchObject({ ok: true })
+    await expect(handler({
+      verb: 'align',
+      nodeId: 'term-source',
+      args: { nodes: 'term-a,term-b', edge: 'left' },
+      verified: true
+    })).resolves.toMatchObject({ ok: true })
+    expect(a.move).toHaveBeenCalledWith('term-source', { nodes: 'term-a,term-b', group: 'top' }, true)
+    expect(a.ungroup).toHaveBeenCalledWith('term-source', { group: 'group-a' }, true)
+    expect(a.arrange).toHaveBeenCalledWith(
+      'term-source',
+      { nodes: 'term-a,term-b', layout: 'row' },
+      true
+    )
+    expect(a.align).toHaveBeenCalledWith(
+      'term-source',
+      { nodes: 'term-a,term-b', edge: 'left' },
+      true
+    )
+  })
+
+  it('keeps the shared parser presence checks in front of the structural quartet', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({ verb: 'move', nodeId: 'term-source', args: {}, verified: true })
+    ).resolves.toEqual({ ok: false, error: 'move requires --nodes <id,id>' })
+    await expect(
+      handler({ verb: 'ungroup', nodeId: 'term-source', args: {}, verified: true })
+    ).resolves.toEqual({ ok: false, error: 'ungroup requires --group <id>' })
+    await expect(
+      handler({ verb: 'align', nodeId: 'term-source', args: { nodes: 'term-a' }, verified: true })
+    ).resolves.toEqual({ ok: false, error: 'align requires --edge' })
+    expect(a.move).not.toHaveBeenCalled()
+    expect(a.ungroup).not.toHaveBeenCalled()
+    expect(a.align).not.toHaveBeenCalled()
+  })
+
+  it('refuses the structural quartet at the boundary when creator identity is unverified', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    for (const [verb, args] of [
+      ['move', { nodes: 'term-a' }],
+      ['ungroup', { group: 'group-a' }],
+      ['arrange', { nodes: 'term-a' }],
+      ['align', { nodes: 'term-a', edge: 'left' }]
+    ] as const) {
+      await expect(handler({
+        verb,
+        nodeId: 'term-source',
+        args: { ...args },
+        verified: false
+      })).resolves.toEqual({
+        ok: false,
+        error: `${verb}-identity-refused: Server Edition canvas control requires verified node identity`
+      })
+    }
+    expect(a.move).not.toHaveBeenCalled()
+    expect(a.ungroup).not.toHaveBeenCalled()
+    expect(a.arrange).not.toHaveBeenCalled()
+    expect(a.align).not.toHaveBeenCalled()
+  })
+
   it('dispatches the two READ-ONLY verbs, which take no `verified` argument', async () => {
     const a = actions()
     const handler = createServerEditionControlHandler(a)
@@ -401,7 +490,9 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     // `assign` is the deliberate near-miss: `board` reads the same model and is now supported,
     // while writing a card into a column stays deferred. `list`/`board` are no longer in here —
     // that removal is the whole point of the change and would be invisible without this note.
-    for (const verb of ['assign', 'browser', 'write', 'move', 'arrange', 'not-a-verb']) {
+    // `move`/`arrange` left this list with the structural quartet; `write` is the near-miss that
+    // stays deferred because it types into somebody's pane.
+    for (const verb of ['assign', 'browser', 'write', 'verify', 'spawn-team', 'not-a-verb']) {
       const reply = await handler({ verb, nodeId: 'term-source', args: {}, verified: true })
       expect(reply, verb).toMatchObject({ ok: false, error: CONTROL_UNSUPPORTED_ERROR })
       expect(reply.message, verb).toContain('do not retry')

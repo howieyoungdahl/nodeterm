@@ -94,6 +94,31 @@ export interface ServerEditionControlActions {
     verified: boolean
   ): Promise<ServerControlReply>
   group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  /**
+   * The structural quartet. Unlike `group`, these four take `verified` explicitly: they rewrite the
+   * parentage and geometry of nodes the caller did not name (a re-hugged frame re-bases every child
+   * it keeps), so the factory repeats the identity gate rather than relying on this boundary alone.
+   */
+  ungroup(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  move(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  arrange(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  align(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
   rename(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
   resize(
     sourceNodeId: string,
@@ -121,6 +146,12 @@ const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
   'close',
   'link',
   'group',
+  // Without these, a canvas the spawn tray collected could only ever get MORE grouped: `group`
+  // wraps loose siblings and nothing took a card back out again.
+  'ungroup',
+  'move',
+  'arrange',
+  'align',
   'rename',
   'resize',
   'color',
@@ -197,6 +228,14 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
         return actions.link(nodeId, command.args, verified)
       case 'group':
         return actions.group(nodeId, command.args)
+      case 'ungroup':
+        return actions.ungroup(nodeId, command.args, verified)
+      case 'move':
+        return actions.move(nodeId, command.args, verified)
+      case 'arrange':
+        return actions.arrange(nodeId, command.args, verified)
+      case 'align':
+        return actions.align(nodeId, command.args, verified)
       case 'rename':
         return actions.rename(nodeId, command.args)
       case 'resize':
