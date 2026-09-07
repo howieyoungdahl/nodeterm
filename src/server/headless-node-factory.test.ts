@@ -1646,13 +1646,13 @@ describe('HeadlessNodeFactory', () => {
       const nodes = await load()
       const frames = nodes.filter((node) => node.kind === 'group')
       expect(frames).toHaveLength(1)
-      // Collapsed on creation: "put away" is half of what the tray is for, and a tray that opens
-      // expanded has put nothing away.
-      expect(frames[0]).toMatchObject({
-        title: 'Director workers',
-        taskFrame: true,
-        collapsed: true
-      })
+      // EXPANDED on creation. It used to ship collapsed ("put away is half of what the tray is
+      // for") — but `collapsed` on a frame only shrank it to 40px, and a frame's height is its
+      // children's `extent: 'parent'` clamp bounds, so every member was pinned to the same
+      // `frameTop - memberHeight` and overlapped (@shared/node-collapse). A real put-away is
+      // unbuilt; until then the tray is a labelled frame around visible cards.
+      expect(frames[0]).toMatchObject({ title: 'Director workers', taskFrame: true })
+      expect(frames[0].collapsed).toBeFalsy()
       expect(nodeById(nodes, first).parentId).toBe(frames[0].id)
       expect(nodeById(nodes, second).parentId).toBe(frames[0].id)
       // The frame is a creation of this caller, so it can be renamed/colored/closed like any other.

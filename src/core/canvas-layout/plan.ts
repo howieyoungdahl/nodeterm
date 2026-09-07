@@ -217,22 +217,11 @@ export function plan(input: LayoutInput): LayoutPlan {
       const file = fileIntoTray(node, input, byId)
       if (file) collector.ops.push(file)
     }
-    // Close the trays this spawn filled, once each. A tray is a frame, so the ownership and
-    // pinned refusals apply to it exactly as they do to a card.
-    if (input.rules.tray.collapsed) {
-      const trays = new Set(
-        collector.ops
-          .filter((op): op is Extract<LayoutOp, { op: 'reparent' }> => op.op === 'reparent')
-          .map((op) => op.parentId)
-          .filter((id): id is string => !!id)
-      )
-      for (const trayId of trays) {
-        const tray = byId.get(trayId)
-        if (!tray || tray.collapsed) continue
-        if (!consider(tray, ctx, collector)) continue
-        collector.ops.push({ op: 'collapse', nodeId: tray.id, collapsed: true })
-      }
-    }
+    // The engine used to CLOSE each tray it filled here. It does not any more, and the reason is
+    // not taste: `collapsed` on a frame shrinks it to 40px, and a frame's height is its children's
+    // `extent: 'parent'` clamp bounds — so closing a tray pinned every member to the same
+    // `frameTop - memberHeight` and overlapped them (see @shared/node-collapse). An op that
+    // cannot do the thing its name promises is not one the engine may propose.
     return { trigger: input.trigger, ops: collector.ops, skipped: collector.skipped }
   }
 
@@ -241,6 +230,13 @@ export function plan(input: LayoutInput): LayoutPlan {
     // closed is safe: a member that needs the operator leaves the closed frame rather than
     // waiting inside it. One-directional on purpose — filing it back is what an organize does,
     // and a "put it back where it was" rule would need persisted memory of where that was.
+    //
+    // DORMANT since frames stopped collapsing (@shared/node-collapse): nothing sets `collapsed`
+    // on a group any more, so the `tray.collapsed` guard below never passes and `status-changed`
+    // emits nothing. The guard is kept rather than widened ON PURPOSE — floating a member out
+    // answers "the frame is hiding this approval", and an open tray hides nothing, so keying this
+    // on `taskFrame` alone would yank visible cards out of frames the operator arranged. It
+    // reactivates verbatim the day a real "put the members away" affordance exists.
     if (!input.rules.tray.floatOnAttention) {
       return { trigger: input.trigger, ops: [], skipped: [] }
     }
@@ -293,9 +289,7 @@ export function plan(input: LayoutInput): LayoutPlan {
       )
       if (owner) collector.ops.push({ op: 'label', nodeId: tray.id, title: workerFrameLabel(owner.title ?? '') })
     }
-    if (input.rules.tray.collapsed && !tray.collapsed && members.length > 0) {
-      collector.ops.push({ op: 'collapse', nodeId: tray.id, collapsed: true })
-    }
+    // No re-collapse here either, for the reason at the `node-created` branch above.
   }
   return { trigger: input.trigger, ops: collector.ops, skipped: collector.skipped }
 }

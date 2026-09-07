@@ -45,7 +45,14 @@ export interface SpawnLayoutRules {
 
 /** How a spawn tray behaves once it exists. */
 export interface TrayLayoutRules {
-  /** Ship a newly created tray frame closed. A tray full of compact cards is the point. */
+  /**
+   * INERT since frames stopped collapsing (@shared/node-collapse): no code path closes a frame,
+   * so nothing reads this to decide anything. It is still declared, validated and resolved
+   * because `project.json` is git-shared and a canvas out there carries the key — dropping it
+   * from the known set would silently rewrite someone's file, which is the exact data loss this
+   * module's header forbids. Defaults to `false` now: a default that claims "trays ship closed"
+   * while nothing closes them is a lie the next reader has to disprove.
+   */
   collapsed?: boolean
   /**
    * Move a member OUT of its tray when its status needs the operator (blocked or failed), so an
@@ -90,12 +97,17 @@ export interface CanvasLayoutSettings {
 /**
  * What the engine does when nobody has said anything. Chosen to be the least surprising thing an
  * operator who just switched the feature on could see: new workers are filed into their spawner's
- * tray at the compact size, the tray ships closed, and a member that needs attention floats out
- * of it — which is the only reason a closed tray is safe to ship in the first place.
+ * tray at the compact size, and the tray is a labelled frame around them.
+ *
+ * `tray.collapsed` used to default to `true` ("and a member that needs attention floats out of
+ * it — which is the only reason a closed tray is safe to ship"). Closing a frame turned out not
+ * to put anything away: it shrank the container its members are clamped into and stacked them on
+ * one line (@shared/node-collapse). Both the collapse and the float that made it safe are gone
+ * with it; `floatOnAttention` stays `true` so the day a real put-away exists it is already armed.
  */
 export const BUILTIN_LAYOUT_RULES: Required<Pick<CanvasLayoutRules, 'spawn' | 'tray'>> = {
   spawn: { place: 'tray', size: 'compact' },
-  tray: { collapsed: true, floatOnAttention: true }
+  tray: { collapsed: false, floatOnAttention: true }
 }
 
 /** Rules with every field settled — what `plan()` actually reads. */

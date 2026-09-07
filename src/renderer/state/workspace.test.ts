@@ -1206,8 +1206,11 @@ describe('applyWorkerFramePlan', () => {
     const frame = out.find((n) => n.type === 'group')!
     expect(frame.data.title).toBe('lane workers')
     expect(frame.data.taskFrame).toBe(true)
-    // …and it ships collapsed, the same as the Server path.
-    expect(frame.data.collapsed).toBe(true)
+    // …and it ships EXPANDED, the same as the Server path. It used to ship collapsed; a collapsed
+    // frame shrinks to 40px and a frame's height is its children's `extent: 'parent'` clamp
+    // bounds, so that stacked every member on one line instead of putting anything away
+    // (@shared/node-collapse). Pinned in detail by workspace.group-collapse.test.ts.
+    expect(frame.data.collapsed).toBeFalsy()
     expect(out.find((n) => n.id === 't1')!.parentId).toBe(frame.id)
     expect(out.find((n) => n.id === 't2')!.parentId).toBe(frame.id)
   })

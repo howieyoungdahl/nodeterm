@@ -64,12 +64,17 @@ describe('plan() — the refusals', () => {
     [{ manualPlacement: true }, 'manual-placement'],
     [{}, 'active'],
     [{ role: 'primary' }, 'primary-role']
-  ] as const)('does not collapse a protected tray: %s', (change, reason) => {
+    // The refusal table applies to a FRAME exactly as it does to a card. Asked through `organize`
+    // (where a tray is a subject — it gets packed and labelled) rather than through the
+    // node-created collapse this used to ride: the engine no longer proposes a frame collapse at
+    // all, so there is nothing left for a refusal to decline on that trigger.
+  ] as const)('refuses a protected tray as a subject: %s', (change, reason) => {
     const result = plan(input({
-      nodes: [frame('tray', change), node('spawner', { parentId: 'tray' }), node('w1')],
-      ropes: TRAY_ROPES, createdIds: ['w1'], actives: reason === 'active' ? ['tray'] : []
+      trigger: 'organize',
+      nodes: [frame('tray', change), node('spawner', { parentId: 'tray' }), node('w1', { parentId: 'tray' })],
+      ropes: TRAY_ROPES, actives: reason === 'active' ? ['tray'] : []
     }))
-    expect(result.ops.some((op) => op.op === 'collapse')).toBe(false)
+    expect(result.ops.some((op) => op.nodeId === 'tray')).toBe(false)
     expect(result.skipped).toContainEqual({ nodeId: 'tray', reason })
   })
   it('places a plain new worker (the control case every refusal below is measured against)', () => {
@@ -242,7 +247,12 @@ describe('plan() — node-created', () => {
     expect(result.ops.some((op) => op.op === 'resize')).toBe(true)
   })
 
-  it('ships the tray it filed into CLOSED, once, however many workers landed', () => {
+  // It used to CLOSE the tray it filed into ("ships the tray it filed into CLOSED, once, however
+  // many workers landed"). It must not: `collapsed` on a frame shrinks it to 40px, and a frame's
+  // height is its children's `extent: 'parent'` clamp bounds, so closing a tray pins every member
+  // to `frameTop - memberHeight` and stacks them on one line (@shared/node-collapse). The engine
+  // may not propose an op that cannot do what its name promises.
+  it('leaves the tray it filed into OPEN, whatever the rules say about closing it', () => {
     const result = plan(
       input({
         nodes: [frame('tray'), node('spawner', { parentId: 'tray' }), node('w1'), node('w2')],
@@ -250,30 +260,20 @@ describe('plan() — node-created', () => {
           { source: 'spawner', target: 'w1' },
           { source: 'spawner', target: 'w2' }
         ],
-        createdIds: ['w1', 'w2']
-      })
-    )
-    expect(result.ops.filter((op) => op.op === 'collapse')).toEqual([
-      { op: 'collapse', nodeId: 'tray', collapsed: true }
-    ])
-  })
-
-  it('does not re-collapse a tray that is already closed', () => {
-    const result = plan(
-      input({
-        nodes: [
-          frame('tray', { collapsed: true }),
-          node('spawner', { parentId: 'tray' }),
-          node('w1')
-        ],
-        ropes: TRAY_ROPES,
-        createdIds: ['w1']
+        createdIds: ['w1', 'w2'],
+        // The persisted rule key is still readable and still round-trips; it just decides nothing.
+        rules: resolveLayoutRules({ tray: { collapsed: true } })
       })
     )
     expect(result.ops.some((op) => op.op === 'collapse')).toBe(false)
+    // The workers are still filed — dropping the collapse dropped nothing else.
+    expect(result.ops).toContainEqual({ op: 'reparent', nodeId: 'w1', parentId: 'tray' })
+    expect(result.ops).toContainEqual({ op: 'reparent', nodeId: 'w2', parentId: 'tray' })
   })
 
-  it('refuses to collapse a PINNED tray, and reports it', () => {
+  it('says nothing at all about the tray on node-created', () => {
+    // No op and no refusal: the tray is not a subject of this trigger any more, and reporting a
+    // pinned frame as "skipped" for work nobody proposed would be noise in the preview table.
     const result = plan(
       input({
         nodes: [frame('tray', { pinned: true }), node('spawner', { parentId: 'tray' }), node('w1')],
@@ -281,8 +281,8 @@ describe('plan() — node-created', () => {
         createdIds: ['w1']
       })
     )
-    expect(result.ops.some((op) => op.op === 'collapse')).toBe(false)
-    expect(result.skipped).toContainEqual({ nodeId: 'tray', reason: 'pinned' })
+    expect(result.ops.some((op) => op.nodeId === 'tray')).toBe(false)
+    expect(result.skipped.some((s) => s.nodeId === 'tray')).toBe(false)
   })
 
   it('emits no resize when the worker is already at the wanted size', () => {
@@ -328,12 +328,30 @@ describe('plan() — node-created', () => {
   })
 })
 
+// DORMANT, and the tests below say what they now pin. `floatOnAttention` exists so that a tray
+// shipped CLOSED cannot hide an approval — nothing closes a frame any more (@shared/node-collapse),
+// so no canvas this build produces reaches these branches. They are kept, and the guard is kept
+// narrow rather than widened to `taskFrame` alone: floating a member out answers "the frame is
+// hiding this", and an OPEN tray hides nothing, so a wider rule would yank visible cards out of
+// frames the operator arranged. It reactivates verbatim the day a real put-away exists.
 describe('plan() — status-changed', () => {
   const closedTray = [
     frame('tray', { collapsed: true }),
     node('spawner', { parentId: 'tray' }),
     node('w1', { parentId: 'tray' })
   ]
+
+  it('emits nothing for a tray this build can actually produce (no frame is ever closed)', () => {
+    const result = plan(
+      input({
+        trigger: 'status-changed',
+        nodes: [frame('tray'), node('spawner', { parentId: 'tray' }), node('w1', { parentId: 'tray' })],
+        statuses: { w1: 'blocked' },
+        ropes: TRAY_ROPES
+      })
+    )
+    expect(result.ops).toEqual([])
+  })
 
   it('floats a BLOCKED member out of a closed tray so the approval is reachable', () => {
     const result = plan(

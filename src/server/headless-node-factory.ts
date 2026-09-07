@@ -1525,11 +1525,12 @@ export class HeadlessNodeFactory {
     )
     if (!grouped) return { changed: [] }
     // The tray marker is how the NEXT spawn finds this frame — by fact, not by name, so a frame
-    // the operator renamed is still the same tray. And it ships COLLAPSED: "put away" is half of
-    // what a tray is for, and a tray that opens expanded leaves the operator looking at every
-    // worker anyway, which is the state the feature exists to end. One click opens it.
+    // the operator renamed is still the same tray. It ships EXPANDED: it used to ship collapsed
+    // ("put away is half of what a tray is for"), but `collapsed` on a frame only ever shrank the
+    // container its members are clamped into by `extent: 'parent'`, stacking every worker on one
+    // horizontal line — it put nothing away. See @shared/node-collapse; a real put-away is unbuilt.
     project.nodes = grouped.nodes.map((node) =>
-      node.id === grouped.groupId ? { ...node, taskFrame: true, collapsed: true } : node
+      node.id === grouped.groupId ? { ...node, taskFrame: true } : node
     )
     const byId = new Map(project.nodes.map((node) => [node.id, node]))
     return {

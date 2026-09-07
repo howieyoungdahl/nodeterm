@@ -94,12 +94,25 @@ describe('applyLayoutPlan', () => {
     expect(next.find((n) => n.id === 'a')?.position).toEqual({ x: 28, y: 62 })
   })
 
-  it('collapses and expands', () => {
-    const nodes = [frame('tray')]
-    const closed = applyLayoutPlan(nodes, planOf([{ op: 'collapse', nodeId: 'tray', collapsed: true }]))
-    expect(closed.find((n) => n.id === 'tray')?.data.collapsed).toBe(true)
-    const open = applyLayoutPlan(closed, planOf([{ op: 'collapse', nodeId: 'tray', collapsed: false }]))
-    expect(open.find((n) => n.id === 'tray')?.data.collapsed).toBe(false)
+  it('collapses and expands a CARD', () => {
+    const nodes = [term('a')]
+    const closed = applyLayoutPlan(nodes, planOf([{ op: 'collapse', nodeId: 'a', collapsed: true }]))
+    expect(closed.find((n) => n.id === 'a')?.data.collapsed).toBe(true)
+    const open = applyLayoutPlan(closed, planOf([{ op: 'collapse', nodeId: 'a', collapsed: false }]))
+    expect(open.find((n) => n.id === 'a')?.data.collapsed).toBe(false)
+  })
+
+  it('refuses to collapse a FRAME, whoever built the plan', () => {
+    // This case used to be the test above — the old `tray` fixture is a `taskFrame` group, so
+    // "collapses and expands" was pinning the group-collapse path as correct. It is not: a frame's
+    // height is its children's `extent: 'parent'` clamp bounds, so shrinking it to 40px pins every
+    // member to `frameTop - memberHeight` and stacks them (@shared/node-collapse). Our planner no
+    // longer emits this op; the applier still has to refuse one that arrives from another build.
+    const nodes = [frame('tray'), term('a', { parentId: 'tray' })]
+    const next = applyLayoutPlan(nodes, planOf([{ op: 'collapse', nodeId: 'tray', collapsed: true }]))
+    expect(next.find((n) => n.id === 'tray')?.data.collapsed).toBeFalsy()
+    expect(next.find((n) => n.id === 'tray')?.height).toBe(700)
+    expect(next).toBe(nodes) // nothing changed at all — not a re-mapped identical array
   })
 
   it('labels — and a title that tried to become TWO lines becomes one', () => {
