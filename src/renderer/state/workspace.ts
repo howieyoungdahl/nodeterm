@@ -25,6 +25,14 @@ import { useSettings } from './settings'
 // reflector.
 export { applyCanvasMutation } from '@shared/canvas-mutations'
 import { sanitizeInboundNode } from '@shared/node-exec'
+import {
+  alignPositions,
+  arrangePositions,
+  commonContainerOf,
+  type AlignEdge,
+  type ArrangeLayout,
+  type ArrangeSubject
+} from '@shared/canvas-arrange'
 import { NODE_COLORS } from '@shared/node-colors'
 import type { BorderAppearance } from '@shared/appearance'
 import {
@@ -1154,7 +1162,30 @@ const GROUP_HEADER = 34
 const nodeW = (n: CanvasNode) => n.measured?.width ?? (n.width as number) ?? 0
 const nodeH = (n: CanvasNode) => n.measured?.height ?? (n.height as number) ?? 0
 
-export type ArrangeLayout = 'grid' | 'row' | 'column'
+/**
+ * The layout geometry itself lives in `@shared/canvas-arrange` — the Server Edition's headless
+ * factory runs the same `arrange`/`align` verbs against persisted records, and one definition is
+ * what stops the two canvases drifting on the one-container rule. These wrappers only adapt React
+ * Flow's node shape (runtime-measured size) into `ArrangeSubject` and apply the position map.
+ */
+const arrangeSubject = (nd: CanvasNode): ArrangeSubject => ({
+  id: nd.id,
+  parentId: nd.parentId,
+  position: nd.position,
+  width: nodeW(nd),
+  height: nodeH(nd)
+})
+
+const applyPositions = (
+  nodes: CanvasNode[],
+  positions: Map<string, { x: number; y: number }>
+): CanvasNode[] =>
+  // An empty map is the no-op, and callers test it by array IDENTITY — never rebuild here.
+  positions.size === 0
+    ? nodes
+    : nodes.map((nd) => (positions.has(nd.id) ? { ...nd, position: positions.get(nd.id)! } : nd))
+
+export type { ArrangeLayout, AlignEdge }
 
 /**
  * The single container the given ids all live in: `null` (all top-level), a group id (all
@@ -1164,11 +1195,7 @@ export type ArrangeLayout = 'grid' | 'row' | 'column'
  * are relative to its frame — so arrange/align refuse a mixed set rather than scramble it.
  */
 export function commonParentId(nodes: CanvasNode[], ids: string[]): string | null | undefined {
-  const set = new Set(ids)
-  const members = nodes.filter((nd) => set.has(nd.id))
-  if (members.length === 0) return undefined
-  const parents = new Set(members.map((m) => m.parentId ?? null))
-  return parents.size === 1 ? members[0].parentId ?? null : undefined
+  return commonContainerOf(nodes.map(arrangeSubject), ids)
 }
 
 /**
@@ -1184,37 +1211,8 @@ export function arrangeNodes(
   ids: string[],
   opts?: { layout?: ArrangeLayout; cols?: number; gap?: number; origin?: { x: number; y: number } }
 ): CanvasNode[] {
-  const set = new Set(ids)
-  const members = nodes.filter((nd) => set.has(nd.id))
-  // Only meaningful within one coordinate space (see commonParentId) — mixed containers → no-op.
-  if (members.length === 0 || new Set(members.map((m) => m.parentId ?? null)).size > 1) return nodes
-  const layout = opts?.layout ?? 'grid'
-  const gap = opts?.gap ?? 40
-  const origin = opts?.origin ?? {
-    x: Math.min(...members.map((m) => m.position.x)),
-    y: Math.min(...members.map((m) => m.position.y))
-  }
-  const cols =
-    layout === 'row' ? members.length : layout === 'column' ? 1 : Math.max(1, opts?.cols ?? Math.ceil(Math.sqrt(members.length)))
-
-  const pos = new Map<string, { x: number; y: number }>()
-  let x = origin.x
-  let y = origin.y
-  let rowH = 0
-  members.forEach((m, i) => {
-    if (i > 0 && i % cols === 0) {
-      x = origin.x
-      y += rowH + gap
-      rowH = 0
-    }
-    pos.set(m.id, { x, y })
-    x += nodeW(m) + gap
-    rowH = Math.max(rowH, nodeH(m))
-  })
-  return nodes.map((nd) => (pos.has(nd.id) ? { ...nd, position: pos.get(nd.id)! } : nd))
+  return applyPositions(nodes, arrangePositions(nodes.map(arrangeSubject), ids, opts))
 }
-
-export type AlignEdge = 'left' | 'right' | 'top' | 'bottom' | 'hcenter' | 'vcenter'
 
 /**
  * Snaps the given ids to a shared edge/center computed from their joint bounding box.
@@ -1223,33 +1221,7 @@ export type AlignEdge = 'left' | 'right' | 'top' | 'bottom' | 'hcenter' | 'vcent
  * Unknown ids are skipped; returns the input array unchanged when nothing resolves. Pure.
  */
 export function alignNodes(nodes: CanvasNode[], ids: string[], edge: AlignEdge): CanvasNode[] {
-  const set = new Set(ids)
-  const members = nodes.filter((nd) => set.has(nd.id))
-  if (members.length === 0 || new Set(members.map((m) => m.parentId ?? null)).size > 1) return nodes
-  const minX = Math.min(...members.map((m) => m.position.x))
-  const maxR = Math.max(...members.map((m) => m.position.x + nodeW(m)))
-  const minY = Math.min(...members.map((m) => m.position.y))
-  const maxB = Math.max(...members.map((m) => m.position.y + nodeH(m)))
-  const cx = (minX + maxR) / 2
-  const cy = (minY + maxB) / 2
-  const move = (m: CanvasNode): { x: number; y: number } => {
-    switch (edge) {
-      case 'left':
-        return { x: minX, y: m.position.y }
-      case 'right':
-        return { x: maxR - nodeW(m), y: m.position.y }
-      case 'hcenter':
-        return { x: cx - nodeW(m) / 2, y: m.position.y }
-      case 'top':
-        return { x: m.position.x, y: minY }
-      case 'bottom':
-        return { x: m.position.x, y: maxB - nodeH(m) }
-      case 'vcenter':
-        return { x: m.position.x, y: cy - nodeH(m) / 2 }
-    }
-  }
-  const set2 = new Set(members.map((m) => m.id))
-  return nodes.map((nd) => (set2.has(nd.id) ? { ...nd, position: move(nd) } : nd))
+  return applyPositions(nodes, alignPositions(nodes.map(arrangeSubject), ids, edge))
 }
 
 /**

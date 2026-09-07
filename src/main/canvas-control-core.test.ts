@@ -429,6 +429,19 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts state how far Server ownership reaches for the structural verbs', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // These four became reachable on Server Edition, and their ownership rule is NOT the "the ids
+      // you named" one every other verb has: re-hugging a frame re-bases the cards it keeps, so the
+      // gate covers collateral the caller never mentioned. An agent that does not know this reads a
+      // `move-not-owner` naming a node it never typed as a bug and retries the same call.
+      expect(body).toContain('reach further than the ids you name')
+      expect(body).toContain('re-bases every card it keeps')
+      expect(body).toContain('not a `move` destination')
+      expect(body).toContain('refuses the whole request')
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')

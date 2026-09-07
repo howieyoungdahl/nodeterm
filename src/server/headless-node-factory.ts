@@ -3,6 +3,16 @@ import path from 'node:path'
 
 import { publishCanvasMutation } from '../core/canvas-sync'
 import { gateProjectTarget, GRANT_CAP } from '../core/project-grants'
+import {
+  alignPositions,
+  arrangePositions,
+  commonContainerOf,
+  isAlignEdge,
+  isArrangeLayout,
+  type AlignEdge,
+  type ArrangeLayout,
+  type ArrangeSubject
+} from '../shared/canvas-arrange'
 import { planBridges, type LinkEndpoint } from '../shared/canvas-link'
 import {
   invalidNodeColorMessage,
@@ -550,36 +560,145 @@ function ungroupPersistedNodes(
   }
 }
 
+/** Why one requested id of a `move` did not travel. Mirrors desktop's three skip reasons. */
+type ReparentSkip = { id: string; why: 'unknown id' | 'already there' | 'would nest a frame in itself' }
+
 /**
- * Move `ids` INTO an existing frame, keeping every root-space position exactly where it is and
- * growing the frame (and its own ancestors) around them. The mirror of `groupPersistedNodes` for
- * the case where the container already exists; a node that is an ancestor of the frame is skipped
- * rather than creating a cycle.
+ * Move `ids` INTO an existing frame — or, with `groupId` null, OUT to the top level — keeping every
+ * root-space position exactly where it is and growing the destination (and its own ancestors)
+ * around them. The mirror of `groupPersistedNodes` for the case where the container already exists,
+ * and the persisted twin of the renderer's `reparentNode`: a node that is an ancestor of the
+ * destination is skipped rather than creating a cycle.
+ *
+ * `refitSources` is OPT-IN because the two callers want different things. The `move` VERB wants it
+ * (a frame the nodes left is now sized around cards that are gone — desktop re-hugs it), while the
+ * spawn tray's join deliberately does not: leaving that path byte-identical is why its behaviour is
+ * unchanged by this option existing.
  */
-function reparentPersistedInto(
+function reparentPersistedNodes(
   nodes: CanvasNodeState[],
   ids: readonly string[],
-  groupId: string
-): { nodes: CanvasNodeState[]; changed: CanvasNodeState[] } {
-  const frame = nodes.find((node) => node.id === groupId)
-  if (!frame || frame.kind !== 'group') return { nodes, changed: [] }
-  const frameRoot = rootPosition(nodes, frame)
-  const movable = new Set(
-    ids.filter((id) => id !== groupId && !isDescendant(nodes, groupId, id))
-  )
-  if (!movable.size) return { nodes, changed: [] }
+  groupId: string | null,
+  opts?: { refitSources?: boolean }
+): { nodes: CanvasNodeState[]; changed: CanvasNodeState[]; moved: string[]; skipped: ReparentSkip[] } {
+  const frame = groupId ? nodes.find((node) => node.id === groupId) : undefined
+  if (groupId && frame?.kind !== 'group') {
+    return { nodes, changed: [], moved: [], skipped: ids.map((id) => ({ id, why: 'unknown id' })) }
+  }
+  const frameRoot = frame ? rootPosition(nodes, frame) : { x: 0, y: 0 }
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const movable = new Set<string>()
+  const skipped: ReparentSkip[] = []
+  for (const id of ids) {
+    const node = byId.get(id)
+    if (!node) {
+      skipped.push({ id, why: 'unknown id' })
+    } else if (groupId && (id === groupId || isDescendant(nodes, groupId, id))) {
+      skipped.push({ id, why: 'would nest a frame in itself' })
+    } else if ((node.parentId ?? null) === groupId) {
+      skipped.push({ id, why: 'already there' })
+    } else {
+      movable.add(id)
+    }
+  }
+  if (!movable.size) return { nodes, changed: [], moved: [], skipped }
   const before = new Map(nodes.map((node) => [node.id, node]))
+  // The frames the nodes are LEAVING, captured before the move rewrites their parentage.
+  const sources = new Set(
+    [...movable].map((id) => byId.get(id)?.parentId).filter((id): id is string => !!id)
+  )
   const moved = nodes.map((node) => {
     if (!movable.has(node.id)) return node
     const root = rootPosition(nodes, node)
-    return {
+    const next: CanvasNodeState = {
       ...node,
-      parentId: groupId,
       position: { x: root.x - frameRoot.x, y: root.y - frameRoot.y }
     }
+    if (groupId) next.parentId = groupId
+    else delete next.parentId
+    return next
   })
-  const next = groupsFirst(fitAncestorChain(moved, groupId))
-  return { nodes: next, changed: next.filter((node) => before.get(node.id) !== node) }
+  let next = groupId ? fitAncestorChain(moved, groupId) : moved
+  if (opts?.refitSources) {
+    for (const sourceId of sources) {
+      if (sourceId !== groupId) next = fitAncestorChain(next, sourceId)
+    }
+  }
+  next = groupsFirst(next)
+  return {
+    nodes: next,
+    changed: next.filter((node) => before.get(node.id) !== node),
+    moved: [...movable],
+    skipped
+  }
+}
+
+/** Persisted records as layout subjects: the size is the stored rect, never a measured one. */
+function arrangeSubjects(nodes: readonly CanvasNodeState[]): ArrangeSubject[] {
+  return nodes.map((node) => ({
+    id: node.id,
+    parentId: node.parentId,
+    position: node.position,
+    width: node.size.width,
+    height: node.size.height
+  }))
+}
+
+/**
+ * Apply a shared layout position map to persisted records, then re-hug the container frame (and
+ * its ancestors) around the tidied result — the same follow-up the renderer does, and the reason
+ * `arrange` is the fix for a freshly grouped frame being too wide.
+ */
+function applyPersistedPositions(
+  nodes: CanvasNodeState[],
+  positions: Map<string, { x: number; y: number }>,
+  container: string | null
+): CanvasNodeState[] {
+  if (!positions.size) return nodes
+  const laid = nodes.map((node) =>
+    positions.has(node.id) ? { ...node, position: positions.get(node.id)! } : node
+  )
+  return groupsFirst(container ? fitAncestorChain(laid, container) : laid)
+}
+
+/**
+ * Did this record actually change? Compared by VALUE, not object identity: `fitGroupToChildren`
+ * rebuilds every child of a frame it touches even when the numbers come out the same, and an
+ * ownership gate built on identity would then refuse a caller over a node nothing moved.
+ */
+function structurallyChanged(before: CanvasNodeState, after: CanvasNodeState): boolean {
+  return (
+    before.position.x !== after.position.x ||
+    before.position.y !== after.position.y ||
+    before.size.width !== after.size.width ||
+    before.size.height !== after.size.height ||
+    (before.parentId ?? null) !== (after.parentId ?? null)
+  )
+}
+
+/**
+ * Every record a structural transform would rewrite — and the exact set `move`, `ungroup`,
+ * `arrange` and `align` hand to the creator-ownership gate.
+ *
+ * Those four reach further than any other v1 verb: re-hugging a frame moves the frame AND re-bases
+ * every remaining child of it, and dissolving one rewrites each member it promotes. So the plan is
+ * computed against the loaded snapshot first and the ledger is asked about the collateral too. An
+ * unowned member anywhere in the set refuses the WHOLE request; nothing is applied, exactly like
+ * `close`. The honest consequence is stated in the agent-facing skill text: a frame the caller did
+ * not open cannot be a `move` destination, because growing it is a write to somebody else's node.
+ *
+ * A removed record never appears here (it is not in `after`), so `ungroup` asks about its frame by
+ * name in addition to this set.
+ */
+function writtenRecords(
+  before: readonly CanvasNodeState[],
+  after: readonly CanvasNodeState[]
+): CanvasNodeState[] {
+  const was = new Map(before.map((node) => [node.id, node]))
+  return after.filter((node) => {
+    const previous = was.get(node.id)
+    return !previous || structurallyChanged(previous, node)
+  })
 }
 
 function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
@@ -1488,6 +1607,271 @@ export class HeadlessNodeFactory {
   }
 
   /**
+   * The preamble every structural verb (`move`, `ungroup`, `arrange`, `align`) shares: the second
+   * verified gate, the caller's project, and the control-capability check. The handler already
+   * refuses an unverified request for the whole edition; this repeats it at the factory because
+   * these four rewrite OTHER nodes' parentage and geometry, and a gate that exists in one place
+   * only is a gate one refactor away from being gone.
+   */
+  private async structuralSource(
+    verb: string,
+    sourceNodeId: string,
+    verified: boolean
+  ): Promise<
+    { workspace: Workspace; project: Project; node: CanvasNodeState } | ServerControlReply
+  > {
+    if (!verified) {
+      return {
+        ok: false,
+        error: `${verb}-identity-refused: Server Edition ${verb} requires verified node identity`
+      }
+    }
+    const workspace = await this.deps.workspaceStore.load({ sideline: false })
+    const source = await this.resolveSource(workspace, sourceNodeId)
+    if ('ok' in source) return source
+    if (!sourceCanControl(source.node, this.runtimeAgentId)) {
+      return { ok: false, error: 'source node is not a control-capable agent' }
+    }
+    return { workspace, project: source.project, node: source.node }
+  }
+
+  /**
+   * Reparent nodes — or whole frame subtrees — INTO an existing frame, or out to the top level.
+   * The one way to take a card OUT of a frame: `group` deliberately only wraps loose siblings, so
+   * without this a canvas the spawn tray collected could only ever get more grouped.
+   */
+  move(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply> {
+    return this.runExclusive('move', async () => {
+      const flagError = unsupportedFlags(args, new Set(['nodes', 'group']))
+      if (flagError) return { ok: false, error: `move: ${flagError}` }
+      const source = await this.structuralSource('move', sourceNodeId, verified)
+      if ('ok' in source) return source
+      const { workspace, project } = source
+
+      const ids = [...new Set((args.nodes ?? '').split(',').map((id) => id.trim()).filter(Boolean))]
+      if (!ids.length) return { ok: false, error: 'move requires --nodes <id,id>' }
+      const raw = (args.group ?? '').trim()
+      const toTop = !raw || ['top', 'none', 'ungrouped'].includes(raw.toLowerCase())
+      const targetGroup = toTop ? null : raw
+
+      for (const id of targetGroup ? [...ids, targetGroup] : ids) {
+        const projects = nodeProjects(workspace, id)
+        if (projects.length && (projects.length !== 1 || projects[0].id !== project.id)) {
+          return {
+            ok: false,
+            error: `move-project-refused: ${id} is not exclusively in the caller's project`
+          }
+        }
+      }
+      if (targetGroup && !project.nodes.some((node) => node.id === targetGroup && node.kind === 'group')) {
+        return { ok: false, error: `move: --group names no group frame (${targetGroup})` }
+      }
+      // Named ids first, so the caller is told about the node it asked for rather than about a
+      // frame it never mentioned.
+      const named = ids.filter((id) => project.nodes.some((node) => node.id === id))
+      const unownedNamed = this.unownedMutation(
+        sourceNodeId,
+        targetGroup ? [...named, targetGroup] : named
+      )
+      if (unownedNamed) return this.ownershipRefusal('move', sourceNodeId, unownedNamed)
+
+      const before = project.nodes
+      const plan = reparentPersistedNodes(before, ids, targetGroup, { refitSources: true })
+      if (!plan.moved.length) {
+        return {
+          ok: false,
+          error: `move: nothing moved — ${plan.skipped
+            .map((skip) => `${skip.id}: ${skip.why}`)
+            .join('; ')}`
+        }
+      }
+      const changed = writtenRecords(before, plan.nodes)
+      const unowned = this.unownedMutation(sourceNodeId, changed.map((node) => node.id))
+      if (unowned) return this.ownershipRefusal('move', sourceNodeId, unowned)
+
+      project.nodes = plan.nodes
+      await this.deps.workspaceStore.save(workspace)
+      this.publish(project, changed)
+      const where = targetGroup ? `into ${targetGroup}` : 'to the top level'
+      const note = plan.skipped.length
+        ? ` (skipped ${plan.skipped.map((skip) => `${skip.id}: ${skip.why}`).join('; ')})`
+        : ''
+      return {
+        ok: true,
+        message: `moved ${plan.moved.length} node(s) ${where}${note}`,
+        result: { moved: plan.moved, group: targetGroup, skipped: plan.skipped }
+      }
+    })
+  }
+
+  /**
+   * Dissolve a frame, promoting its direct children into the frame's OWN parent — not to the root,
+   * which would move them by the whole ancestor offset. The nodes stay exactly where they look;
+   * only the frame is removed.
+   */
+  ungroup(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply> {
+    return this.runExclusive('ungroup', async () => {
+      const flagError = unsupportedFlags(args, new Set(['group']))
+      if (flagError) return { ok: false, error: `ungroup: ${flagError}` }
+      const source = await this.structuralSource('ungroup', sourceNodeId, verified)
+      if ('ok' in source) return source
+      const { workspace, project } = source
+
+      const groupId = (args.group ?? '').trim()
+      const projects = nodeProjects(workspace, groupId)
+      if (projects.length && (projects.length !== 1 || projects[0].id !== project.id)) {
+        return {
+          ok: false,
+          error: `ungroup-project-refused: ${groupId} is not exclusively in the caller's project`
+        }
+      }
+      const frame = project.nodes.find((node) => node.id === groupId && node.kind === 'group')
+      if (!frame) {
+        return {
+          ok: false,
+          error: `ungroup: --group names no group frame (${groupId || 'missing'})`
+        }
+      }
+      // The frame is REMOVED, so it never appears in the write-set diff — ask about it by name.
+      if (!this.ownsMutation(sourceNodeId, groupId)) {
+        return this.ownershipRefusal('ungroup', sourceNodeId, groupId)
+      }
+
+      const before = project.nodes
+      const dissolved = ungroupPersistedNodes(before, groupId)
+      const unowned = this.unownedMutation(
+        sourceNodeId,
+        writtenRecords(before, dissolved.nodes).map((node) => node.id)
+      )
+      if (unowned) return this.ownershipRefusal('ungroup', sourceNodeId, unowned)
+
+      project.nodes = dissolved.nodes
+      // A frame carries no session, but it can carry edges; a removed node must never leave one.
+      if (project.ropes) {
+        project.ropes = project.ropes.filter(
+          (edge) => edge.source !== groupId && edge.target !== groupId
+        )
+      }
+      if (project.bridges) {
+        project.bridges = project.bridges.filter(
+          (edge) => edge.source !== groupId && edge.target !== groupId
+        )
+      }
+      await this.deps.workspaceStore.save(workspace)
+      this.publishChangeSet(project, dissolved.promoted, [groupId])
+      this.forgetNodes([groupId])
+      return {
+        ok: true,
+        message: `ungrouped ${groupId}, freed ${dissolved.promoted.length} node(s)`,
+        result: { freed: dissolved.promoted.map((node) => node.id), group: groupId }
+      }
+    })
+  }
+
+  /** Tidy a set into a non-overlapping grid/row/column, then re-hug its frame. */
+  arrange(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply> {
+    return this.runExclusive('arrange', async () => {
+      const flagError = unsupportedFlags(args, new Set(['nodes', 'layout', 'cols']))
+      if (flagError) return { ok: false, error: `arrange: ${flagError}` }
+      if (args.layout !== undefined && !isArrangeLayout(args.layout)) {
+        return { ok: false, error: 'arrange requires --layout grid|row|column' }
+      }
+      const layout: ArrangeLayout = isArrangeLayout(args.layout) ? args.layout : 'grid'
+      const cols = args.cols ? parseInt(args.cols, 10) || undefined : undefined
+      return this.layout('arrange', sourceNodeId, args, verified, `as ${layout}`, (subjects, ids) =>
+        arrangePositions(subjects, ids, { layout, cols })
+      )
+    })
+  }
+
+  /** Snap a set to a shared edge or centre line, then re-hug its frame. */
+  align(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply> {
+    return this.runExclusive('align', async () => {
+      const flagError = unsupportedFlags(args, new Set(['nodes', 'edge']))
+      if (flagError) return { ok: false, error: `align: ${flagError}` }
+      if (!isAlignEdge(args.edge)) {
+        return { ok: false, error: 'align requires --edge left|right|top|bottom|hcenter|vcenter' }
+      }
+      const edge: AlignEdge = args.edge
+      return this.layout('align', sourceNodeId, args, verified, `to ${edge}`, (subjects, ids) =>
+        alignPositions(subjects, ids, edge)
+      )
+    })
+  }
+
+  /**
+   * The half `arrange` and `align` share: one coordinate space, one ownership gate over the whole
+   * write set, one save. Both verbs run inside their own `runExclusive`, so this must NOT take the
+   * lock again.
+   */
+  private async layout(
+    verb: 'arrange' | 'align',
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean,
+    how: string,
+    positionsOf: (
+      subjects: ArrangeSubject[],
+      ids: string[]
+    ) => Map<string, { x: number; y: number }>
+  ): Promise<ServerControlReply> {
+    const source = await this.structuralSource(verb, sourceNodeId, verified)
+    if ('ok' in source) return source
+    const { workspace, project } = source
+
+    const ids = [...new Set((args.nodes ?? '').split(',').map((id) => id.trim()).filter(Boolean))]
+    if (!ids.length) return { ok: false, error: `${verb} requires --nodes <id,id>` }
+    const subjects = arrangeSubjects(project.nodes)
+    const container = commonContainerOf(subjects, ids)
+    if (container === undefined) {
+      const known = ids.filter((id) => project.nodes.some((node) => node.id === id))
+      return {
+        ok: false,
+        error: known.length
+          ? `${verb}: the nodes are in different containers — arrange the children of one frame (or top-level nodes) at a time`
+          : `${verb}: none of the given node ids exist`
+      }
+    }
+    const named = ids.filter((id) => project.nodes.some((node) => node.id === id))
+    const unownedNamed = this.unownedMutation(sourceNodeId, named)
+    if (unownedNamed) return this.ownershipRefusal(verb, sourceNodeId, unownedNamed)
+
+    const before = project.nodes
+    const next = applyPersistedPositions(before, positionsOf(subjects, ids), container)
+    const changed = writtenRecords(before, next)
+    const done = {
+      ok: true as const,
+      message: `${verb === 'arrange' ? 'arranged' : 'aligned'} ${named.length} node(s) ${how}`,
+      result: { count: named.length, container }
+    }
+    // Already in that layout: an idempotent verb writes nothing rather than churning the file.
+    if (!changed.length) return done
+    const unowned = this.unownedMutation(sourceNodeId, changed.map((node) => node.id))
+    if (unowned) return this.ownershipRefusal(verb, sourceNodeId, unowned)
+
+    project.nodes = next
+    await this.deps.workspaceStore.save(workspace)
+    this.publish(project, changed)
+    return done
+  }
+
+  /**
    * Put the workers this spawn just created under the spawner's tray frame (@shared/worker-frame).
    * Mutates `project.nodes` in place — the caller is inside the workspace transaction and saves
    * once, so a burst of spawns is a burst of single writes, not a write per node per frame.
@@ -1512,7 +1896,7 @@ export class HeadlessNodeFactory {
     })
     if (plan.kind === 'none') return { changed: [] }
     if (plan.kind === 'join') {
-      const joined = reparentPersistedInto(project.nodes, plan.memberIds, plan.groupId)
+      const joined = reparentPersistedNodes(project.nodes, plan.memberIds, plan.groupId)
       project.nodes = joined.nodes
       return { changed: joined.changed }
     }

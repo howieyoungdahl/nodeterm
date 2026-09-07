@@ -1663,7 +1663,25 @@ else, and its context links must keep classifying across restarts).
   behavior). When the ids are a frame's children, the frame is shrunk to hug the tidied layout
   (`fitGroupToChildren`) — the fix for "grouping keeps scattered positions so the frame is too
   wide". `move` also re-fits the source + destination frames. All pure + tested in
-  `state/workspace.test.ts` + `workspace.layout.test.ts`.
+  `state/workspace.test.ts` + `workspace.layout.test.ts`; the shared geometry behind
+  `arrange`/`align` is `@shared/canvas-arrange` (position maps, so the renderer and the Server each
+  keep their own node shape), which is what lets the Server run them without importing renderer code.
+  **All four reach Server Edition (2026-09-07).** Before that `SERVER_V1_VERBS` had `group` and
+  none of `ungroup`/`move`/`arrange`/`align`, so a canvas the spawn tray collected could only ever
+  get MORE grouped: an agent could file cards in and nothing took one back out, and a director that
+  tried got `control-unsupported-on-this-edition` with no recovery path but the operator's mouse.
+  **These four hand a WIDER set to the creator-ownership gate than the ids they name**
+  (`writtenRecords`): re-hugging a frame moves the frame and re-bases every child it keeps, and
+  dissolving one rewrites each member it promotes, so the plan is computed against the snapshot and
+  the ledger is asked about that whole write set — collateral included — with an unowned member
+  anywhere refusing the WHOLE request, like `close`. `ungroup` also asks about its frame by name
+  (a removed record never appears in the diff). The diff compares by VALUE, not identity, because
+  `fitGroupToChildren` rebuilds every child record of a frame it touches even when the numbers are
+  unchanged — an identity gate would refuse a caller over nodes nothing moved. The honest
+  consequence, stated in the agent-facing skill text: a frame the caller did not open cannot be a
+  `move` destination, and a tray holding one unowned card cannot be arranged. That is the
+  fail-closed direction, and the recovery path this exists for is unaffected — pulling a card out
+  of the factory's own tray to the top level touches only the caller's own nodes.
   **Fan-in (`link`, 2026-07):** a spawned fan-out was previously write-only — nodes an agent
   opened were joined to it by a **rope** (`project.ropes`, explicitly *"Display-only — never
   context links"*), so an orchestrator could not read back what its own team produced and the
