@@ -1545,17 +1545,48 @@ else, and its context links must keep classifying across restarts).
   is structurally untouchable.
   Marked spawn trays (`kind: group`, `taskFrame: true`) may lack a role because the spawn path
   predates group roles. They remain layout subjects, but an explicit `role: primary` still wins;
-  unmarked legacy groups never inherit worker status. Tray collapse uses the same refusal table.
+  unmarked legacy groups never inherit worker status.
+  **A group frame is a CONTAINER, and a container has no collapsible body** (`isCollapsibleKind`,
+  `@shared/node-collapse` — one predicate, asked by every site that turns `collapsed` into a
+  height). This is not style: every parented node carries `extent: 'parent'`, so React Flow clamps
+  each child into the frame's rect (`y = clamp(y, top, top + frameHeight − childHeight)`). A frame
+  shrunk to `COLLAPSED_HEIGHT` (40) hands a 440px card the range `[top, top − 400]` — INVERTED, so
+  `Math.min` wins unconditionally and **every member is pinned to the same `frameTop − 400`**,
+  stacked on one horizontal line and overlapping. An ordinary autosave then writes those clamped
+  positions back to `project.json`. Measured on a real canvas: nine members, six overlapping pairs,
+  from saved geometry with zero overlaps. `GroupNode.tsx` never read the flag, so the 40px height
+  was its ONLY effect — card semantics on a container whose height is its children's clamp bounds,
+  with no upside to weigh. Consequences, all in one change: a persisted `collapsed: true` on a
+  group **loads inert and is dropped on the next save** (self-repairing, no migration, no position
+  rewrite, and a downgrade renders the good state); `toggleCollapseNodes` skips frames and the
+  Collapse/Expand menu row is omitted when every target is one; `fitGroupToChildren` clears a stale
+  flag off the frame it fits (it rewrites width AND height, so it used to re-expand a "collapsed"
+  frame's box while leaving the flag set — that is how a 4284×1796 frame came to be marked
+  collapsed and re-shrunk on every load); the spawn tray is created EXPANDED by both
+  `applyWorkerFramePlan` and `HeadlessNodeFactory`; and the engine no longer proposes a tray
+  collapse at all. `rules.tray.collapsed` is still declared, validated, resolved and round-tripped
+  (a shared `project.json` out there carries it) but is **inert**, and its built-in default is now
+  `false`. `tray.floatOnAttention` is therefore **dormant** — its guard is `tray.collapsed` on the
+  NODE, which nothing sets any more — and it is deliberately not widened to `taskFrame` alone:
+  floating a member out answers "the frame is hiding this approval", and an open tray hides
+  nothing, so a wider rule would yank visible cards out of frames the operator arranged.
+  **UNBUILT FOLLOW-UP: a real "put the members away" for a frame.** It cannot be a height change
+  for the reason above; it has to hide or shrink the MEMBERS (the compact/put-away toggle a card
+  already has, applied to a frame's contents) and leave the container's rect alone. Until it
+  exists, a spawn tray is a labelled frame around cards that are all visible, and both `collapse`
+  rules above reactivate verbatim the day it lands.
   Two rules that are easy to undo by accident. **Every refusal is re-asked at APPLY time**
   (`gateLayoutPlan`), never taken from the plan-time verdict — a plan is previewed, read and then
   approved, and the operator can pin, move, or click into any card in between; this is the same fire-time re-ask
   discipline agent hibernation uses. And **the engine cannot CREATE a frame**: the op set is
-  `place | resize | reparent | collapse | label`, so the tray is minted only by the spawn path
+  `place | resize | reparent | collapse | label` (`collapse` is emitted for nothing today — see the
+  container rule above; the applier keeps its group refusal for a plan built elsewhere), so the
+  tray is minted only by the spawn path
   (`@shared/worker-frame`, with its "no frame around a single card" rule) and the engine only ever
   files into one. A second frame-creator is the frame churn this design was written to avoid.
   **Nothing runs on a timer.** The triggers are `node-created` (placement happens once, at birth),
-  `status-changed` (which emits ops only for `tray.floatOnAttention` — a blocked or failed member
-  leaves a closed tray so its approval stays reachable), `rules-changed`, and an explicit
+  `status-changed` (whose only rule, `tray.floatOnAttention` — a blocked or failed member leaves a
+  closed tray so its approval stays reachable — is dormant while no frame closes), `rules-changed`, and an explicit
   `organize`. Automatic triggers apply straight away, narrow by construction, reversible by ONE
   ⌘Z (`commitAsSingleUndoEntry` pushes the pre-apply array itself, because the history stack is
   debounced and a burst would otherwise cost two undos); the two explicit triggers preview first.

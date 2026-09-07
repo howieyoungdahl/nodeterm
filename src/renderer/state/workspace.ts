@@ -35,6 +35,7 @@ import {
   type NodeSize
 } from '@shared/control-node-size'
 import type { NodeRole } from '@shared/node-role'
+import { isCollapsibleKind } from '@shared/node-collapse'
 import type { WorkerFrameNode, WorkerFramePlan } from '@shared/worker-frame'
 
 // Preserve the renderer's long-standing import surface; validation and the palette now live in
@@ -56,7 +57,12 @@ const VIDEO_SIZE = { width: 640, height: 420 }
 const WEB_SIZE = { width: 720, height: 520 }
 const BROWSER_SIZE = { width: 800, height: 560 }
 
-/** Height of a node when collapsed (header only). */
+/**
+ * Height of a node when collapsed (header only). Never applied to a group frame — a frame's
+ * height IS its children's `extent: 'parent'` clamp bounds, so shrinking it inverts the clamp and
+ * stacks every member on one line. `isCollapsibleKind` (@shared/node-collapse) states the rule and
+ * carries the measurement; every site that turns `collapsed` into a height asks it.
+ */
 export const COLLAPSED_HEIGHT = 40
 
 /** User data carried in the React Flow node's data field. */
@@ -1563,11 +1569,12 @@ export function applyWorkerFramePlan(
   // `groupSelectedNodes` refuses a set that does not share one container; a refusal returns the
   // canvas untouched rather than half-forming a tray.
   if (!frame) return nodes
-  // Collapsed on creation, like the Server path: a tray that opens expanded has put nothing away.
+  // Created EXPANDED, like the Server path. It used to ship collapsed ("a tray that opens
+  // expanded has put nothing away") — but a collapsed frame puts nothing away either: it shrinks
+  // the container its members are clamped into and stacks them all on one line. Putting members
+  // away is still unbuilt; see @shared/node-collapse.
   return next.map((n) =>
-    n.id === frame.id
-      ? { ...n, data: { ...n.data, title: label, taskFrame: true, collapsed: true } }
-      : n
+    n.id === frame.id ? { ...n, data: { ...n.data, title: label, taskFrame: true } } : n
   )
 }
 
@@ -1672,6 +1679,13 @@ export function duplicateNode(node: CanvasNode, offset = 28): CanvasNode {
  * Used after arranging inside a frame: the frame's width came from wherever the children happened
  * to sit when they were grouped, so a tidy inner layout still leaves an oversized box. No-op for a
  * missing/non-group id or a frame with no children. Pure.
+ *
+ * It also DROPS a stale `data.collapsed` off the frame it fits. This function is reached from a
+ * dozen places (`fitAncestorChain`, `withNodeRect`, the layout applier, the canvas `move`/`group`
+ * verbs) and it writes width AND height, so before the collapse rule it would silently re-expand
+ * a "collapsed" frame's box while leaving the flag set — which is how the reported canvas came to
+ * hold a 4284×1796 frame marked `collapsed: true`, re-shrunk to 40px on every load. A group is
+ * never collapsed now, so clearing it here is a repair, not a policy.
  */
 export function fitGroupToChildren(nodes: CanvasNode[], groupId: string): CanvasNode[] {
   const group = nodes.find((n) => n.id === groupId)
@@ -1691,7 +1705,14 @@ export function fitGroupToChildren(nodes: CanvasNode[], groupId: string): Canvas
   const height = maxY - minY + GROUP_PAD * 2 + GROUP_HEADER
   return nodes.map((n) => {
     if (n.id === groupId) {
-      return { ...n, position: { x: gx, y: gy }, width, height, style: { ...n.style, width, height } }
+      return {
+        ...n,
+        position: { x: gx, y: gy },
+        width,
+        height,
+        style: { ...n.style, width, height },
+        ...(n.data.collapsed ? { data: { ...n.data, collapsed: undefined } } : {})
+      }
     }
     if (n.parentId === groupId) {
       return { ...n, position: { x: absX(n) - gx, y: absY(n) - gy } }
@@ -1889,7 +1910,11 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         text: `This was a chat node — the chat node type was removed.${resume}`
       }
     }
-    const collapsed = !!n.collapsed
+    // A `collapsed` group frame loads INERT: the flag is dropped here (and therefore on the next
+    // save — see `flowToNodeStates`), so an existing canvas repairs itself with no migration, no
+    // position rewrite, and a downgrade to a pre-fix build renders the expanded state rather than
+    // the broken one.
+    const collapsed = !!n.collapsed && isCollapsibleKind(n.kind)
     const height = collapsed ? COLLAPSED_HEIGHT : n.size.height
     // Legacy migration: nodes saved before `agentId` existed marked Claude via the 'claude'
     // tag. Backfill agentId so saved workspaces keep working.
@@ -1978,7 +2003,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
   return nodes
     .map((n) => {
       const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
-      const collapsed = !!n.data.collapsed
+      const collapsed = !!n.data.collapsed && isCollapsibleKind(kind)
       return {
         id: n.id,
         kind,
@@ -1995,7 +2020,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         color: n.data.color,
         group: n.data.group,
         tags: n.data.tags,
-        collapsed: n.data.collapsed,
+        // `undefined` for a frame, so a canvas carrying the old flag is repaired by an ordinary
+        // save. Every other kind keeps its byte-identical value, `false` included.
+        collapsed: isCollapsibleKind(kind) ? n.data.collapsed : undefined,
         hideFanout: n.data.hideFanout,
         controlSize: n.data.controlSize,
         role: n.data.role,

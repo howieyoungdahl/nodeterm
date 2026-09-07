@@ -401,6 +401,7 @@ import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
 import { planReopen } from '../lib/reopenPlan'
 import { oneLine } from '@shared/one-line'
 import { invalidNodeColorMessage, isNodeColor } from '@shared/node-colors'
+import { isCollapsibleKind } from '@shared/node-collapse'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
 import { activePermissionMode, projectPermissionMode } from '../state/permissionMode'
@@ -6428,7 +6429,10 @@ export function Canvas() {
       const set = new Set(ids)
       setNodes((ns) =>
         ns.map((n) => {
-          if (!set.has(n.id)) return n
+          // A group frame is skipped, not toggled: shrinking a container inverts its children's
+          // `extent: 'parent'` clamp (see @shared/node-collapse). A box-selection routinely
+          // catches frames alongside cards, so this is the common case, not a corner one.
+          if (!set.has(n.id) || !isCollapsibleKind(n.type)) return n
           const next = !n.data.collapsed
           const expandedHeight =
             (n.data.expandedHeight as number) ?? n.measured?.height ?? (n.height as number) ?? 300
@@ -7244,7 +7248,14 @@ export function Canvas() {
             relaySession: session.source === 'relay'
           }, transferConversation)
         : []),
-      ...(isHidden('collapse', hidden)
+      // Omitted when every target is a group frame: a frame has no collapsible body, so the row
+      // could only be a no-op that still marks the canvas dirty. A mixed selection keeps the row —
+      // the toggle skips the frames in it.
+      ...(isHidden('collapse', hidden) ||
+      !ids.some((id) => {
+        const n = nodesRef.current.find((nd) => nd.id === id)
+        return !!n && isCollapsibleKind(n.type)
+      })
         ? []
         : ([
             {

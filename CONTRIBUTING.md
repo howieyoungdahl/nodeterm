@@ -332,6 +332,18 @@ pin, move, or start using a card while its preview is open), and the engine has 
 it can never become a second frame-creator racing the spawn path. Nothing runs on a timer, and
 nothing on this path may reach a PTY.
 
+**A group frame's height is its children's clamp bounds — never shrink a container.** Every
+parented node carries `extent: 'parent'`, so React Flow clamps each child into the parent's rect:
+`y = clamp(y, top, top + frameHeight − childHeight)`. Shrink a frame to `COLLAPSED_HEIGHT` (40) and
+that range **inverts** for any child taller than 40px (`40 − 440 = −400`), `Math.min` wins
+unconditionally, and every member is pinned to the same `frameTop − 400` — one horizontal line,
+overlapping, and an ordinary autosave writes those clamped positions back to `project.json`. That
+shipped: a `collapsed` flag meant for cards was applied to frames, and `GroupNode.tsx` never read
+it, so the 40px height was its only effect. Ask `isCollapsibleKind` (`@shared/node-collapse`) at
+every site that turns `collapsed` into a height rather than spelling `type !== 'group'` inline —
+there were four such sites and one copy of a rule is easier to keep than four. The wider habit:
+before giving a container a card's affordance, ask what else that container's geometry decides.
+
 Layout events received during an asynchronous plan must be coalesced and drained, not discarded.
 Capture their project identity, reject application after a project switch, and release the actual
 held lease on unmount. Messaging likewise serializes admission and delivery per target; a queued

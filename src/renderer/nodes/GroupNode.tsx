@@ -68,9 +68,15 @@ export function GroupNode({ id, data, selected, parentId }: NodeProps<CanvasNode
   const setupBusy = setupPending || setupRun?.state === 'running'
 
   // ── The frame's rolled-up status ────────────────────────────────────────────────────────────
-  // The requirement this exists for: approvals and failures stay discoverable when the sessions
-  // holding them are put away. A worker frame ships collapsed and its members are compact, so the
+  // The requirement this exists for: approvals and failures stay discoverable without reading
+  // every member. A worker frame's members are compact and there can be a dozen of them, so the
   // label pill is often the only thing on screen that can say "two of these are blocked".
+  //
+  // It used to say "when the sessions holding them are put away — a worker frame ships collapsed".
+  // Neither half was true: this component has never read `data.collapsed`, and the flag's only
+  // effect was to shrink the frame to 40px, which inverted its members' `extent: 'parent'` clamp
+  // and stacked them on one line (@shared/node-collapse). Frames no longer collapse; a real
+  // put-away for a frame's members is unbuilt.
   //
   // Two selectors, both returning primitives, because both stores churn: React Flow's on every
   // drag frame and the status table's on every hook event anywhere on the canvas. The first

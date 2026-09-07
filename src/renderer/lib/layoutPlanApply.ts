@@ -18,6 +18,7 @@
 
 import type { LayoutOp, LayoutPlan, LayoutNode, LayoutPlanRequest } from '@shared/canvas-layout'
 import { oneLine } from '@shared/one-line'
+import { isCollapsibleKind } from '@shared/node-collapse'
 import {
   COLLAPSED_HEIGHT,
   fitGroupToChildren,
@@ -51,13 +52,23 @@ export function layoutNodesOf(nodes: readonly CanvasNode[]): LayoutNode[] {
   return nodes.map(layoutNodeOf)
 }
 
-/** Collapse or expand one node, exactly as the header chevron does. */
+/**
+ * Collapse or expand one node, exactly as the header chevron does — and, exactly like the header
+ * chevron, refusing a group frame: a frame's height is its children's `extent: 'parent'` clamp
+ * bounds (see @shared/node-collapse). The engine no longer PROPOSES a frame collapse, so this
+ * guard is for a plan built by another build; it must stay, or that plan re-creates the overlap.
+ *
+ * Returns the SAME array when it refuses, so `applyLayoutPlan` can keep its documented promise —
+ * a plan that changed nothing writes no undo entry and no `project.json`.
+ */
 function setCollapsed(nodes: CanvasNode[], nodeId: string, collapsed: boolean): CanvasNode[] {
-  return nodes.map((n) => {
-    if (n.id !== nodeId || !!n.data.collapsed === collapsed) return n
+  let changed = false
+  const next = nodes.map((n) => {
+    if (n.id !== nodeId || !isCollapsibleKind(n.type) || !!n.data.collapsed === collapsed) return n
     const expandedHeight =
       (n.data.expandedHeight as number) ?? n.measured?.height ?? (n.height as number) ?? 300
     const height = collapsed ? COLLAPSED_HEIGHT : expandedHeight
+    changed = true
     return {
       ...n,
       height,
@@ -65,6 +76,7 @@ function setCollapsed(nodes: CanvasNode[], nodeId: string, collapsed: boolean): 
       data: { ...n.data, collapsed, expandedHeight }
     }
   })
+  return changed ? next : nodes
 }
 
 function applyOp(nodes: CanvasNode[], op: LayoutOp): CanvasNode[] {
