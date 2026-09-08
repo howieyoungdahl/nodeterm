@@ -354,6 +354,13 @@ and instruction installation; temporary test paths must never reach live provide
 
 ## Testing
 
+Terminal and board-modal headers reserve a row for the title; put badges and secondary actions
+in the wrapping toolbar. Collapsed terminals keep the title row and close button within 40px.
+Automatic names follow the exact agent session and respect `titleAuto: false`. Codex can use a
+bounded task preview when no explicit or relayed name exists; this never sends input to the agent.
+Automatic worker organization is a native, machine-local option in the canvas menu, command palette,
+and Behavior settings. Topic-based grouping still needs an operator or supervising agent.
+
 **Reloading a saved canvas must preserve open cards.** Read the current React Flow snapshot when
 the user resolves a conflict, retain cards missing from disk with their ids and positions, and save
 the merged result. A conflict can pause autosave while more terminals are opened. The old disk

@@ -228,6 +228,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
             setMaximized(!maximized)
           }}
         >
+          <div className="kanban-modal__title-row">
           <span className="kanban-card__nodedot" style={{ background: session.color }} />
           {editingTitle ? (
             <input
@@ -244,6 +245,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           ) : (
             <span
               className="kanban-modal__title"
+              title={session.title}
               onClick={() => {
                 if (session.kind === 'sticky') return // a note's label IS its first line
                 setTitle(session.title)
@@ -253,6 +255,11 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
               {session.title}
             </span>
           )}
+          <button className="kanban-modal__action" title="Close" onClick={onClose}>
+            ✕
+          </button>
+          </div>
+          <div className="kanban-modal__toolbar">
           <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>
           {isTerminal && <AccountChip chip={accountChip} />}
           {/* The driving chip, so a user watching a browser card THROUGH the modal is not
@@ -310,9 +317,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           <button className="kanban-modal__action" title="Open on canvas" onClick={onOpenCanvas}>
             ↗
           </button>
-          <button className="kanban-modal__action" title="Close" onClick={onClose}>
-            ✕
-          </button>
+          </div>
         </div>
         <CardMetaBar nodeId={session.id} board={board} onChange={onChangeBoard} />
         <div className="kanban-modal__body">
