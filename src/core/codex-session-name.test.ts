@@ -13,6 +13,8 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import { createHash } from 'node:crypto'
 import {
   codexThreadExistsAt,
+  codexPreviewTitle,
+  codexRolloutTitle,
   codexUnixWebSocketUrl,
   forgetCodexSessionNames,
   readCodexAccountAt,
@@ -33,6 +35,12 @@ const threads = new Map<string, string | null>([
   ['thread-known', 'Named by codex'],
   ['thread-nameless', null]
 ])
+const previews = new Map<string, unknown>([
+  ['thread-preview', 'Fix terminal header readability'],
+  ['thread-known', 'An older first prompt']
+])
+const threadPaths = new Map<string, string>()
+threads.set('thread-preview', null)
 let initializeFails = false
 
 function handle(ws: WebSocket): void {
@@ -54,7 +62,10 @@ function handle(ws: WebSocket): void {
         ws.send(JSON.stringify({ id: msg.id, error: { message: 'no rollout found' } }))
         return
       }
-      ws.send(JSON.stringify({ id: msg.id, result: { thread: { id, name: threads.get(id) } } }))
+      ws.send(JSON.stringify({ id: msg.id, result: { thread: {
+        id: id === 'thread-wrong-id' ? 'another-thread' : id,
+        name: threads.get(id), preview: previews.get(id), path: threadPaths.get(id)
+      } } }))
     }
   })
 }
@@ -148,6 +159,30 @@ describe('waitForCodexAppServer', () => {
 })
 
 describe('readCodexSessionNameAt', () => {
+  it('finds the first task when the preview contains only injected instructions', async () => {
+    const id = 'thread-with-instructions'
+    const file = path.join(dir, 'rollout-task.jsonl')
+    fs.writeFileSync(file, [
+      {type:'session_meta', payload:{id}},
+      {type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'# AGENTS.md instructions for /repo'}]}},
+      {type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'<environment_context>cwd</environment_context>'}]}},
+      {type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Repair terminal title readability'}]}}
+    ].map(record=>JSON.stringify(record)).join('\n'))
+    threads.set(id, null)
+    previews.set(id, '# AGENTS.md instructions for /repo')
+    threadPaths.set(id, file)
+    expect(await readCodexSessionNameAt(sock,id)).toBe('Repair terminal title readability')
+    expect(codexRolloutTitle(file, 'other-thread')).toBeNull()
+    expect(codexRolloutTitle(path.join(dir,'missing.jsonl'),id)).toBeNull()
+  })
+  it('automatically labels an unnamed thread from its own task preview', async () => {
+    expect(await readCodexSessionNameAt(sock, 'thread-preview')).toBe('Fix terminal header readability')
+  })
+
+  it('refuses a title returned for a different thread', async () => {
+    threads.set('thread-wrong-id', 'Someone else’s work')
+    expect(await readCodexSessionNameAt(sock, 'thread-wrong-id')).toBeNull()
+  })
   it("reads the thread's own name", async () => {
     expect(await readCodexSessionNameAt(sock, 'thread-known')).toBe('Named by codex')
   })
@@ -157,6 +192,21 @@ describe('readCodexSessionNameAt', () => {
     expect(await readCodexSessionNameAt(sock, 'thread-nameless')).toBeNull()
     expect(await readCodexSessionNameAt(sock, 'thread-from-a-past-life')).toBeNull()
     expect(await readCodexSessionNameAt(path.join(dir, 'nope.sock'), 'thread-known', 500)).toBeNull()
+  })
+})
+
+describe('codexPreviewTitle', () => {
+  it('normalizes multiline text and bounds long labels', () => {
+    expect(codexPreviewTitle('  Fix\n terminal\t names  ')).toBe('Fix terminal names')
+    const title = codexPreviewTitle('Investigate why the terminal header hides the name when account and model badges are visible')!
+    expect(title.length).toBeLessThanOrEqual(72)
+    expect(title.endsWith('…')).toBe(true)
+  })
+
+  it('does not turn setup blocks or missing data into a task title', () => {
+    for (const value of [undefined, {}, '', '  ', '# AGENTS.md instructions for /repo', '<environment_context>cwd</environment_context>']) {
+      expect(codexPreviewTitle(value)).toBeNull()
+    }
   })
 })
 

@@ -7874,8 +7874,15 @@ export function Canvas() {
           ...(hasArrangeableNodes()
             ? [{ label: 'Tidy canvas', icon: <IconGrid />, onClick: arrangeAllNodes } as MenuItem]
             : []),
-          // Only when the engine is switched on for this machine: with it off the row could only
-          // ever open a dialog saying the feature is off, which is a worse answer than no row.
+          {
+            label: `Automatic worker organization: ${layoutEnabled ? 'On' : 'Off'}`,
+            icon: <IconGrid />,
+            hint: 'Automatically place new delegated workers in their owner’s frame. Keeps manual placements and pinned nodes.',
+            onClick: () => {
+              const store = useSettings.getState()
+              store.update({ canvasLayout: { ...store.settings.canvasLayout, enabled: !layoutEnabled } })
+            }
+          },
           ...(layoutEnabled
             ? [
                 {
@@ -11822,8 +11829,17 @@ export function Canvas() {
             } as Command
           ]
         : []),
-      // Same visibility rule as the pane menu's row: hidden while the engine is off, where it
-      // could only report that it is off.
+      {
+        id: 'toggle-worker-organization',
+        label: `${layoutEnabled ? 'Disable' : 'Enable'} automatic worker organization`,
+        hint: 'layout tray file workers automatic arrange naming organization',
+        section: 'View',
+        icon: <IconGrid />,
+        run: () => {
+          const store = useSettings.getState()
+          store.update({ canvasLayout: { ...store.settings.canvasLayout, enabled: !layoutEnabled } })
+        }
+      },
       ...(layoutEnabled
         ? [
             {

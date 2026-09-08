@@ -4538,6 +4538,7 @@ export function TerminalNode({
       />
 
       <div className="term-node__header">
+        <div className="term-node__title-row">
         <button className="term-node__collapse" title={collapsed ? 'Expand' : 'Collapse'} onClick={toggleCollapse}>
           {collapsed ? '▸' : '▾'}
         </button>
@@ -4600,7 +4601,7 @@ export function TerminalNode({
         ) : (
           <span
             className="term-node__title-text nodrag"
-            title="Click to rename"
+            title={`${data.title || 'Untitled'} — Click to rename`}
             onClick={() => {
               titleEditStartRef.current = data.title as string
               setEditingTitle(true)
@@ -4609,6 +4610,18 @@ export function TerminalNode({
             {data.title || 'Untitled'}
           </span>
         )}
+        <button
+          className="term-node__close"
+          title="Close (ends the session)"
+          onClick={() => {
+            transport.destroy(id)
+            deleteElements({ nodes: [{ id }] })
+          }}
+        >
+          ×
+        </button>
+        </div>
+        <div className="term-node__toolbar">
         {status?.session && status.session !== data.title && (
           <span className="term-node__session" title={status.session}>
             {status.session}
@@ -4872,16 +4885,7 @@ export function TerminalNode({
         {!collapsed && !isHidden('maximize', hiddenHeaderButtons) && (
           <MaximizeButton id={id} maximized={!!data.premaxRect} />
         )}
-        <button
-          className="term-node__close"
-          title="Close (ends the session)"
-          onClick={() => {
-            transport.destroy(id)
-            deleteElements({ nodes: [{ id }] })
-          }}
-        >
-          ×
-        </button>
+        </div>
       </div>
 
       {searchOpen && !collapsed && (

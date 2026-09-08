@@ -1321,6 +1321,17 @@ else, and its context links must keep classifying across restarts).
     one-way bridge as Branch's `/branch`; works whether or not the node is mounted).
   - The launch command is left bare (no `-n`) — Claude's own name is canonical until the user
     overrides it; `titleAuto` is persisted so an overridden name survives reload/resume.
+  - **Codex automatic names:** `readCodexSessionNameAt` requires the returned thread id to match,
+    prefers its explicit name, then the relay name, then a bounded 72-character task preview.
+    Setup-only previews fall back to the first actual user task in a bounded 256KiB head of the
+    exact app-server rollout, after checking its session metadata id. No model call or session input
+    is needed. Both shells' mirror
+    sweeps and the renderer use this reader, so automatic names also reach the mobile mirror.
+  - **Header readability:** canvas terminals and board modals reserve a title row above a wrapping
+    metadata/actions toolbar. Collapsed terminal cards hide the toolbar and retain title/close
+    within their existing 40px height. Automatic worker organization is exposed in the canvas menu
+    and command palette as well as Behavior settings; its machine-local opt-in and placement guards
+    are unchanged. Semantic topic grouping remains operator/supervisor work.
 - **Search** — the command palette (⌘K) matches the session name + tags + `nt-<id>` in the
   hint, and substring-searches each terminal's **visible buffer** (captured via `pty.capture`
   on palette open, cached ~3s); content matches show "found in output".

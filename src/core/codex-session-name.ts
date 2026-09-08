@@ -14,7 +14,7 @@
  * falls back to plain codex.
  */
 import { createHash } from 'crypto'
-import { readFileSync } from 'fs'
+import { readFileSync, openSync, readSync, closeSync } from 'fs'
 import { homedir } from 'os'
 import path from 'path'
 import { WebSocket } from 'ws'
@@ -166,13 +166,66 @@ export function readCodexSessionNameAt(
           })
         )
       } else if (message.id === 2) {
-        const name = message.result?.thread?.name
-        finish(typeof name === 'string' && name.trim() ? name.trim() : null)
+        const thread = message.result?.thread
+        if (message.error || thread?.id !== threadId) return finish(null)
+        const name = thread.name
+        // A new thread often has a preview but no explicit /rename name. Use that task as
+        // its automatic label; never send a naming prompt or keystrokes into the session.
+        finish(
+          typeof name === 'string' && name.trim()
+            ? name.trim()
+            : relayedCodexSessionName(socketPath, threadId) ??
+              codexPreviewTitle(thread.preview) ?? codexRolloutTitle(thread.path, threadId)
+        )
       }
     })
     ws.once('error', () => finish(null))
     ws.once('close', () => finish(null))
   })
+}
+
+/** Bound task previews for card headers. Setup blocks are not useful task names. */
+export function codexPreviewTitle(preview: unknown): string | null {
+  if (typeof preview !== 'string') return null
+  const text = preview.replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!text || /^(?:#*\s*AGENTS\.md|<environment_context>|<INSTRUCTIONS>|<system)/i.test(text)) return null
+  if (text.length <= 72) return text
+  const prefix = text.slice(0, 71)
+  const boundary = prefix.lastIndexOf(' ')
+  return `${prefix.slice(0, boundary >= 40 ? boundary : prefix.length).trimEnd()}…`
+}
+
+/** Some threads preview only their injected AGENTS.md. Read a bounded head of the exact rollout
+ * returned by the app-server, verifying its identity before considering any user text. */
+export function codexRolloutTitle(file: unknown, threadId: string): string | null {
+  if (typeof file !== 'string' || !path.isAbsolute(file) || !/^rollout-.*\.jsonl$/.test(path.basename(file))) return null
+  let fd: number | undefined
+  try {
+    fd = openSync(file, 'r')
+    const buffer = Buffer.alloc(256 * 1024)
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0)
+    const lines = buffer.subarray(0, bytes).toString('utf8').split('\n')
+    const metadata = JSON.parse(lines.shift() ?? '')
+    if (metadata.type !== 'session_meta' || (metadata.payload?.id ?? metadata.payload?.session_id) !== threadId) return null
+    for (const line of lines) {
+      let record: any
+      try { record = JSON.parse(line) } catch { continue }
+      const payload = record.payload
+      const text = record.type === 'event_msg' && payload?.type === 'user_message'
+        ? payload.message
+        : record.type === 'response_item' && payload?.type === 'message' && payload.role === 'user' && Array.isArray(payload.content)
+          ? payload.content.filter((item: any) => item.type === 'input_text').map((item: any) => item.text).join('\n')
+          : null
+      const title = codexPreviewTitle(text)
+      if (title) return title
+    }
+    return null
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
 }
 
 /**
