@@ -205,3 +205,37 @@ describe('local save rescue', () => {
     expect(index.entries[0].cache.nodes.map((n: CanvasNodeState) => n.id)).toEqual(['ssh-1'])
   })
 })
+
+describe('save receipts', () => {
+  const receipts = (info: { mock: { calls: unknown[][] } }): string[] =>
+    info.mock.calls.map((call) => String(call[0])).filter((l) => l.startsWith('[workspace] ') && l.includes(' saved '))
+
+  it('logs one line naming the client, rev and card delta when a save changes the card set', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const store = new WorkspaceStore(undefined, guards())
+    await store.save(ws([project({ cwd: projRoot })]), { client: 'ui:4' })
+    const first = receipts(info)
+    expect(first).toHaveLength(1)
+    expect(first[0]).toContain('[workspace] ui:4 saved p1 rev 1: +term-1,term-2 (2 nodes)')
+
+    info.mockClear()
+    await store.save(
+      ws([project({ cwd: projRoot, nodes: [node('term-2'), node('term-3')] })]),
+      { client: 'ui:4' }
+    )
+    const second = receipts(info)
+    expect(second).toHaveLength(1)
+    expect(second[0]).toContain('ui:4 saved p1 rev 2: +term-3 -term-1 (2 nodes)')
+  })
+
+  it('says nothing for a write that only moves or renames cards', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const store = new WorkspaceStore(undefined, guards())
+    await store.save(ws([project({ cwd: projRoot })]))
+    info.mockClear()
+    await store.save(
+      ws([project({ cwd: projRoot, nodes: [node('term-1', { position: { x: 900, y: 120 } }), node('term-2')] })])
+    )
+    expect(receipts(info)).toEqual([])
+  })
+})

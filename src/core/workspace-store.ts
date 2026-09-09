@@ -982,6 +982,7 @@ export class WorkspaceStore {
         await writeAtomic(file, content)
         this.lastWritten.set(file, content)
         this.revs.set(projectId, next.rev)
+        logNodeSetChange(client, projectId, next, prevParsed)
       } catch (cause) {
         // Keep saving the other projects and the index, but never acknowledge a partial save as
         // durable. Otherwise the renderer clears dirty and new cards vanish on refresh.
@@ -1702,6 +1703,36 @@ export class WorkspaceStore {
 function nodesMissingFrom(base: CanvasNodeState[], from: CanvasNodeState[]): CanvasNodeState[] {
   const have = new Set(base.map((n) => n.id))
   return from.filter((n) => !have.has(n.id))
+}
+
+/**
+ * One journal line per project write that CHANGES THE SET OF CARDS, naming the client that wrote
+ * it. A drag or a rename writes too, but says nothing here — this is the receipt for "the card
+ * is now on disk", the fact every recovery and rescue decision hinges on. Without it the journal
+ * shows a recovery restoring a card "missing from the workspace" with nothing to say when (or
+ * whether) the tab that opened the card ever saved it: on 2026-09-09 four cards a browser tab
+ * created were restored elsewhere 10 to 55 s later, and the save side of that race was invisible.
+ */
+function logNodeSetChange(
+  client: string,
+  projectId: string,
+  next: ProjectFileV1,
+  prev: ProjectFileV1 | null
+): void {
+  const before = new Set((prev?.nodes ?? []).map((n) => n.id))
+  const after = new Set(next.nodes.map((n) => n.id))
+  const added = [...after].filter((id) => !before.has(id))
+  const removed = [...before].filter((id) => !after.has(id))
+  if (!added.length && !removed.length) return
+  const delta = [
+    added.length ? `+${added.join(',')}` : '',
+    removed.length ? `-${removed.join(',')}` : ''
+  ]
+    .filter(Boolean)
+    .join(' ')
+  console.info(
+    `[workspace] ${client} saved ${projectId} rev ${next.rev}: ${delta} (${next.nodes.length} nodes)`
+  )
 }
 
 /** A labeled grey placeholder for a ref whose file can't be read right now. */
