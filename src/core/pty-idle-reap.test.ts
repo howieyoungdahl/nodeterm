@@ -179,6 +179,29 @@ describe('idle reap of unwatched client PTYs', () => {
     expect(spawned[0].killed).toBe(false)
   })
 
+  /**
+   * `hasAttachedClient` is the same "somebody is still watching" question the sweep asks, exposed
+   * synchronously for callers that must not act on a card a UI client still holds — the Server
+   * Edition's missing-card recovery, which otherwise mints a replacement for a card whose tab has
+   * simply not autosaved yet.
+   */
+  it('answers whether a UI client still holds a node, and says no once that client is gone', async () => {
+    fake.clients.push(ALICE)
+    const m = await tmuxManager()
+    await create(ALICE)
+
+    expect(m.hasAttachedClient('node-1')).toBe(true)
+
+    // Her tab is gone. Client ids are never reused, so this subscriber can never save anything
+    // again — the same reasoning that lets the sweep reap the pty.
+    fake.clients.length = 0
+    expect(m.hasAttachedClient('node-1')).toBe(false)
+
+    // A node with no session here is not "attached": absence of a client is the answer, and it is
+    // the lost-card case recovery exists for.
+    expect(m.hasAttachedClient('node-never-created')).toBe(false)
+  })
+
   it('never reaps before the threshold — it must not race the renderer 5-minute park', async () => {
     await tmuxManager()
     await create(ALICE)

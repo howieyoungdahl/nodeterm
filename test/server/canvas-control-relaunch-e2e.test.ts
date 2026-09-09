@@ -243,7 +243,7 @@ printf 'FAKE_AGENT_REGISTERED_%s\\n' "$nt_code"
     }
   })
 
-  it('promotes a fake hand launch, preserves ownership, and recovers a stale-save card', async () => {
+  it('promotes a fake hand launch, preserves ownership, and leaves an attached tab’s card alone', async () => {
     // Capture the pre-create snapshot. The current Server protects its own save path; an older
     // external writer without backend guards can still publish this stale snapshot to disk.
     const staleBeforeSource = structuredClone(await loadWorkspace())
@@ -307,15 +307,43 @@ printf 'FAKE_AGENT_REGISTERED_%s\\n' "$nt_code"
     // treated as authorization. The next verified fake-agent hook is what performs recovery.
     expect(fs.existsSync(path.join(dataDir, 'node-tokens', SOURCE_ID))).toBe(true)
 
+    // This client is still attached to the pane, so the card is on ITS canvas and only its own
+    // save may publish it. A verified hook must therefore mint nothing — the recovery that used to
+    // run here relocated and renamed cards a browser tab had created seconds earlier.
     const recoveredHook = await runInPane(
       `${shellQuote(fakeAgent)}; printf 'RECOVERY_HOOK_DONE\\n'`,
       'RECOVERY_HOOK_DONE'
     )
     expect(recoveredHook).toContain('FAKE_AGENT_REGISTERED_204')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect((await loadWorkspace()).projects[0].nodes.some((node) => node.id === SOURCE_ID)).toBe(
+      false
+    )
+
+    const unsaved = await runInPane(
+      `sh ${shellQuote(shim)} rename --node ${shellQuote(SOURCE_ID)} --title ${shellQuote('Too soon')}` +
+        ` 2>&1; printf 'RENAME_EXIT_%s\\n' "$?"`,
+      'RENAME_EXIT_1'
+    )
+    expect(unsaved).toContain('source-node-unsaved')
+
+    // The attached tab's own save finally lands, carrying the card where the user left it and
+    // WITHOUT an agentId. Control still works, from the identity the hook made us remember.
+    const tabSave = structuredClone(await loadWorkspace())
+    tabSave.projects[0].nodes.push(terminal(SOURCE_ID, 'Hand relaunched', 0))
+    await rpc(IPC.workspaceSave, [tabSave])
+
+    const renamedAfterSave = await runInPane(
+      `sh ${shellQuote(shim)} rename --node ${shellQuote(SOURCE_ID)} --title ${shellQuote('Saved by its tab')}` +
+        ` 2>&1; printf 'RENAME_EXIT_%s\\n' "$?"`,
+      'RENAME_EXIT_0'
+    )
+    expect(renamedAfterSave).toContain(`renamed ${SOURCE_ID}`)
     await until(async () => {
       const workspace = await loadWorkspace()
       const source = workspace.projects[0].nodes.find((node) => node.id === SOURCE_ID)
-      return source?.agentId === 'claude' && source.title === 'Hand relaunched'
-    }, 'live missing-card recovery')
+      // Position 0,0 is where the tab saved it: nothing relocated the card to a recovery slot.
+      return source?.title === 'Saved by its tab' && source.position.x === 0 && source.position.y === 0
+    }, 'control of the card its own tab saved')
   }, 30_000)
 })

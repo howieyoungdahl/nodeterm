@@ -80,6 +80,12 @@ export interface HeadlessPty {
   sessionExists(persistKey: string): Promise<boolean>
   /** Strict recovery probe. Only `alive` may restore a card missing from the workspace. */
   sessionPresence?(persistKey: string): Promise<'alive' | 'dead' | 'unknown'>
+  /**
+   * Does a UI client still hold this node's pane? A card an attached client holds is on that
+   * client's canvas and will be persisted by that client's own save, so recovery must leave it
+   * alone. Optional: an unwired seam means "unknown", which keeps the pre-existing behaviour.
+   */
+  hasAttachedClient?(persistKey: string): boolean
   sendText(nodeId: string, text: string, opts?: { enter?: boolean }): Promise<boolean>
   destroySession(
     clientId: number | null,
@@ -748,6 +754,9 @@ export class HeadlessNodeFactory {
   private runtimeNodes = new Map<string, { projectId: string; node: CanvasNodeState }>()
   /** Keep the missing-card recovery warning to one line once per source. */
   private warnedRecoveredSources = new Set<string>()
+  /** Nodes already noted as "open in an attached client, not yet saved" — its own set, so a later
+   *  genuine recovery of the same node (client gone) still gets its restored-card warning. */
+  private notedUnsavedSources = new Set<string>()
   /**
    * Server-local `open-project` grants. The browser shell's grant ledger is process-local too,
    * but Server Edition has its own process and handler. A service restart deliberately clears
@@ -805,6 +814,16 @@ export class HeadlessNodeFactory {
     }
   }
 
+  /** The card exists on an attached client's canvas; only that client's own save can publish it. */
+  private sourceUnsavedError(nodeId: string): ServerControlReply {
+    return {
+      ok: false,
+      error:
+        `source-node-unsaved: ${nodeId} is open in a browser tab that has not saved ` +
+        'the canvas yet; retry in a few seconds'
+    }
+  }
+
   private async paneIsAlive(nodeId: string): Promise<boolean> {
     try {
       if (this.deps.ptyManager.sessionPresence) {
@@ -820,12 +839,29 @@ export class HeadlessNodeFactory {
    * Recover the one safe missing-card shape: this process saw a verified hook from the node, the
    * pane still exists, and the fresh-spawn provenance ledger names one loaded local project. The
    * project file alone can prove none of those facts, so it never participates in this decision.
+   *
+   * A card is only recoverable when no attached UI client can still save it. A pane with a live
+   * subscriber has a card on that client's canvas, and that client's debounced whole-file save
+   * will persist it; minting a replacement mid-race relocated and renamed cards the user had just
+   * created. `'attached'` reports that skip so callers can say so without re-probing.
    */
   private async recoverMissingSource(
     workspace: Workspace,
     nodeId: string,
     agentId: AgentId
-  ): Promise<{ project: Project; node: CanvasNodeState } | null> {
+  ): Promise<{ project: Project; node: CanvasNodeState } | 'attached' | null> {
+    // Before anything is built, including the remembered-runtime-node branch: a live tab's state
+    // beats any memory of ours.
+    if (this.deps.ptyManager.hasAttachedClient?.(nodeId)) {
+      if (!this.notedUnsavedSources.has(nodeId)) {
+        this.notedUnsavedSources.add(nodeId)
+        console.info(
+          `[server-canvas-control] source ${nodeId} is open in an attached client ` +
+            'but not yet saved; awaiting its save'
+        )
+      }
+      return 'attached'
+    }
     const projectId = this.deps.paneProjectOf?.(nodeId)
     const project = projectId
       ? workspace.projects.find((candidate) => candidate.id === projectId && !candidate.ssh)
@@ -878,6 +914,7 @@ export class HeadlessNodeFactory {
     const agentId = this.runtimeAgents.get(nodeId)
     if (agentId) {
       const recovered = await this.recoverMissingSource(workspace, nodeId, agentId)
+      if (recovered === 'attached') return this.sourceUnsavedError(nodeId)
       if (recovered) return recovered
     }
     return this.sourceProjectError(nodeId)
@@ -899,6 +936,8 @@ export class HeadlessNodeFactory {
       const matches = sourceProjects(workspace, nodeId)
       if (matches.length === 0) {
         const recovered = await this.recoverMissingSource(workspace, nodeId, runtimeAgent)
+        // 'attached' skipped the card entirely, but the agent identity is still real: remember it
+        // so the node is controllable the moment the client's own save lands.
         if (recovered) this.runtimeAgents.set(nodeId, runtimeAgent)
         return
       }
@@ -931,6 +970,7 @@ export class HeadlessNodeFactory {
       this.handLaunchedNodes.delete(id)
       this.runtimeNodes.delete(id)
       this.warnedRecoveredSources.delete(id)
+      this.notedUnsavedSources.delete(id)
       this.retryCount.delete(id)
       const timer = this.retryTimers.get(id)
       if (timer) (this.deps.clearSchedule ?? clearTimeout)(timer)
@@ -2526,5 +2566,6 @@ export class HeadlessNodeFactory {
     this.handLaunchedNodes.clear()
     this.runtimeNodes.clear()
     this.warnedRecoveredSources.clear()
+    this.notedUnsavedSources.clear()
   }
 }
