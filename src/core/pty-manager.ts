@@ -1041,14 +1041,37 @@ export class PtyManager {
    * ids and the server's `nextUiId` both only go up), so a client that comes back comes back as a
    * new id and creates its sessions afresh — there is no returning client to strand.
    */
+  /**
+   * The one "somebody is still watching this session" predicate, shared by the idle reap and
+   * `hasAttachedClient`. A relay sink is a watcher (somebody's phone is mirroring this session);
+   * a parked terminal is still a subscriber, and its client is still attached. `live` is the
+   * caller's snapshot of `platform().clientIds()` so a sweep computes it once.
+   */
+  private sessionIsWatched(session: Session, live: ReadonlySet<ClientId>): boolean {
+    return !!session.onData || [...session.subscribers].some((sub) => live.has(subClient(sub)))
+  }
+
+  /**
+   * Does a UI client still hold this node's session? Synchronous and probe-free: it answers only
+   * from this process's own index, so it is safe to consult on a hot path.
+   *
+   * A card whose pane has an attached client is on that client's canvas, and that client's own
+   * save will persist it — which is why the Server Edition's missing-card recovery must not mint
+   * a replacement card for such a node (that relocated and renamed cards a browser tab had just
+   * created but not yet autosaved). Unknown sessions answer `false`: no client is known to hold
+   * them, which is the real lost-card case recovery exists for.
+   */
+  hasAttachedClient(persistKey: string): boolean {
+    const session = this.liveSessionForPersistKey(persistKey)
+    if (!session) return false
+    return this.sessionIsWatched(session, new Set(platform().clientIds()))
+  }
+
   private reapTick(): void {
     const live = new Set(platform().clientIds())
     const now = Date.now()
     for (const [sessionId, session] of [...this.sessions]) {
-      // A relay sink is a watcher (somebody's phone is mirroring this session); a parked terminal
-      // is still a subscriber, and its client is still attached.
-      const watched =
-        !!session.onData || [...session.subscribers].some((sub) => live.has(subClient(sub)))
+      const watched = this.sessionIsWatched(session, live)
       if (watched) session.unwatchedSince = null
       else session.unwatchedSince ??= now
       const reap = shouldReap(

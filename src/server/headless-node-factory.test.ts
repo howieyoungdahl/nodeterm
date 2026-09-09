@@ -39,6 +39,8 @@ class FakePty implements HeadlessPty {
   readonly live = new Set<string>()
   readonly alreadyDead = new Set<string>()
   readonly paneProjects = new Map<string, string>()
+  /** Node ids whose pane a UI client still holds — that client's own save owns the card. */
+  readonly attachedClients = new Set<string>()
 
   async createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult> {
     this.creates.push(options)
@@ -55,6 +57,10 @@ class FakePty implements HeadlessPty {
 
   async sessionPresence(persistKey: string): Promise<'alive' | 'dead'> {
     return this.live.has(persistKey) ? 'alive' : 'dead'
+  }
+
+  hasAttachedClient(persistKey: string): boolean {
+    return this.attachedClients.has(persistKey)
   }
 
   async sendText(nodeId: string, text: string): Promise<boolean> {
@@ -242,6 +248,9 @@ describe('HeadlessNodeFactory', () => {
     const opened = await factory.openTerminal('term-source', {}, true)
     const nodeId = (opened.result as { id: string }).id
     expect(pty.live.has(nodeId)).toBe(true)
+    // The card is genuinely lost, not merely unsaved: no UI client holds this pane, so nobody
+    // else is going to write it back. That is the only shape recovery may act on.
+    expect(pty.hasAttachedClient(nodeId)).toBe(false)
     await store.save(staleBrowserSnapshot)
     expect((await store.load({ sideline: false })).projects[0].nodes
       .some((node) => node.id === nodeId)).toBe(false)
@@ -266,6 +275,76 @@ describe('HeadlessNodeFactory', () => {
       ok: false,
       error: expect.stringMatching(/owner/i)
     })
+  })
+
+  it('never mints a replacement card for a pane an attached client still holds', async () => {
+    // Same race as above, but the spawning tab is still open: its debounced whole-file save has
+    // simply not landed yet. Recovery here relocated and renamed the card the user had just made.
+    const staleBrowserSnapshot = await store.load({ sideline: false })
+    const opened = await factory.openTerminal('term-source', {}, true)
+    const nodeId = (opened.result as { id: string }).id
+    await store.save(staleBrowserSnapshot)
+    const before = (await store.load({ sideline: false })).projects[0].nodes
+    expect(before.some((node) => node.id === nodeId)).toBe(false)
+
+    pty.attachedClients.add(nodeId)
+    published.length = 0
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    await factory.onHookRegistration('claude', nodeId, true)
+    await factory.onHookRegistration('claude', nodeId, true)
+
+    const after = (await store.load({ sideline: false })).projects[0].nodes
+    expect(after).toHaveLength(before.length)
+    expect(after.some((node) => node.id === nodeId)).toBe(false)
+    expect(published).toEqual([])
+    const lines = info.mock.calls.filter(
+      ([message]) => typeof message === 'string' && message.includes(nodeId)
+    )
+    expect(lines).toHaveLength(1)
+    expect(String(lines[0][0])).toContain('attached client')
+    info.mockRestore()
+  })
+
+  it('names an unsaved open-tab source instead of blaming its project', async () => {
+    const nodeId = 'term-live-in-open-tab'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    pty.attachedClients.add(nodeId)
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    await factory.onHookRegistration('claude', nodeId, true)
+
+    await expect(factory.openTerminal(nodeId, {}, true)).resolves.toEqual({
+      ok: false,
+      error:
+        `source-node-unsaved: ${nodeId} is open in a browser tab that has not saved ` +
+        'the canvas yet; retry in a few seconds'
+    })
+    info.mockRestore()
+  })
+
+  it('controls the skipped source once its own tab saves it, leaving the card where it sat', async () => {
+    const nodeId = 'term-live-in-open-tab'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    pty.attachedClients.add(nodeId)
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    await factory.onHookRegistration('claude', nodeId, true)
+
+    // The tab's debounced save finally lands, carrying the card the user placed and titled. The
+    // browser never wrote an agentId, so control has to come from the identity we remembered.
+    const workspace = await store.load({ sideline: false })
+    const asTheUserLeftIt = terminal(nodeId, 'Where the user put it', 'claude', 1500)
+    delete asTheUserLeftIt.agentId
+    workspace.projects[0].nodes.push(asTheUserLeftIt)
+    await store.save(workspace)
+
+    await expect(factory.openTerminal(nodeId, {}, true)).resolves.toMatchObject({ ok: true })
+    expect((await store.load({ sideline: false })).projects[0].nodes
+      .find((node) => node.id === nodeId)).toMatchObject({
+      title: 'Where the user put it',
+      position: { x: 1500, y: 30 }
+    })
+    info.mockRestore()
   })
 
   it('promotes an existing plain terminal only from a verified hook registration', async () => {
