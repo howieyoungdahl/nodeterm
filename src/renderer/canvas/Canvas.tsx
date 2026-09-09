@@ -3609,12 +3609,21 @@ export function Canvas() {
       console.info(
         `[nodeterm] node-create agent=- project=${targetProjectId} group=${groupId ?? '-'} cwd=${cwd ?? '-'}`
       )
-      setNodes((ns) => {
-        // In an SSH project the node is stamped remote (runs over the project's master); the
-        // factory takes the project's ssh and roots the terminal at its remoteCwd.
-        const node = createTerminalNode(ns.length, cwd, center ?? emptyNodePos(), initialCommand, project?.ssh)
-        return [...ns, groupId ? parentInto(node, groupId) : node]
-      })
+      // In an SSH project the node is stamped remote (runs over the project's master); the
+      // factory takes the project's ssh and roots the terminal at its remoteCwd.
+      // Minted HERE, never inside the updater: React may run an updater more than once (it
+      // re-applies a queued update when it rebases it against a pending lower-priority one),
+      // and a second createTerminalNode() would mint a SECOND node that replaces the first —
+      // whose pane had already spawned, so it leaks with no delete change and no pty.kill.
+      // `nodesRef.current` is the committed node list, which is what `ns.length` read here.
+      const node = createTerminalNode(
+        nodesRef.current.length,
+        cwd,
+        center ?? emptyNodePos(),
+        initialCommand,
+        project?.ssh
+      )
+      setNodes((ns) => [...ns, groupId ? parentInto(node, groupId) : node])
       markDirty()
       requestSaveFlush()
     },
@@ -3772,15 +3781,14 @@ export function Canvas() {
         focusNodeRef.current(existing.id)
         return
       }
-      setNodes((ns) => [
-        ...ns.map((n) => (n.selected ? { ...n, selected: false } : n)),
-        {
-          ...(isVideoFile(filePath)
-            ? createVideoNode(ns.length, filePath, center ?? viewCenter(), sshFs)
-            : createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)),
-          selected: true
-        }
-      ])
+      const index = nodesRef.current.length
+      const node = {
+        ...(isVideoFile(filePath)
+          ? createVideoNode(index, filePath, center ?? viewCenter(), sshFs)
+          : createEditorNode(index, filePath, center ?? viewCenter(), sshFs)),
+        selected: true
+      }
+      setNodes((ns) => [...ns.map((n) => (n.selected ? { ...n, selected: false } : n)), node])
       markDirty()
     },
     [setNodes, markDirty, viewCenter]
@@ -4000,7 +4008,8 @@ export function Canvas() {
     (relPath: string, staged: boolean, scopeCwd?: string) => {
       const cwd = scmCwd(scopeCwd)
       if (!cwd) return
-      setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, staged, viewCenter())])
+      const node = createDiffNode(nodesRef.current.length, cwd, relPath, staged, viewCenter())
+      setNodes((ns) => [...ns, node])
       markDirty()
     },
     [setNodes, markDirty, scmCwd, viewCenter]
@@ -4011,7 +4020,15 @@ export function Canvas() {
     (relPath: string, commitOid: string, scopeCwd?: string) => {
       const cwd = scmCwd(scopeCwd)
       if (!cwd) return
-      setNodes((ns) => [...ns, createDiffNode(ns.length, cwd, relPath, false, viewCenter(), commitOid)])
+      const node = createDiffNode(
+        nodesRef.current.length,
+        cwd,
+        relPath,
+        false,
+        viewCenter(),
+        commitOid
+      )
+      setNodes((ns) => [...ns, node])
       markDirty()
     },
     [setNodes, markDirty, scmCwd, viewCenter]
@@ -4039,24 +4056,22 @@ export function Canvas() {
         project,
         useSettings.getState().settings.claudeAccounts
       )
-      setNodes((ns) => [
-        ...ns,
-        createAgentNode(
-          'claude',
-          ns.length,
-          // Same scope resolution as every other Source Control action (`scmCwd`): the panel's
-          // active scope, an SSH project's remoteCwd, else the project's own checkout.
-          scmCwd(scopeCwd),
-          viewCenter(),
-          prompt,
-          undefined,
-          account,
-          activePermissionMode(),
-          // The owning project, for its own `.nodeterm/settings.json` launch command — the same
-          // project the account/cwd above are resolved from.
-          targetProjectId
-        )
-      ])
+      const node = createAgentNode(
+        'claude',
+        nodesRef.current.length,
+        // Same scope resolution as every other Source Control action (`scmCwd`): the panel's
+        // active scope, an SSH project's remoteCwd, else the project's own checkout.
+        scmCwd(scopeCwd),
+        viewCenter(),
+        prompt,
+        undefined,
+        account,
+        activePermissionMode(),
+        // The owning project, for its own `.nodeterm/settings.json` launch command — the same
+        // project the account/cwd above are resolved from.
+        targetProjectId
+      )
+      setNodes((ns) => [...ns, node])
       markDirty()
     },
     [setNodes, markDirty, viewCenter, scmCwd]
@@ -4139,10 +4154,8 @@ export function Canvas() {
 
   const addSticky = useCallback(
     (center?: { x: number; y: number }, groupId?: string) => {
-      setNodes((ns) => {
-        const node = createStickyNode(ns.length, center ?? emptyNodePos())
-        return [...ns, groupId ? parentInto(node, groupId) : node]
-      })
+      const node = createStickyNode(nodesRef.current.length, center ?? emptyNodePos())
+      setNodes((ns) => [...ns, groupId ? parentInto(node, groupId) : node])
       markDirty()
     },
     [setNodes, markDirty, emptyNodePos, parentInto]
@@ -4153,13 +4166,14 @@ export function Canvas() {
       // Seed with the project record, maxed with any live dino nodes (pre-record projects
       // only carry the score in node data).
       const record = useProjects.getState().getProject(activeProjectId)?.dinoHighScore ?? 0
-      setNodes((ns) => {
-        const liveBest = Math.max(
-          record,
-          ...ns.filter((n) => n.type === 'dino').map((n) => (n.data.highScore as number) ?? 0)
-        )
-        return [...ns, createDinoNode(ns.length, center ?? viewCenter(), liveBest)]
-      })
+      const liveBest = Math.max(
+        record,
+        ...nodesRef.current
+          .filter((n) => n.type === 'dino')
+          .map((n) => (n.data.highScore as number) ?? 0)
+      )
+      const node = createDinoNode(nodesRef.current.length, center ?? viewCenter(), liveBest)
+      setNodes((ns) => [...ns, node])
       markDirty()
     },
     [setNodes, markDirty, viewCenter, activeProjectId]
@@ -4170,7 +4184,8 @@ export function Canvas() {
       const input = await promptDialog({ message: 'Open web view — enter a URL:' })
       const url = input?.trim()
       if (!url) return
-      setNodes((ns) => [...ns, createWebNode(ns.length, { url }, center ?? emptyNodePos())])
+      const node = createWebNode(nodesRef.current.length, { url }, center ?? emptyNodePos())
+      setNodes((ns) => [...ns, node])
       markDirty()
     },
     [setNodes, markDirty, emptyNodePos]
@@ -4181,7 +4196,8 @@ export function Canvas() {
       // Open a blank browser node — the user types the URL in the node's own address bar (like a
       // browser's new tab). We deliberately don't use window.prompt: Electron doesn't support it
       // (it throws "prompt() is and will not be supported"), and a browser node doesn't need it.
-      setNodes((ns) => [...ns, createBrowserNode(ns.length, '', center ?? emptyNodePos())])
+      const node = createBrowserNode(nodesRef.current.length, '', center ?? emptyNodePos())
+      setNodes((ns) => [...ns, node])
       markDirty()
     },
     [setNodes, markDirty, emptyNodePos]
@@ -4212,10 +4228,11 @@ export function Canvas() {
         if (!project) return // defensive: mismatched/disconnected remote login — never spawn locally
         ssh = project.ssh
       }
-      setNodes((ns) => [
-        ...ns.map((n) => ({ ...n, selected: false })),
-        { ...createAccountLoginNode(accountId, ns.length, viewCenter(), ssh), selected: true }
-      ])
+      const node = {
+        ...createAccountLoginNode(accountId, nodesRef.current.length, viewCenter(), ssh),
+        selected: true
+      }
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
       markDirty()
       // The event fires from the full-screen Settings overlay — close it so the user actually
       // sees the login node (it spawns at viewCenter, selected). The defensive return above
@@ -4237,10 +4254,11 @@ export function Canvas() {
     const onAddCodexAccountLogin = (ev: Event): void => {
       const accountId = (ev as CustomEvent<{ accountId?: string }>).detail?.accountId
       if (!accountId) return
-      setNodes((ns) => [
-        ...ns.map((n) => ({ ...n, selected: false })),
-        { ...createCodexAccountLoginNode(accountId, ns.length, viewCenter()), selected: true }
-      ])
+      const node = {
+        ...createCodexAccountLoginNode(accountId, nodesRef.current.length, viewCenter()),
+        selected: true
+      }
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
       markDirty()
       // Same reason as the Claude branch: the event fires from the full-screen Settings overlay,
       // which would otherwise hide the login node the user has to interact with.
@@ -4259,10 +4277,8 @@ export function Canvas() {
   // the only machine whose ~/.claude the action claims to switch.
   useEffect(() => {
     const onSwitchSystemAccount = (): void => {
-      setNodes((ns) => [
-        ...ns.map((n) => ({ ...n, selected: false })),
-        { ...createSystemLoginNode(ns.length, viewCenter()), selected: true }
-      ])
+      const node = { ...createSystemLoginNode(nodesRef.current.length, viewCenter()), selected: true }
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
       markDirty()
       // The popover is reachable from over the kanban board too (`overBoard`) — leave the board
       // so the user actually sees the login node they must interact with. Same rationale as the
@@ -4355,22 +4371,20 @@ export function Canvas() {
       console.info(
         `[nodeterm] node-create agent=${agentId} project=${targetProjectId} group=${groupId ?? '-'} cwd=${cwd ?? '-'}`
       )
-      setNodes((ns) => {
-        const node = createAgentNode(
-          agentId,
-          ns.length,
-          cwd,
-          center ?? emptyNodePos(),
-          initialPrompt,
-          project?.ssh,
-          account,
-          activePermissionMode(agentId),
-          // Same funnel as the account above: the active project owns the node, so its own
-          // `.nodeterm/settings.json` launch command layers over the global one.
-          targetProjectId
-        )
-        return [...ns, groupId ? parentInto(node, groupId) : node]
-      })
+      const node = createAgentNode(
+        agentId,
+        nodesRef.current.length,
+        cwd,
+        center ?? emptyNodePos(),
+        initialPrompt,
+        project?.ssh,
+        account,
+        activePermissionMode(agentId),
+        // Same funnel as the account above: the active project owns the node, so its own
+        // `.nodeterm/settings.json` launch command layers over the global one.
+        targetProjectId
+      )
+      setNodes((ns) => [...ns, groupId ? parentInto(node, groupId) : node])
       markDirty()
       requestSaveFlush()
     },
@@ -4418,10 +4432,8 @@ export function Canvas() {
   const addSshTerminal = useCallback(
     (server: SshServer, screenPos?: { x: number; y: number }) => {
       const at = screenPos ? screenToFlowPosition(screenPos) : emptyNodePos()
-      setNodes((ns) => [
-        ...ns.map((n) => ({ ...n, selected: false })),
-        { ...createSshTerminalNode(server, ns.length, at), selected: true }
-      ])
+      const node = { ...createSshTerminalNode(server, nodesRef.current.length, at), selected: true }
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
       markDirty()
       requestSaveFlush()
     },
