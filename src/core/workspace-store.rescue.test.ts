@@ -226,6 +226,9 @@ describe('save receipts', () => {
     const second = receipts(info)
     expect(second).toHaveLength(1)
     expect(second[0]).toContain('ui:4 saved p1 rev 2: +term-3 -term-1 (2 nodes)')
+    // The timing suffix is what makes a "card minted, receipt seconds later" report diagnosable:
+    // queueing behind an earlier save vs. the write itself.
+    expect(second[0]).toMatch(/\(queued \d+ ms, wrote in \d+ ms\)$/)
   })
 
   it('says nothing for a write that only moves or renames cards', async () => {

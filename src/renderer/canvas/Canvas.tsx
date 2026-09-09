@@ -141,7 +141,7 @@ import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunc
 import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
-import { useAutosave, useSavePersistence } from '../lib/useSavePersistence'
+import { useAutosave, useCreateFlush, useSavePersistence } from '../lib/useSavePersistence'
 import { SaveFailureBar } from '../components/SaveFailureBar'
 import {
   adoptedNodesNotice,
@@ -2679,6 +2679,17 @@ export function Canvas() {
   // resolving it (either button clears it) re-arms the save.
   useAutosave(dirty, !!conflict, persist, resaveTick, saveDelivery)
 
+  // Creating a terminal-backed card ALSO flushes the save immediately, on top of the debounce
+  // above: a brand-new card was otherwise not on disk for at least 800ms (4.5s to 55s in the
+  // field), and every server-side decision that reads the file — agent-hook recovery,
+  // canvas-control source resolution — raced it. Same conflict gate as the debounce, so the
+  // flush can never bypass the bar's "keep mine or reload" choice.
+  const flushSave = useCreateFlush(persist, !conflict)
+  /** Ask for that flush. A no-op during a programmatic load, mirroring `markDirty`. */
+  const requestSaveFlush = useCallback(() => {
+    if (!loadingRef.current) flushSave()
+  }, [flushSave])
+
   // ---- remote canvas mirror (phone host side) ----
   // While phone access is on, push the serialized active-project canvas to main (debounced ~120ms)
   // on every change, so the connected phone mirrors the layout (main's host-canvas-hub feeds the
@@ -3605,8 +3616,9 @@ export function Canvas() {
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
       markDirty()
+      requestSaveFlush()
     },
-    [setNodes, markDirty, emptyNodePos, cwdForNewNodeIn, parentInto]
+    [setNodes, markDirty, requestSaveFlush, emptyNodePos, cwdForNewNodeIn, parentInto]
   )
 
   /** Open a new terminal that runs a command on start (e.g. gh auth login). `cwd` lets a caller
@@ -4360,10 +4372,12 @@ export function Canvas() {
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
       markDirty()
+      requestSaveFlush()
     },
     [
       setNodes,
       markDirty,
+      requestSaveFlush,
       emptyNodePos,
       cwdForNewNodeIn,
       parentInto,
@@ -4409,8 +4423,9 @@ export function Canvas() {
         { ...createSshTerminalNode(server, ns.length, at), selected: true }
       ])
       markDirty()
+      requestSaveFlush()
     },
-    [setNodes, markDirty, screenToFlowPosition, emptyNodePos]
+    [setNodes, markDirty, requestSaveFlush, screenToFlowPosition, emptyNodePos]
   )
 
   // Open the SSH server picker. Remote SSH terminals are free (Core).
@@ -8206,6 +8221,9 @@ export function Canvas() {
         useProjects.getState().setProjectKanban(targetProjectId, assignNode(board, node.id, columnId, null))
       }
       markDirty()
+      // Only the terminal-backed kinds flush: a sticky or a browser card has no session for a
+      // server-side recovery or source lookup to race, so it rides the ordinary debounce.
+      if (choice.kind !== 'sticky' && choice.kind !== 'browser') requestSaveFlush()
       // Log card-created directly here — the assignment above is written straight to the store
       // (not via onKanbanChange), so its diff never runs and never double-logs a card-moved.
       const toName = columnId
@@ -8229,7 +8247,7 @@ export function Canvas() {
         event: { type: 'card-created', to: toName, title }
       })
     },
-    [emptyNodePos, setNodes, markDirty, seedBoard, api]
+    [emptyNodePos, setNodes, markDirty, requestSaveFlush, seedBoard, api]
   )
 
   // Delete a session from the board — same confirm + teardown as the canvas Delete key.
