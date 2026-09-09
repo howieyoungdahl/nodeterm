@@ -881,12 +881,24 @@ export class WorkspaceStore {
   private saveChain: Promise<unknown> = Promise.resolve()
 
   save(workspace: Workspace, opts?: { client?: string }): Promise<void> {
-    const run = this.saveChain.then(() => this.saveNow(workspace, opts?.client ?? 'internal'))
+    // Stamped BEFORE the chain hop, so the receipt can report how long this save waited behind
+    // the saves already queued ahead of it — the "card minted, receipt 55 s later" field reports
+    // never said whether the lag was queueing or the write itself.
+    const enqueuedAt = Date.now()
+    const run = this.saveChain.then(() =>
+      this.saveNow(workspace, opts?.client ?? 'internal', enqueuedAt)
+    )
     this.saveChain = run.catch(() => {})
     return run
   }
 
-  private async saveNow(workspace: Workspace, client = 'internal'): Promise<void> {
+  private async saveNow(
+    workspace: Workspace,
+    client = 'internal',
+    enqueuedAt = Date.now()
+  ): Promise<void> {
+    const startedAt = Date.now()
+    const queuedMs = startedAt - enqueuedAt
     if (!workspace.projects.length && !this.index) {
       // A store that never read the index may not replace a populated one with "no projects":
       // that is the boot-save wipe — load() failed transiently, the renderer hydrated zero
@@ -982,7 +994,10 @@ export class WorkspaceStore {
         await writeAtomic(file, content)
         this.lastWritten.set(file, content)
         this.revs.set(projectId, next.rev)
-        logNodeSetChange(client, projectId, next, prevParsed)
+        logNodeSetChange(client, projectId, next, prevParsed, {
+          queuedMs,
+          wroteMs: Date.now() - startedAt
+        })
       } catch (cause) {
         // Keep saving the other projects and the index, but never acknowledge a partial save as
         // durable. Otherwise the renderer clears dirty and new cards vanish on refresh.
@@ -1717,7 +1732,9 @@ function logNodeSetChange(
   client: string,
   projectId: string,
   next: ProjectFileV1,
-  prev: ProjectFileV1 | null
+  prev: ProjectFileV1 | null,
+  /** queued = save() call → saveNow start (chain wait); wrote = saveNow start → this writeAtomic. */
+  timing: { queuedMs: number; wroteMs: number }
 ): void {
   const before = new Set((prev?.nodes ?? []).map((n) => n.id))
   const after = new Set(next.nodes.map((n) => n.id))
@@ -1731,7 +1748,8 @@ function logNodeSetChange(
     .filter(Boolean)
     .join(' ')
   console.info(
-    `[workspace] ${client} saved ${projectId} rev ${next.rev}: ${delta} (${next.nodes.length} nodes)`
+    `[workspace] ${client} saved ${projectId} rev ${next.rev}: ${delta} (${next.nodes.length} nodes)` +
+      ` (queued ${timing.queuedMs} ms, wrote in ${timing.wroteMs} ms)`
   )
 }
 

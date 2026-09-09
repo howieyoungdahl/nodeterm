@@ -3,7 +3,7 @@ import { act, useCallback, useEffect, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SaveFailureBar } from '../components/SaveFailureBar'
-import { useAutosave, useSavePersistence } from './useSavePersistence'
+import { useAutosave, useCreateFlush, useSavePersistence } from './useSavePersistence'
 
 let root: Root
 let container: HTMLDivElement
@@ -43,6 +43,48 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+
+let requestFlush!: () => void
+function FlushHarness({ persist, enabled = true }: {
+  persist: () => Promise<void>; enabled?: boolean
+}) {
+  requestFlush = useCreateFlush(persist, enabled)
+  return <span>flush</span>
+}
+
+describe('save flush on card creation', () => {
+  it('saves once per request, and never merely because the component re-rendered', async () => {
+    const persist = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+    await act(async () => root.render(<FlushHarness persist={persist} />))
+    expect(persist).toHaveBeenCalledTimes(0) // mounting is not a request
+    await act(async () => requestFlush())
+    expect(persist).toHaveBeenCalledTimes(1)
+    // A fresh `persist` identity (Canvas rebuilds the callback on most edits) must not replay it.
+    await act(async () => root.render(<FlushHarness persist={async () => persist()} />))
+    expect(persist).toHaveBeenCalledTimes(1)
+    await act(async () => requestFlush())
+    expect(persist).toHaveBeenCalledTimes(2)
+  })
+
+  it('never saves while disabled', async () => {
+    const persist = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+    await act(async () => root.render(<FlushHarness persist={persist} enabled={false} />))
+    await act(async () => requestFlush())
+    await advance(60_000)
+    expect(persist).toHaveBeenCalledTimes(0)
+  })
+
+  it('drops a request made while disabled instead of queueing it until re-enabled', async () => {
+    const persist = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+    await act(async () => root.render(<FlushHarness persist={persist} enabled={false} />))
+    await act(async () => requestFlush())
+    await act(async () => root.render(<FlushHarness persist={persist} />))
+    await advance(60_000)
+    expect(persist).toHaveBeenCalledTimes(0) // the conflict bar's suspension is not a backlog
+    await act(async () => requestFlush())
+    expect(persist).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('workspace persistence in a mounted canvas', () => {
   it('retries a disconnected save without another edit and clears the warning only after success', async () => {
