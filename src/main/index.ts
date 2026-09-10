@@ -1730,8 +1730,8 @@ app.whenReady().then(async () => {
   // workspace that no longer holds it) is free to be re-claimed; one whose owner is still there is
   // not, and the launcher then falls back rather than putting two clients on one conversation.
   const codexNodeIsLive = (nodeId: string): boolean => !!workspaceStore.getNode(nodeId)
-  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint, accountId }) => {
-    const threadId = await startCodexThread(cwd)
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint, accountId, permissions }) => {
+    const threadId = await startCodexThread(cwd, permissions)
     writeCodexThreadIdentity(threadId, nodeId, hookEndpoint, undefined, accountId)
     return threadId
   })

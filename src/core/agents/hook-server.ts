@@ -14,6 +14,7 @@ import type { NodeTokenVerdict } from './node-auth-token'
 import { nodeTokenDir } from './node-token-files'
 import { isForeignKidToken, isSafeNodeId, verifyNodeToken } from './node-auth-token'
 import { isSafeThreadId } from '../codex-identity-proxy'
+import { parseCodexThreadPermissions, type CodexThreadPermissions } from '../codex-session-name'
 import { isSafeAccountId } from '../../shared/codex-account'
 import {
   controlPolicy,
@@ -320,6 +321,8 @@ class HookServer {
         cwd: string
         hookEndpoint: string
         accountId?: string
+        /** The policy the thread is born with — see `CodexThreadPermissions` for why it is not argv. */
+        permissions?: CodexThreadPermissions
       }) => Promise<string>)
     | null = null
   private codexThreadBindHandler:
@@ -1006,13 +1009,26 @@ class HookServer {
         res.end()
         return
       }
+      // The launcher lifts `--yolo` / `-a` / `-s` / `-c approval_policy=` off its argv and posts them
+      // here, because a `--remote` TUI can no longer carry them (codex-cli 0.154.0). Closed enums,
+      // refused at 400 BEFORE the handler — a bad value must not mint a thread nothing will resume.
+      const permissions = parseCodexThreadPermissions({
+        approvalPolicy: form.approvalPolicy,
+        sandbox: form.sandbox
+      })
+      if (!permissions) {
+        res.writeHead(400)
+        res.end()
+        return
+      }
       try {
         if (!this.codexThreadStartHandler) throw new Error('start handler unavailable')
         const threadId = await this.codexThreadStartHandler({
           nodeId,
           cwd,
           hookEndpoint: this.endpointFilePath(),
-          accountId
+          accountId,
+          permissions
         })
         // Same predicate the record store gates on, so a thread id the store would refuse can
         // never be handed back to a launcher that will then `resume` it.

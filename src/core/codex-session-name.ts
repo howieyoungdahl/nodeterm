@@ -343,6 +343,57 @@ export function codexThreadExists(threadId: string): Promise<boolean> {
 }
 
 /**
+ * The permission axes a canvas Codex node can start with, in the app-server's own vocabulary
+ * (`ThreadStartParams.approvalPolicy` / `.sandbox`, codex-cli 0.154.0 `generate-json-schema`).
+ *
+ * They travel HERE, on `thread/start` and the `thread/fork` that yields the node's thread, and NOT
+ * on the TUI's argv: since codex-cli 0.154.0 a `--remote` client refuses every permission override
+ * on resume ("Permission overrides are not supported when resuming a remote task"), and every
+ * managed node IS a `--remote unix:// resume` (core/codex-identity-proxy.ts). `-c approval_policy=`
+ * is refused the same way, so there is no argv spelling left; the thread has to be born with the
+ * policy. Plain-codex fallbacks keep taking the flags on argv, where they still work.
+ *
+ * Closed lists on purpose: both values reach a JSON-RPC call on the shared daemon from a form
+ * field a launcher POSTed, so anything outside the enum is refused at the route, never forwarded.
+ */
+export const CODEX_APPROVAL_POLICIES = ['untrusted', 'on-request', 'never'] as const
+export const CODEX_SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
+export type CodexApprovalPolicy = (typeof CODEX_APPROVAL_POLICIES)[number]
+export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number]
+export interface CodexThreadPermissions {
+  approvalPolicy?: CodexApprovalPolicy
+  sandbox?: CodexSandboxMode
+}
+
+const isCodexApprovalPolicy = (v: string): v is CodexApprovalPolicy =>
+  (CODEX_APPROVAL_POLICIES as readonly string[]).includes(v)
+const isCodexSandboxMode = (v: string): v is CodexSandboxMode =>
+  (CODEX_SANDBOX_MODES as readonly string[]).includes(v)
+
+/**
+ * Validate the two optional permission fields of a `/codex-thread/start` form. An absent or empty
+ * field means "the daemon's own default" and is simply omitted; a present value outside the enum
+ * is a refusal (`null`), so the route answers 400 before any thread exists.
+ */
+export function parseCodexThreadPermissions(form: {
+  approvalPolicy?: string
+  sandbox?: string
+}): CodexThreadPermissions | null {
+  const out: CodexThreadPermissions = {}
+  const approval = form.approvalPolicy ?? ''
+  if (approval !== '') {
+    if (!isCodexApprovalPolicy(approval)) return null
+    out.approvalPolicy = approval
+  }
+  const sandbox = form.sandbox ?? ''
+  if (sandbox !== '') {
+    if (!isCodexSandboxMode(sandbox)) return null
+    out.sandbox = sandbox
+  }
+  return out
+}
+
+/**
  * Create one new, immediately RESUMABLE thread on the shared app-server and return its id.
  *
  * `thread/start` alone only creates app-server metadata: it deliberately does not materialize the
@@ -355,18 +406,20 @@ export function codexThreadExists(threadId: string): Promise<boolean> {
 export async function startCodexThreadAt(
   socketPath: string,
   cwd: string,
-  timeoutMs = CODEX_THREAD_START_TIMEOUT_MS
+  timeoutMs = CODEX_THREAD_START_TIMEOUT_MS,
+  permissions: CodexThreadPermissions = {}
 ): Promise<string> {
   // Same cold-socket window as the bind check: `daemon start` has exited, the socket may still be
   // binding. Bounded (~600 ms) and charged against the 20 s budget below, which has room for it.
   await waitForCodexAppServer(socketPath)
-  return startCodexThreadOnce(socketPath, cwd, timeoutMs)
+  return startCodexThreadOnce(socketPath, cwd, timeoutMs, permissions)
 }
 
 function startCodexThreadOnce(
   socketPath: string,
   cwd: string,
-  timeoutMs: number
+  timeoutMs: number,
+  permissions: CodexThreadPermissions
 ): Promise<string> {
   if (!path.isAbsolute(cwd) || cwd.includes('\0')) {
     return Promise.reject(new Error('Unsupported Codex thread cwd'))
@@ -438,7 +491,9 @@ function startCodexThreadOnce(
         JSON.stringify({
           id: 5,
           method: 'thread/fork',
-          params: { threadId, beforeTurnId: bootstrapTurnId, cwd, ephemeral: false }
+          // The fork IS the thread the node resumes, so the policy rides here as well as on the
+          // seed: a fork that fell back to the daemon's config default would silently drop it.
+          params: { threadId, beforeTurnId: bootstrapTurnId, cwd, ephemeral: false, ...permissions }
         })
       )
     }
@@ -455,7 +510,7 @@ function startCodexThreadOnce(
           return
         }
         ws.send(JSON.stringify({ method: 'initialized' }))
-        ws.send(JSON.stringify({ id: 2, method: 'thread/start', params: { cwd } }))
+        ws.send(JSON.stringify({ id: 2, method: 'thread/start', params: { cwd, ...permissions } }))
       } else if (message.id === 2) {
         const startedThreadId = message.result?.thread?.id
         if (
@@ -530,8 +585,11 @@ function startCodexThreadOnce(
   })
 }
 
-export function startCodexThread(cwd: string): Promise<string> {
-  return startCodexThreadAt(defaultCodexAppServerSocket(), cwd)
+export function startCodexThread(
+  cwd: string,
+  permissions: CodexThreadPermissions = {}
+): Promise<string> {
+  return startCodexThreadAt(defaultCodexAppServerSocket(), cwd, undefined, permissions)
 }
 
 /**
