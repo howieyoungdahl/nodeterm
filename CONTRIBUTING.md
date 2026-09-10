@@ -203,6 +203,11 @@ loop an unrelated client error, and never replay the original prompt after recon
 responsive daemon before invoking lifecycle repair; stale PID bookkeeping is not permission to kill
 working sessions. See `docs/shared-codex-node-identity.md`.
 
+An explicit Codex full-access launch must use the named `:danger-full-access` profile on thread
+creation and fork. A legacy `sandbox: danger-full-access` response looks correct while loaded,
+but Codex 0.153.4/0.154.0 can restore the project sandbox on a later reload. Verify permissions
+after reloading the saved thread in a separate disposable app-server process.
+
 **Credentials never ride argv — local or SSH.** Not a tmux `-e` pair, not `curl -H`, not a remote
 command string. `/proc/<pid>/cmdline` is mode 444 on a stock Linux, and a remote command line is argv
 on the host too: we shipped the hook bearer that way and any other account on the machine could read

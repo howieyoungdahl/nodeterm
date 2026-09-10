@@ -517,6 +517,12 @@ Lifecycle, by intent:
   isolated in `server/codex-shared-identity.ts` and behavior-tested. The old Server Edition
   "deliberate plain Codex" answer bypassed the launcher entirely, so a reconnect implementation in
   the launcher could be perfectly green while every headless pane still fell back to its shell.
+  Full-access permission flags select the named `:danger-full-access` profile on both thread
+  creation and fork. Codex 0.153.4/0.154.0 persists the legacy disabled profile but restores the
+  repository sandbox on a cold reload unless the named selection is present. Approval policy
+  survives separately, so the failure can yield workspace sandboxing with approvals disabled.
+  The opt-in real-Codex permission test uses a disposable home and separate app-server processes;
+  same-process start/resume assertions cannot detect this failure.
 - **"Restart agent (resume)"** → deliberately NOT a session lifecycle event: `terminal/
   agent-restart.ts` restarts the agent CLI *inside* the pane and leaves the PTY, the tmux session
   and its scrollback untouched. It exists for **new-model pickup** — a freshly released model only

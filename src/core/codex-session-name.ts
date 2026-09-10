@@ -365,6 +365,20 @@ export interface CodexThreadPermissions {
   sandbox?: CodexSandboxMode
 }
 
+/** A legacy full-access sandbox is lost when Codex 0.153.4/0.154.0 reloads a thread:
+ * approvalPolicy survives, but the project sandbox default replaces it. The named built-in
+ * profile persists across that reload. Keep other modes on their legacy path so their existing
+ * sandbox_workspace_write network/root settings are not replaced by a built-in profile. */
+export function codexThreadPermissionParams(permissions: CodexThreadPermissions): {
+  approvalPolicy?: CodexApprovalPolicy
+  sandbox?: CodexSandboxMode
+  permissions?: ':danger-full-access'
+} {
+  if (permissions.sandbox !== 'danger-full-access') return { ...permissions }
+  const { sandbox: _sandbox, ...rest } = permissions
+  return { ...rest, permissions: ':danger-full-access' }
+}
+
 const isCodexApprovalPolicy = (v: string): v is CodexApprovalPolicy =>
   (CODEX_APPROVAL_POLICIES as readonly string[]).includes(v)
 const isCodexSandboxMode = (v: string): v is CodexSandboxMode =>
@@ -425,6 +439,7 @@ function startCodexThreadOnce(
     return Promise.reject(new Error('Unsupported Codex thread cwd'))
   }
   return new Promise((resolve, reject) => {
+    const permissionParams = codexThreadPermissionParams(permissions)
     let settled = false
     let ws: WebSocket
     const finish = (error: Error | null, threadId?: string): void => {
@@ -493,7 +508,7 @@ function startCodexThreadOnce(
           method: 'thread/fork',
           // The fork IS the thread the node resumes, so the policy rides here as well as on the
           // seed: a fork that fell back to the daemon's config default would silently drop it.
-          params: { threadId, beforeTurnId: bootstrapTurnId, cwd, ephemeral: false, ...permissions }
+          params: { threadId, beforeTurnId: bootstrapTurnId, cwd, ephemeral: false, ...permissionParams }
         })
       )
     }
@@ -510,7 +525,7 @@ function startCodexThreadOnce(
           return
         }
         ws.send(JSON.stringify({ method: 'initialized' }))
-        ws.send(JSON.stringify({ id: 2, method: 'thread/start', params: { cwd, ...permissions } }))
+        ws.send(JSON.stringify({ id: 2, method: 'thread/start', params: { cwd, ...permissionParams } }))
       } else if (message.id === 2) {
         const startedThreadId = message.result?.thread?.id
         if (

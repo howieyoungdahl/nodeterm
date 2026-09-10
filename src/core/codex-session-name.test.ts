@@ -132,8 +132,9 @@ describe('startCodexThreadAt', () => {
       expect(birth.params).toMatchObject({
         cwd: dir,
         approvalPolicy: 'never',
-        sandbox: 'danger-full-access'
+        permissions: ':danger-full-access'
       })
+      expect(birth.params).not.toHaveProperty('sandbox')
     }
   })
 
@@ -144,6 +145,17 @@ describe('startCodexThreadAt', () => {
     for (const birth of threadBirths) {
       expect(birth.params).not.toHaveProperty('approvalPolicy')
       expect(birth.params).not.toHaveProperty('sandbox')
+      expect(birth.params).not.toHaveProperty('permissions')
+    }
+  })
+
+  it.each(['workspace-write', 'read-only'] as const)('preserves the existing %s config semantics', async (sandbox) => {
+    threadBirths = []
+    await startCodexThreadAt(sock, dir, 5000, { sandbox })
+    for (const birth of threadBirths) {
+      expect(birth.params.sandbox).toBe(sandbox)
+      expect(birth.params).not.toHaveProperty('permissions')
+      expect(birth.params).not.toHaveProperty('approvalPolicy')
     }
   })
 })
