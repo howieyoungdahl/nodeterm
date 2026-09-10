@@ -23,6 +23,7 @@ import {
   readCodexThreadAt,
   relayedCodexSessionName,
   rememberCodexSessionName,
+  startCodexThreadAt,
   waitForCodexAppServer
 } from './codex-session-name'
 
@@ -42,10 +43,35 @@ const previews = new Map<string, unknown>([
 const threadPaths = new Map<string, string>()
 threads.set('thread-preview', null)
 let initializeFails = false
+/** Every `thread/start` and `thread/fork` the fake daemon saw, with the params as sent. */
+let threadBirths: Array<{ method: string; params: Record<string, unknown> }> = []
 
 function handle(ws: WebSocket): void {
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString()) as Record<string, any>
+    // The materialization dance `startCodexThreadAt` runs: start → empty turn → interrupt → fork
+    // before that turn → delete the seed. Answered in order, with the two notifications the client
+    // waits for; only the params it SENT are under test here.
+    if (msg.method === 'thread/start') {
+      threadBirths.push({ method: msg.method, params: msg.params })
+      ws.send(JSON.stringify({ id: msg.id, result: { thread: { id: 'thread-seed' } } }))
+      return
+    }
+    if (msg.method === 'turn/start') {
+      ws.send(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-boot' } } }))
+      ws.send(JSON.stringify({ method: 'turn/started', params: { turn: { id: 'turn-boot' } } }))
+      ws.send(JSON.stringify({ method: 'turn/completed', params: { turn: { id: 'turn-boot' } } }))
+      return
+    }
+    if (msg.method === 'turn/interrupt' || msg.method === 'thread/delete') {
+      ws.send(JSON.stringify({ id: msg.id, result: {} }))
+      return
+    }
+    if (msg.method === 'thread/fork') {
+      threadBirths.push({ method: msg.method, params: msg.params })
+      ws.send(JSON.stringify({ id: msg.id, result: { thread: { id: 'thread-final' } } }))
+      return
+    }
     if (msg.method === 'initialize') {
       ws.send(
         JSON.stringify(
@@ -88,6 +114,38 @@ afterAll(async () => {
   await new Promise<void>((resolve) => wss.close(() => resolve()))
   await new Promise<void>((resolve) => server.close(() => resolve()))
   fs.rmSync(dir, { recursive: true, force: true })
+})
+
+// codex-cli 0.154.0 refuses permission overrides on a `--remote` resume, so the thread must be BORN
+// with the node's policy. Both the seed `thread/start` and the `thread/fork` that yields the thread
+// the node actually resumes carry it — a fork left to the daemon's config default would drop it.
+describe('startCodexThreadAt', () => {
+  it('passes the policy on thread/start AND on the fork that becomes the node\'s thread', async () => {
+    threadBirths = []
+    const id = await startCodexThreadAt(sock, dir, 5000, {
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access'
+    })
+    expect(id).toBe('thread-final')
+    expect(threadBirths.map((b) => b.method)).toEqual(['thread/start', 'thread/fork'])
+    for (const birth of threadBirths) {
+      expect(birth.params).toMatchObject({
+        cwd: dir,
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access'
+      })
+    }
+  })
+
+  it('sends no policy keys at all when none was lifted — the daemon\'s own default applies', async () => {
+    threadBirths = []
+    await startCodexThreadAt(sock, dir, 5000)
+    expect(threadBirths).toHaveLength(2)
+    for (const birth of threadBirths) {
+      expect(birth.params).not.toHaveProperty('approvalPolicy')
+      expect(birth.params).not.toHaveProperty('sandbox')
+    }
+  })
 })
 
 describe('codexThreadExistsAt', () => {

@@ -13,7 +13,11 @@ import {
   writeCodexThreadIdentity
 } from '../core/codex-identity-proxy'
 import { refreshCodexIdentityCaps } from '../core/codex-identity-caps'
-import { codexThreadExists, startCodexThread } from '../core/codex-session-name'
+import {
+  codexThreadExists,
+  startCodexThread,
+  type CodexThreadPermissions
+} from '../core/codex-session-name'
 
 type SharedIdentityHook = Pick<
   typeof hookServer,
@@ -24,7 +28,7 @@ type NodeLookup = { getNode(nodeId: string): unknown }
 
 export interface ServerCodexIdentityDeps {
   refresh(): Promise<unknown>
-  start(cwd: string): Promise<string>
+  start(cwd: string, permissions?: CodexThreadPermissions): Promise<string>
   exists(threadId: string): Promise<boolean>
   write(
     threadId: string,
@@ -59,8 +63,8 @@ export async function wireServerCodexSharedIdentity(
   deps: ServerCodexIdentityDeps = defaultDeps
 ): Promise<void> {
   hooks.setCodexIdentityListener((event) => broadcast(IPC.codexIdentity, event))
-  hooks.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint, accountId }) => {
-    const threadId = await deps.start(cwd)
+  hooks.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint, accountId, permissions }) => {
+    const threadId = await deps.start(cwd, permissions)
     deps.write(threadId, nodeId, hookEndpoint, undefined, accountId)
     return threadId
   })

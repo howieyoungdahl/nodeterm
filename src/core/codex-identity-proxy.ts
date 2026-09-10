@@ -741,6 +741,76 @@ if [ -n "$nt_reason" ]; then
   exec codex "$@"
 fi
 
+# Permission flags never reach the shared client. Since codex-cli 0.154.0 a \`--remote\` TUI refuses
+# every permission override on resume ("Permission overrides are not supported when resuming a
+# remote task") — and a managed node is ALWAYS \`--remote unix:// resume\`, fresh ones included, since
+# the server mints the thread first. \`-c approval_policy=\` is refused the same way, so no argv
+# spelling is left: the flags are lifted off "$@" here and posted with /codex-thread/start, and the
+# daemon starts the thread under that policy. Plain codex still takes them on argv, so every
+# fallback below goes through nt_exec_plain, which hands them back in canonical spelling.
+#
+# Lifted: -a/--ask-for-approval, -s/--sandbox, --yolo / --dangerously-bypass-approvals-and-sandbox
+# (= never + danger-full-access), and -c/--config approval_policy=… / sandbox_mode=…. Values are
+# NOT validated here — the route refuses anything outside the enum at 400, and that refusal lands
+# on plain codex with the same flags, which then says so itself. Everything after \`--\` is kept
+# verbatim. This runs in the main body on purpose: \`set --\` only reaches the caller's positional
+# parameters from here, never from inside a function.
+nt_approval=''
+nt_sandbox=''
+nt_lift_config() {
+  # A \`-c key=value\` whose key is one of the two policies. The value is a TOML string and the
+  # policies are bare enum tokens, so any quote character can only be a delimiter.
+  case "$1" in
+    approval_policy=*) nt_approval=$(printf %s "\${1#approval_policy=}" | tr -d "\\"'") ;;
+    sandbox_mode=*) nt_sandbox=$(printf %s "\${1#sandbox_mode=}" | tr -d "\\"'") ;;
+    *) return 1 ;;
+  esac
+}
+nt_exec_plain() {
+  [ -z "$nt_approval" ] || set -- "$@" --ask-for-approval "$nt_approval"
+  [ -z "$nt_sandbox" ] || set -- "$@" --sandbox "$nt_sandbox"
+  exec codex "$@"
+}
+nt_argc=$#
+nt_seen=0
+while [ "$nt_seen" -lt "$nt_argc" ]; do
+  nt_arg=$1
+  shift
+  nt_seen=$((nt_seen + 1))
+  case "$nt_arg" in
+    --)
+      set -- "$@" "$nt_arg"
+      while [ "$nt_seen" -lt "$nt_argc" ]; do
+        set -- "$@" "$1"
+        shift
+        nt_seen=$((nt_seen + 1))
+      done ;;
+    --yolo|--dangerously-bypass-approvals-and-sandbox)
+      nt_approval=never
+      nt_sandbox=danger-full-access ;;
+    -a|--ask-for-approval|-s|--sandbox|-c|--config)
+      if [ "$nt_seen" -ge "$nt_argc" ]; then
+        set -- "$@" "$nt_arg"
+      else
+        nt_val=$1
+        shift
+        nt_seen=$((nt_seen + 1))
+        case "$nt_arg" in
+          -a|--ask-for-approval) nt_approval=$nt_val ;;
+          -s|--sandbox) nt_sandbox=$nt_val ;;
+          *) nt_lift_config "$nt_val" || set -- "$@" "$nt_arg" "$nt_val" ;;
+        esac
+      fi ;;
+    --ask-for-approval=*) nt_approval=\${nt_arg#--ask-for-approval=} ;;
+    --sandbox=*) nt_sandbox=\${nt_arg#--sandbox=} ;;
+    --config=*) nt_lift_config "\${nt_arg#--config=}" || set -- "$@" "$nt_arg" ;;
+    -a?*) nt_approval=\${nt_arg#-a} ;;
+    -s?*) nt_sandbox=\${nt_arg#-s} ;;
+    -c?*) nt_lift_config "\${nt_arg#-c}" || set -- "$@" "$nt_arg" ;;
+    *) set -- "$@" "$nt_arg" ;;
+  esac
+done
+
 # $1 is the client budget in seconds; the rest is curl's. Start gets a budget LARGER than the
 # server's own (CODEX_THREAD_START_TIMEOUT_MS) so the server, not curl, is what times out — a curl
 # that quits first leaves behind a thread and a record nothing will ever resume.
@@ -764,17 +834,18 @@ if [ "\${1-}" = resume ]; then
     exit $?
   fi
   nt_report_fallback thread-bind-refused
-  exec codex "$@"
+  nt_exec_plain "$@"
 fi
 
 nt_thread=$(nt_post ${CODEX_THREAD_START_CLIENT_MAX_S} --data-urlencode "nodeId=$NODETERM_NODE_ID" --data-urlencode "cwd=$PWD" \\
   --data-urlencode "accountId=\${NODETERM_CODEX_ACCOUNT_ID-}" \\
+  --data-urlencode "approvalPolicy=$nt_approval" --data-urlencode "sandbox=$nt_sandbox" \\
   "http://localhost:\${NODETERM_HOOK_PORT-0}/codex-thread/start") || nt_thread=''
 nt_thread=$(printf %s "$nt_thread" | tr -d '\\r\\n')
 case "$nt_thread" in
   ''|*[!A-Za-z0-9._-]*)
     nt_report_fallback thread-start-failed
-    exec codex "$@"
+    nt_exec_plain "$@"
     ;;
 esac
 nt_run_shared "$nt_thread" "$@"

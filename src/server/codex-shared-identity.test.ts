@@ -40,9 +40,15 @@ describe('Server Edition shared Codex identity wiring', () => {
         nodeId: 'node-new',
         cwd: '/repo',
         hookEndpoint: '/data/hook',
-        accountId: 'acct-A'
+        accountId: 'acct-A',
+        permissions: { approvalPolicy: 'never', sandbox: 'danger-full-access' }
       })
     ).resolves.toBe('thread-new')
+    // The policy the launcher lifted off argv is what the daemon starts the thread with.
+    expect(start).toHaveBeenCalledWith('/repo', {
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access'
+    })
     expect(write).toHaveBeenCalledWith(
       'thread-new',
       'node-new',

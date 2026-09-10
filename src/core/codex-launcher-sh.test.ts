@@ -36,7 +36,12 @@ let dir = ''
 let launcher = ''
 let binDir = ''
 let argvLog = ''
-let started: Array<{ nodeId: string; cwd: string; accountId?: string }> = []
+let started: Array<{
+  nodeId: string
+  cwd: string
+  accountId?: string
+  permissions?: { approvalPolicy?: string; sandbox?: string }
+}> = []
 let bound: Array<{ nodeId: string; threadId: string; accountId?: string }> = []
 let fallbacks: Array<{ nodeId: string; reason?: string }> = []
 let startAnswer: (() => string) | null = null
@@ -66,8 +71,8 @@ beforeAll(async () => {
   fs.writeFileSync(launcher, buildCodexLauncherScript('true', 'false'), { mode: 0o755 })
   await hookServer.start()
   hookServer.setNodeAuthSecret(SECRET)
-  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, accountId }) => {
-    started.push({ nodeId, cwd, accountId })
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, accountId, permissions }) => {
+    started.push({ nodeId, cwd, accountId, permissions })
     if (startDelayMs) await new Promise((r) => setTimeout(r, startDelayMs))
     if (!startAnswer) throw new Error('start refused')
     return startAnswer()
@@ -181,7 +186,7 @@ describe('generated Codex launcher', () => {
 
   it('starts a thread for a fresh node and resumes it on the shared app-server', async () => {
     await callLauncher([])
-    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
+    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir), permissions: {} }])
     expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc'])
     expect(fallbacks).toEqual([])
   })
@@ -244,10 +249,125 @@ describe('generated Codex launcher', () => {
   })
 
   it('keeps the caller arguments after the thread it resolved', async () => {
-    await callLauncher(['--ask-for-approval', 'never', 'fix the bug'])
-    expect(codexArgv()).toEqual([
-      '--remote unix:// resume thread-abc --ask-for-approval never fix the bug'
-    ])
+    await callLauncher(['--model', 'gpt-6-astra', 'fix the bug'])
+    expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc --model gpt-6-astra fix the bug'])
+  })
+
+  // codex-cli 0.154.0: a `--remote` client refuses every permission override on resume
+  // ("Permission overrides are not supported when resuming a remote task"), and a managed node is
+  // always `--remote unix:// resume`. So the policy is lifted off argv and becomes the thread's
+  // birth policy via /codex-thread/start; the client line carries none of it.
+  describe('lifts permission flags off argv and into the thread start', () => {
+    it('--ask-for-approval <value> (the flag nodeterm\'s own permission dropdown emits)', async () => {
+      await callLauncher(['--ask-for-approval', 'never', 'fix the bug'])
+      expect(started).toEqual([
+        { nodeId: 'node-1', cwd: fs.realpathSync(dir), permissions: { approvalPolicy: 'never' } }
+      ])
+      expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc fix the bug'])
+    })
+
+    it('--yolo and its long spelling = never + danger-full-access', async () => {
+      await callLauncher(['--yolo', 'do work'])
+      expect(started[0]?.permissions).toEqual({
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access'
+      })
+      expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc do work'])
+      fs.writeFileSync(argvLog, '')
+      started = []
+      await callLauncher(['do work', '--dangerously-bypass-approvals-and-sandbox'])
+      expect(started[0]?.permissions).toEqual({
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access'
+      })
+      expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc do work'])
+    })
+
+    it('every spelling: -a X, -aX, --sandbox=X, -s X, and the two -c keys (TOML quotes stripped); other -c stay', async () => {
+      await callLauncher([
+        '-c', 'approval_policy="untrusted"',
+        '-c', 'model="gpt-6-astra"',
+        '--sandbox=read-only',
+        '-a', 'on-request',
+        '--config', "sandbox_mode='workspace-write'",
+        'prompt'
+      ])
+      // Last one wins on each axis, exactly as codex itself resolves repeated flags.
+      expect(started[0]?.permissions).toEqual({
+        approvalPolicy: 'on-request',
+        sandbox: 'workspace-write'
+      })
+      expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc -c model="gpt-6-astra" prompt'])
+      fs.writeFileSync(argvLog, '')
+      started = []
+      await callLauncher(['-anever', '-sdanger-full-access', '--', '-a', 'kept'])
+      expect(started[0]?.permissions).toEqual({
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access'
+      })
+      // Everything after `--` is the agent\'s, verbatim.
+      expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc -- -a kept'])
+    })
+
+    it('a resume of an existing thread drops the flags too — the thread keeps its birth policy', async () => {
+      await callLauncher(['resume', 'thread-xyz', '--yolo'])
+      expect(bound).toEqual([{ nodeId: 'node-1', threadId: 'thread-xyz' }])
+      expect(started).toEqual([])
+      expect(codexArgv()).toEqual(['--remote unix:// resume thread-xyz'])
+    })
+
+    it('a dangling flag with no value is left for codex to complain about', async () => {
+      await callLauncher(['do work', '-a'])
+      expect(started[0]?.permissions).toEqual({})
+      expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc do work -a'])
+    })
+
+    // Plain codex is not `--remote`, so it still takes the flags on argv: a fallback AFTER the lift
+    // must hand them back, or a degraded node would silently run in codex\'s own default policy.
+    it('a fallback after the lift re-emits the flags in canonical spelling (start refused)', async () => {
+      startAnswer = null
+      await callLauncher(['--yolo', 'do work'])
+      expect(fallbacks.map((f) => f.reason)).toContain('thread-start-failed')
+      expect(codexArgv()).toEqual(['do work --ask-for-approval never --sandbox danger-full-access'])
+    })
+
+    it('a fallback after the lift re-emits the flags (bind refused, resume form)', async () => {
+      bindAnswer = null
+      await callLauncher(['resume', 'thread-xyz', '-a', 'untrusted'])
+      expect(fallbacks.map((f) => f.reason)).toContain('thread-bind-refused')
+      expect(codexArgv()).toEqual(['resume thread-xyz --ask-for-approval untrusted'])
+    })
+
+    // The SERVER\'s gate: the values reach a JSON-RPC call on the shared daemon, so anything outside
+    // the enum is refused at 400 BEFORE a thread exists. (Mutation: forward unvalidated ⇒ 200 + a
+    // started row carrying garbage.)
+    it('the server refuses a value outside the enum at 400 before starting a thread', async () => {
+      const status = await postCodexThread('start', {
+        nodeId: 'node-1',
+        cwd: fs.realpathSync(dir),
+        approvalPolicy: 'always'
+      })
+      expect(status).toBe(400)
+      expect(started).toEqual([])
+      const sandboxStatus = await postCodexThread('start', {
+        nodeId: 'node-1',
+        cwd: fs.realpathSync(dir),
+        sandbox: 'none'
+      })
+      expect(sandboxStatus).toBe(400)
+      expect(started).toEqual([])
+    })
+
+    it('the server accepts each enum value and omits an empty field', async () => {
+      const status = await postCodexThread('start', {
+        nodeId: 'node-1',
+        cwd: fs.realpathSync(dir),
+        approvalPolicy: '',
+        sandbox: 'read-only'
+      })
+      expect(status).toBe(200)
+      expect(started[0]?.permissions).toEqual({ sandbox: 'read-only' })
+    })
   })
 
   it('binds a caller-supplied thread on resume instead of starting a new one', async () => {
@@ -293,11 +413,15 @@ describe('generated Codex launcher', () => {
       recovering
     )
 
+    // The one-shot prompt rides the first launch only; the lifted policy is on the START row, so
+    // the recovered client (which carries no argv at all) still runs under it.
     expect(codexArgv()).toEqual([
-      '--remote unix:// resume thread-abc --ask-for-approval never fix the bug',
+      '--remote unix:// resume thread-abc fix the bug',
       '--remote unix:// resume thread-abc'
     ])
-    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
+    expect(started).toEqual([
+      { nodeId: 'node-1', cwd: fs.realpathSync(dir), permissions: { approvalPolicy: 'never' } }
+    ])
     expect(result.stderr).toContain('shared Codex connection reset; restoring this session')
   })
 
@@ -367,7 +491,7 @@ describe('generated Codex launcher', () => {
     await callLauncher([], {}, running)
 
     expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc'])
-    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
+    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir), permissions: {} }])
     expect(fallbacks).toEqual([])
   })
 
@@ -375,7 +499,9 @@ describe('generated Codex launcher', () => {
   // filed under the right account. An empty id (the system account) reaches the handler as undefined.
   it('threads the managed account id through start (in the body, not on argv)', async () => {
     await callLauncher([], { NODETERM_CODEX_ACCOUNT_ID: 'acct-A' })
-    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir), accountId: 'acct-A' }])
+    expect(started).toEqual([
+      { nodeId: 'node-1', cwd: fs.realpathSync(dir), accountId: 'acct-A', permissions: {} }
+    ])
     // The account id is NOT on the codex command line.
     expect(codexArgv().join(' ')).not.toContain('acct-A')
   })
@@ -415,7 +541,9 @@ describe('generated Codex launcher', () => {
       accountId: 'acct-A'
     })
     expect(status).toBe(200)
-    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir), accountId: 'acct-A' }])
+    expect(started).toEqual([
+      { nodeId: 'node-1', cwd: fs.realpathSync(dir), accountId: 'acct-A', permissions: {} }
+    ])
   })
 })
 
@@ -539,7 +667,7 @@ describe('the per-node capability, over the file channel', () => {
     expect(token).toContain('.')
     expect(fs.readFileSync(path.join(nodeTokenDir(), 'node-1'), 'utf8').trim()).toBe(token)
     await callLauncher([])
-    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
+    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir), permissions: {} }])
     expect(fallbacks).toEqual([])
     expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc'])
   })
@@ -555,7 +683,7 @@ describe('the per-node capability, over the file channel', () => {
     // Charset-valid but minted for the WRONG node. If anything still read that variable, the route
     // would 403 and this node would degrade to plain codex.
     await callLauncher([], { NODETERM_CODEX_NODE_TOKEN: nodeAuthToken(SECRET, 'node-2') })
-    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
+    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir), permissions: {} }])
     expect(fallbacks).toEqual([])
   })
 
