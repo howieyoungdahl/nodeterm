@@ -15,6 +15,7 @@ import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from '
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type { CodexAccount } from './codex-account'
+import type { ExternalUsageProfile } from './external-profile'
 import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
 import type { AppearanceSettings, BorderAppearance, ProjectLayoutRules } from './appearance'
 import type {
@@ -1525,6 +1526,14 @@ export interface Settings {
   /** Managed Codex accounts (CODEX_HOME isolated, machine-scoped by `host`). See CodexAccount.
    *  Renderer-owned in settings.json exactly like `claudeAccounts`; main owns only fs lifecycle. */
   codexAccounts: CodexAccount[]
+  /**
+   * Existing profile directories to READ USAGE from without adopting them as managed accounts —
+   * `~/.claude-2`, `~/.codex-2`, and the like. Display-only by construction: nothing here is
+   * launched from, written to, or deleted. Kept OUT of `claudeAccounts`/`codexAccounts` on
+   * purpose, because those records promise a launchable, nodeterm-minted home to every consumer
+   * (account pickers, node chips, spawn env, the mirror, `remove()`'s `fs.rm -rf`).
+   */
+  externalUsageProfiles: ExternalUsageProfile[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
    *  Empty = unset → fall back to the detected login email, else "System account". */
   systemAccountLabel: string
@@ -1533,6 +1542,13 @@ export interface Settings {
   /** Usage providers hidden from the pill + popover (Settings → Usage toggles). Hiding is a
    *  DISPLAY choice — credentials and fetchers are untouched, so re-enabling is instant. */
   hiddenUsageProviders: string[]
+  /**
+   * Usage-popover sections the user has collapsed, by section key (see `usageSectionKey` in
+   * renderer/lib/usageFormat.ts). Persisted rather than component state: someone who has trimmed
+   * the panel down to the two rows they care about should not find it re-expanded on reload.
+   * A key that no longer matches anything is inert and simply never read.
+   */
+  collapsedUsageSections: string[]
   /** Ids of node right-click menu rows the user has hidden; empty = everything visible. Only ids
    *  in HIDEABLE_MENU_ITEMS (renderer/lib/ui-visibility.ts) can hide — Delete and the other
    *  recovery actions stay put whatever this array says. */
@@ -1759,11 +1775,14 @@ export const DEFAULT_SETTINGS: Settings = {
   agentLaunchCommands: {},
   claudeAccounts: [],
   codexAccounts: [],
+  externalUsageProfiles: [],
   systemAccountLabel: '',
   // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
   disabledAgents: [],
   hiddenUsageProviders: [],
+  // Every section starts open: collapsing is something the user does, not a default we impose.
+  collapsedUsageSections: [],
   // Nothing hidden out of the box, so existing users see the menu and header they already know.
   hiddenNodeMenuItems: [],
   hiddenHeaderButtons: [],
@@ -2241,6 +2260,18 @@ export interface UsageLimit {
   scopeLabel: string | null
   /** The provider says this window is the one currently gating the account. */
   isActive: boolean
+  /**
+   * A reading that is NOT a percentage — a prepaid balance ("$12.40"), say. Providers that bill
+   * per token expose no quota window, so there is no denominator to fill a bar against, and
+   * inventing a ceiling to divide by would print a number nobody measured.
+   *
+   * When set, the row and the pill render THIS instead of a bar and a percent; `usedPercent` is
+   * then meaningless (0) and is never displayed. Only the sort in `primaryLimit` reads it, and
+   * only as a tie-break.
+   */
+  amountText?: string | null
+  /** Optional one-line qualifier under `amountText` ("insufficient for API calls"). */
+  noteText?: string | null
 }
 
 /**

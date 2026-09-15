@@ -3,6 +3,7 @@
 // the Server Edition boots the same code. All that is left here is the one thing core cannot
 // know: whether a desktop window is focused.
 import type { BrowserWindow } from 'electron'
+import type { ExternalUsageProfile } from '../shared/external-profile'
 import {
   startUsageService,
   type RemoteUsageDeps,
@@ -20,6 +21,9 @@ export interface InitClaudeUsageOpts {
   /** Local managed Codex accounts (id + isolated home) to aggregate usage for, one row each and
    *  never merged. See UsageServiceOptions.codexAccounts. */
   codexAccounts?: () => Array<{ id: string; home: string; label: string; email?: string | null }>
+  /** Existing Claude profile dirs to read usage from without adopting them. See
+   *  UsageServiceOptions.externalUsageProfiles. */
+  externalUsageProfiles?: () => readonly ExternalUsageProfile[]
   onCacheUpdate?: () => void
   remote?: RemoteUsageDeps
   /** "A phone may be reading the agent-status mirror" (paired / has a push grant). When true the
@@ -40,6 +44,7 @@ export function initClaudeUsage(win: BrowserWindow, opts: InitClaudeUsageOpts = 
     mirrorMayBeRead: opts.mirrorMayBeRead,
     localAccounts: opts.localAccounts,
     codexAccounts: opts.codexAccounts,
+    externalUsageProfiles: opts.externalUsageProfiles,
     onCacheUpdate: opts.onCacheUpdate,
     remote: opts.remote
   })

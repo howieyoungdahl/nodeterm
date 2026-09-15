@@ -239,6 +239,7 @@ import {
 import { codexThreadExists, startCodexThread } from '../core/codex-session-name'
 import { codexUsageAccounts } from '../core/codex-accounts-core'
 import { codexHomeFor } from '../core/codex-config-dir'
+import { externalCodexUsageAccounts } from '../core/usage/external-profile-dir'
 import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
 import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import {
@@ -3308,14 +3309,19 @@ app.whenReady().then(async () => {
     home: string
     label: string
     email?: string | null
-  }> =>
-    codexUsageAccounts(
+  }> => [
+    ...codexUsageAccounts(
       (settingsStore.get().codexAccounts ?? []).filter((a) => !a.host && !a.pending),
       codexHomeFor
-    )
+    ),
+    // External homes (~/.codex-2) read for DISPLAY only. They never reach a spawn, a daemon, or
+    // `remove()`, so pointing one at a home the user already has cannot disturb it.
+    ...externalCodexUsageAccounts(settingsStore.get().externalUsageProfiles)
+  ]
   const usageService = initClaudeUsage(win, {
     localAccounts: localClaudeAccountIds,
     codexAccounts: localCodexAccounts,
+    externalUsageProfiles: () => settingsStore.get().externalUsageProfiles ?? [],
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
     },
