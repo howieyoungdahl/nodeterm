@@ -12,6 +12,7 @@ import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
 import { codexUsageAccounts } from '../../core/codex-accounts-core'
 import { codexHomeFor } from '../../core/codex-config-dir'
+import { externalCodexUsageAccounts } from '../../core/usage/external-profile-dir'
 import {
   setMirrorUsageProvider,
   buildMirrorUsage,
@@ -103,14 +104,18 @@ export function registerCoreHandlers(
     home: string
     label: string
     email?: string | null
-  }> =>
-    codexUsageAccounts(
+  }> => [
+    ...codexUsageAccounts(
       (deps.getSettings().codexAccounts ?? []).filter((a) => !a.host && !a.pending),
       codexHomeFor
-    )
+    ),
+    // External homes (~/.codex-2) read for DISPLAY only — see the desktop shell's twin.
+    ...externalCodexUsageAccounts(deps.getSettings().externalUsageProfiles)
+  ]
   const usageService = startUsageService({
     localAccounts: localClaudeAccountIds,
     codexAccounts: localCodexAccounts,
+    externalUsageProfiles: () => deps.getSettings().externalUsageProfiles ?? [],
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
     }

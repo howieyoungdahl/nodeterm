@@ -1,5 +1,8 @@
 // Pure formatting helpers for the usage indicator.
 
+import type { UsageLimit } from '@shared/types'
+import { limitShortLabel } from '@shared/usage-limits'
+
 /** "just now" / "5m ago" / "2h ago". */
 export function formatTimeAgo(ts: number): string {
   const diff = Date.now() - ts
@@ -109,6 +112,48 @@ export function percentNumber(usedPercent: number, mode: 'used' | 'remaining' | 
  */
 export function barFillPercent(usedPercent: number, mode: 'used' | 'remaining' | 'tokens'): number {
   return mode === 'remaining' ? 100 - usedPercent : usedPercent
+}
+
+/**
+ * Identifies one collapsible popover section, for the persisted `collapsedUsageSections` list.
+ *
+ * The kinds are namespaced so they can never collide: a Claude account id and a provider id are
+ * both plain strings, and a section that collapsed the WRONG row is a bug whose cause the user
+ * cannot see. A remote row carries its host, because the same subscription can be signed in on
+ * the desktop and on two servers at once.
+ */
+export type UsageSectionRef =
+  | { kind: 'claude'; accountId?: string | null }
+  | { kind: 'remote'; hostKey: string; accountId?: string | null }
+  | { kind: 'provider'; provider: string; accountId?: string | null }
+
+export function usageSectionKey(ref: UsageSectionRef): string {
+  const id = ref.accountId ?? 'system'
+  switch (ref.kind) {
+    case 'claude':
+      return `claude:${id}`
+    case 'remote':
+      return `remote:${ref.hostKey}#${id}`
+    case 'provider':
+      return `provider:${ref.provider}:${id}`
+  }
+}
+
+/**
+ * The one-line reading a COLLAPSED usage section shows in place of its bars: whatever it would
+ * have led with had it been open (`primaryLimit` — the same choice the pill makes). Collapsing
+ * must not hide an exhausted window behind a chevron, or the panel gets quieter exactly when it
+ * has the most to say.
+ *
+ * A balance row has no percentage to round, so it prints its amount verbatim.
+ */
+export function limitSummary(
+  limit: UsageLimit | null,
+  mode: 'used' | 'remaining' | 'tokens'
+): string {
+  if (!limit) return ''
+  if (limit.amountText) return limit.amountText
+  return `${percentNumber(limit.usedPercent, mode)}% ${limitShortLabel(limit.kind, limit.scopeLabel)}`
 }
 
 /** Humanize a token count: 48000 → "48k", 1_000_000 → "1M", 850 → "850". */

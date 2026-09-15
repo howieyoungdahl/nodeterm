@@ -8,6 +8,12 @@ import { Button } from '@renderer/ui/Button'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { USAGE_PROVIDER_IDS, providerLabel } from '@shared/usage-limits'
 import { AGENT_CONFIG } from '@shared/agents/config'
+import {
+  defaultProfileLabel,
+  isPlausibleProfileDir,
+  type ExternalProfileProvider,
+  type ExternalUsageProfile
+} from '@shared/external-profile'
 
 const ROWS = {
   percentMode: {
@@ -27,6 +33,7 @@ const ROWS = {
       'ssh',
       'host',
       'codex',
+      'deepseek',
       'gemini',
       'grok',
       'kimi',
@@ -39,6 +46,19 @@ const ROWS = {
   cookies: {
     title: 'Web-console sign-in',
     keywords: ['minimax', 'opencode', 'cookie', 'session', 'sign in', 'credential', 'paste']
+  },
+  profiles: {
+    title: 'Other profiles',
+    keywords: [
+      'profile',
+      'account',
+      'second account',
+      'claude-2',
+      'codex-2',
+      'directory',
+      'external',
+      'usage'
+    ]
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -54,6 +74,8 @@ const PROVIDER_BLURBS: Record<string, string> = {
   'claude-remote':
     "Limits for the Claude accounts on your connected SSH projects' hosts. Each read runs on the host itself over the existing connection — the credential never leaves it.",
   codex: 'Session and weekly limits from your ChatGPT (Codex) subscription.',
+  deepseek:
+    'Prepaid balance from the DeepSeek API key in your opencode credential store. DeepSeek publishes no quota windows, so this row shows an amount rather than a percentage.',
   gemini: 'Per-model hourly quota from the Gemini CLI sign-in.',
   grok: 'Weekly credits and monthly budget from the Grok CLI sign-in.',
   kimi: 'Session and weekly quota from the Kimi Code sign-in.',
@@ -134,10 +156,89 @@ function CookieProviderRow({
   )
 }
 
+/**
+ * Add one existing profile directory to the usage panel.
+ *
+ * The field is a path the user types rather than a directory picker: this is a read-only row, and
+ * a picker would imply selecting something nodeterm takes ownership of. It does not — nothing is
+ * written to the directory, launched from it, or deleted, which is exactly what makes pointing one
+ * at a profile the user already has safe.
+ *
+ * Validation is deliberately two-tier. This row only checks what it can see (an absolute path);
+ * the authoritative check — inside `$HOME`, normalized, a real directory — runs in core at READ
+ * time, because `settings.json` is hand-editable and a write-time check would guard the wrong event.
+ */
+function AddExternalProfile({
+  onAdd
+}: {
+  onAdd: (profile: ExternalUsageProfile) => void
+}): React.JSX.Element {
+  const [provider, setProvider] = useState<ExternalProfileProvider>('claude')
+  const [dir, setDir] = useState('')
+  const [label, setLabel] = useState('')
+  const trimmed = dir.trim()
+  const plausible = isPlausibleProfileDir(trimmed)
+  const submit = (): void => {
+    if (!plausible) return
+    onAdd({
+      provider,
+      dir: trimmed,
+      label: label.trim() || defaultProfileLabel(trimmed)
+    })
+    setDir('')
+    setLabel('')
+  }
+  return (
+    <FieldRow
+      label="Add a profile directory"
+      description="An existing Claude or Codex profile you already use — ~/.claude-2, ~/.codex-2. Its usage appears in the panel. Display only: nodeterm never writes to it, launches from it, or deletes it."
+      note={
+        plausible
+          ? 'Saved profiles show up in the pill at the bottom-left of the canvas.'
+          : 'Enter an absolute path inside your home directory.'
+      }
+      control={
+        <div className="flex items-center gap-2">
+          <SegmentedPill
+            value={provider}
+            options={[
+              { value: 'claude', label: 'Claude' },
+              { value: 'codex', label: 'Codex' }
+            ]}
+            onChange={(v) => setProvider(v as ExternalProfileProvider)}
+            ariaLabel="Profile provider"
+          />
+          <input
+            className="input w-56"
+            placeholder="~/.claude-2"
+            value={dir}
+            onChange={(e) => setDir(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submit()
+            }}
+            spellCheck={false}
+          />
+          <input
+            className="input w-32"
+            placeholder="Label"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            spellCheck={false}
+          />
+          <Button onClick={submit} disabled={!plausible}>
+            Add
+          </Button>
+        </div>
+      }
+    />
+  )
+}
+
 export function UsageSection({ isActive }: { isActive: boolean }): React.JSX.Element | null {
   const settings = useSettings((s) => s.settings)
   const update = useSettings((s) => s.update)
 
+  const externalProfiles = settings.externalUsageProfiles ?? []
   const hidden = new Set(settings.hiddenUsageProviders)
   const setShown = (provider: string, shown: boolean): void => {
     const next = settings.hiddenUsageProviders.filter((p) => p !== provider)
@@ -212,6 +313,32 @@ export function UsageSection({ isActive }: { isActive: boolean }): React.JSX.Ele
               onChange={(stored) => setCookieStored((m) => ({ ...m, [p.id]: stored }))}
             />
           ))}
+        </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.profiles}>
+        <div className="space-y-5">
+          {externalProfiles.map((p) => (
+            <FieldRow
+              key={`${p.provider}:${p.dir}`}
+              label={p.label}
+              description={`${p.provider === 'claude' ? 'Claude' : 'Codex'} profile — ${p.dir}`}
+              note="Read-only: usage is displayed from this directory. Nothing is written to it, launched from it, or deleted."
+              control={
+                <Button
+                  onClick={() =>
+                    update({
+                      externalUsageProfiles: externalProfiles.filter((e) => e !== p)
+                    })
+                  }
+                >
+                  Remove
+                </Button>
+              }
+            />
+          ))}
+          <AddExternalProfile
+            onAdd={(profile) => update({ externalUsageProfiles: [...externalProfiles, profile] })}
+          />
         </div>
       </SearchableRow>
     </SettingsSection>

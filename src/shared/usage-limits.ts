@@ -101,6 +101,7 @@ export const USAGE_PROVIDER_IDS = [
   'claude',
   'claude-remote',
   'codex',
+  'deepseek',
   'gemini',
   'grok',
   'kimi',
@@ -119,6 +120,7 @@ export const USAGE_PROVIDER_IDS = [
  */
 const PROVIDER_LABELS: Record<string, string> = {
   'claude-remote': 'Claude on SSH hosts',
+  deepseek: 'DeepSeek',
   grok: 'Grok',
   kimi: 'Kimi',
   minimax: 'MiniMax',

@@ -16,9 +16,12 @@ import {
   barFillPercent,
   formatResetCountdown,
   formatTimeAgo,
+  limitSummary,
   percentNumber,
   percentText,
-  severityColor
+  severityColor,
+  usageSectionKey,
+  type UsageSectionRef
 } from '../lib/usageFormat'
 import {
   enabledProviders,
@@ -29,6 +32,7 @@ import {
   primaryLimit,
   providerLabel
 } from '@shared/usage-limits'
+import { externalProfileId, type ExternalUsageProfile } from '@shared/external-profile'
 import { systemAccountDisplay } from '../state/workspace'
 
 /** Grace period before a hover-opened popover closes, so the pointer can cross the pill's own
@@ -44,6 +48,20 @@ const USAGE_HOVER_CLOSE_MS = 220
 function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remaining' | 'tokens' }) {
   const left = 100 - limit.usedPercent
   const fill = barFillPercent(limit.usedPercent, mode)
+  // A balance (or any non-percentage reading) gets NO bar and no percent. There is no denominator
+  // to fill against, and picking a ceiling to divide by would print a number nobody measured —
+  // the row states the amount it was given and nothing more.
+  if (limit.amountText) {
+    return (
+      <div className="usage-row">
+        <div className="usage-row__title">{limitLabel(limit.kind, limit.scopeLabel)}</div>
+        <div className="usage-row__meta">
+          <span className="usage-row__amount">{limit.amountText}</span>
+          <span>{limit.noteText ?? ''}</span>
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="usage-row">
       <div className="usage-row__title">
@@ -62,6 +80,42 @@ function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remainin
         <span>{formatResetCountdown(limit.resetsAt)}</span>
       </div>
     </div>
+  )
+}
+
+/**
+ * The disclosure control every popover section shares. Once collapsed it also carries the one
+ * reading the section was leading with, so trimming the panel never hides an exhausted window
+ * behind a chevron — a collapsed row still answers "am I about to be blocked?".
+ */
+function SectionToggle({
+  label,
+  badge,
+  summary,
+  collapsed,
+  onToggle
+}: {
+  label: string
+  badge?: React.ReactNode
+  summary: string
+  collapsed: boolean
+  onToggle: () => void
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      className="usage-section__head"
+      onClick={onToggle}
+      aria-expanded={!collapsed}
+      title={collapsed ? 'Expand' : 'Collapse'}
+    >
+      <span className={`usage-section__chevron${collapsed ? ' is-collapsed' : ''}`} aria-hidden>
+        ▾
+      </span>
+      <span className="usage-section__label">{label}</span>
+      {badge}
+      {collapsed && summary && <span className="usage-section__summary">{summary}</span>}
+    </button>
   )
 }
 
@@ -112,7 +166,10 @@ function AccountUsageBlock({
   u,
   mode,
   isDefault = false,
-  onUse
+  onUse,
+  collapsed,
+  onToggle,
+  external = false
 }: {
   label: string
   email?: string
@@ -120,19 +177,50 @@ function AccountUsageBlock({
   mode: 'used' | 'remaining' | 'tokens'
   isDefault?: boolean
   onUse?: () => void
+  collapsed: boolean
+  onToggle: () => void
+  /** An external profile directory: read for display only, never launched from. */
+  external?: boolean
 }) {
   return (
     <div className="usage-account">
-      <div className="usage-account__label">
-        {label}
-        <DefaultAccountMark isDefault={isDefault} onUse={onUse} />
-      </div>
-      {(email ?? u?.email) && <div className="usage-account__email">{email ?? u?.email}</div>}
-      {u?.limits.map((l) => (
-        <LimitRow key={limitKey(l)} limit={l} mode={mode} />
-      ))}
-      {u && u.limits.length === 0 && <div className="usage-popover__empty">No usage data.</div>}
-      {!u && <div className="usage-popover__empty usage-pill__pulse">···</div>}
+      <SectionToggle
+        label={label}
+        badge={
+          <>
+            {/* Says plainly that these numbers come from a directory the user already had, and
+                that the row is a readout — the account rows above it are launchable, this is not. */}
+            {external && (
+              <span
+                className="usage-account__host"
+                title="Read from a profile directory you already have. Display only — sessions are not launched from it."
+              >
+                profile
+              </span>
+            )}
+            <DefaultAccountMark isDefault={isDefault} onUse={onUse} />
+          </>
+        }
+        summary={limitSummary(primaryLimit(u?.limits ?? []), mode)}
+        collapsed={collapsed}
+        onToggle={onToggle}
+      />
+      {!collapsed && (
+        <>
+          {(email ?? u?.email) && <div className="usage-account__email">{email ?? u?.email}</div>}
+          {u?.limits.map((l) => (
+            <LimitRow key={limitKey(l)} limit={l} mode={mode} />
+          ))}
+          {/* An 'error' row says so rather than borrowing the empty-state wording: a credential
+              that could not be read and a login with nothing to report are different problems. */}
+          {u && u.limits.length === 0 && (
+            <div className="usage-popover__empty">
+              {u.status === 'error' ? 'Could not read usage.' : 'No usage data.'}
+            </div>
+          )}
+          {!u && <div className="usage-popover__empty usage-pill__pulse">···</div>}
+        </>
+      )}
     </div>
   )
 }
@@ -150,32 +238,49 @@ function RemoteUsageBlock({
   row,
   mode,
   isDefault = false,
-  onUse
+  onUse,
+  collapsed,
+  onToggle
 }: {
   row: RemoteAccountUsage
   mode: 'used' | 'remaining' | 'tokens'
   isDefault?: boolean
   onUse?: () => void
+  collapsed: boolean
+  onToggle: () => void
 }) {
   if (row.usage.status === 'unavailable') return null
   const showHost = row.label !== row.hostKey
   return (
     <div className="usage-account">
-      <div className="usage-account__label">
-        {row.label}
-        <span className="usage-account__host" title={`Read on ${row.hostKey} over SSH`}>
-          {showHost ? row.hostKey : 'SSH'}
-        </span>
-        <DefaultAccountMark isDefault={isDefault} onUse={onUse} />
-      </div>
-      {row.usage.email && <div className="usage-account__email">{row.usage.email}</div>}
-      {row.usage.limits.map((l) => (
-        <LimitRow key={limitKey(l)} limit={l} mode={mode} />
-      ))}
-      {row.usage.limits.length === 0 && (
-        <div className="usage-popover__empty">
-          {row.usage.status === 'error' ? 'Could not read usage on this host.' : 'No usage data.'}
-        </div>
+      <SectionToggle
+        label={row.label}
+        badge={
+          <>
+            <span className="usage-account__host" title={`Read on ${row.hostKey} over SSH`}>
+              {showHost ? row.hostKey : 'SSH'}
+            </span>
+            <DefaultAccountMark isDefault={isDefault} onUse={onUse} />
+          </>
+        }
+        summary={limitSummary(primaryLimit(row.usage.limits), mode)}
+        collapsed={collapsed}
+        onToggle={onToggle}
+      />
+      {!collapsed && (
+        <>
+          {row.usage.email && <div className="usage-account__email">{row.usage.email}</div>}
+          {row.usage.limits.map((l) => (
+            <LimitRow key={limitKey(l)} limit={l} mode={mode} />
+          ))}
+          {row.usage.limits.length === 0 && (
+            <div className="usage-popover__empty">
+              {row.usage.status === 'error'
+                ? 'Could not read usage on this host.'
+                : 'No usage data.'}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
@@ -193,20 +298,41 @@ function labelFor(provider: string): string {
   return providerLabel(provider, agentLabel)
 }
 
-function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remaining' | 'tokens' }) {
+function ProviderBlock({
+  u,
+  mode,
+  label,
+  collapsed,
+  onToggle
+}: {
+  u: ProviderUsage
+  mode: 'used' | 'remaining' | 'tokens'
+  /** Overridden for an external profile row, which is named by the user rather than by provider. */
+  label?: string
+  collapsed: boolean
+  onToggle: () => void
+}) {
   if (u.status === 'unavailable') return null
-  const label = labelFor(u.provider)
   return (
     <div className="usage-account">
-      <div className="usage-account__label">{label}</div>
-      {u.account && <div className="usage-account__email">{u.account}</div>}
-      {u.limits.map((l) => (
-        <LimitRow key={limitKey(l)} limit={l} mode={mode} />
-      ))}
-      {u.limits.length === 0 && (
-        <div className="usage-popover__empty">
-          {u.status === 'error' ? 'Could not read usage.' : 'No usage data.'}
-        </div>
+      <SectionToggle
+        label={label ?? labelFor(u.provider)}
+        summary={limitSummary(primaryLimit(u.limits), mode)}
+        collapsed={collapsed}
+        onToggle={onToggle}
+      />
+      {!collapsed && (
+        <>
+          {u.account && <div className="usage-account__email">{u.account}</div>}
+          {u.limits.map((l) => (
+            <LimitRow key={limitKey(l)} limit={l} mode={mode} />
+          ))}
+          {u.limits.length === 0 && (
+            <div className="usage-popover__empty">
+              {u.status === 'error' ? 'Could not read usage.' : 'No usage data.'}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
@@ -245,6 +371,41 @@ export function UsageIndicator({
     () => claudeAccounts.filter((a) => !a.pending && !a.host),
     [claudeAccounts]
   )
+
+  // Existing profile directories the panel READS but does not own (~/.claude-2). Display-only:
+  // they are not accounts, so nothing here reaches an account picker, a node chip, or `remove()`.
+  const externalProfiles = useSettings((s) => s.settings.externalUsageProfiles)
+  const externalClaude = useMemo(
+    () => (externalProfiles ?? []).filter((p) => p.provider === 'claude'),
+    [externalProfiles]
+  )
+  const externalClaudeIds = useMemo(() => externalClaude.map(externalProfileId), [externalClaude])
+
+  // An external Codex home arrives as an ordinary provider row — the shell supplies it with the
+  // external profile's id as `accountId`, because `fetchCodexUsage` already takes a home. Name it
+  // from the user's own label so two Codex rows never both read "Codex".
+  const profileLabelFor = (row: ProviderUsage): string | undefined => {
+    if (!row.accountId?.startsWith('ext:')) return undefined
+    return (externalProfiles ?? []).find((p) => externalProfileId(p) === row.accountId)?.label
+  }
+
+  // Collapsed sections live in settings, not component state: a panel someone has trimmed down
+  // should still be trimmed after a reload.
+  const collapsedSections = useSettings((s) => s.settings.collapsedUsageSections)
+  const updateSettings = useSettings((s) => s.update)
+  const collapsed = useMemo(() => new Set(collapsedSections ?? []), [collapsedSections])
+  const sectionProps = (ref: UsageSectionRef): { collapsed: boolean; onToggle: () => void } => {
+    const key = usageSectionKey(ref)
+    return {
+      collapsed: collapsed.has(key),
+      onToggle: () => {
+        const next = new Set(collapsed)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        updateSettings({ collapsedUsageSections: [...next] })
+      }
+    }
+  }
 
   // The indicator follows the ACTIVE project: on a local project it is this machine, on an SSH
   // project it is that host and nothing else. Showing every source at once is what made the panel
@@ -331,17 +492,22 @@ export function UsageIndicator({
   // Fetch each account's usage on demand when the popover opens (system row uses `usage`).
   // Skipped entirely on an SSH project: those identities are not what this project spends.
   useEffect(() => {
-    if (scope.kind !== 'local' || !open || accounts.length === 0) return
+    if (scope.kind !== 'local' || !open) return
+    // Managed accounts and external profiles are addressed the same way — one `usage.fetch` per
+    // id — so they share the cache below. The shell resolves an external id to the directory the
+    // user configured; the renderer never names a path.
+    const ids = [...accounts.map((a) => a.id), ...externalClaudeIds]
+    if (ids.length === 0) return
     let cancelled = false
-    for (const a of accounts) {
-      void window.nodeTerminal.usage.fetch(a.id).then((u) => {
-        if (!cancelled) setAcctUsage((m) => ({ ...m, [a.id]: u }))
+    for (const id of ids) {
+      void window.nodeTerminal.usage.fetch(id).then((u) => {
+        if (!cancelled) setAcctUsage((m) => ({ ...m, [id]: u }))
       })
     }
     return () => {
       cancelled = true
     }
-  }, [open, accounts, scope.kind])
+  }, [open, accounts, externalClaudeIds, scope.kind])
 
   // Close the popover on an outside click.
   useEffect(() => {
@@ -390,7 +556,13 @@ export function UsageIndicator({
   // (Claude included) has something to say. Both rules are pure and pinned by tests — gating on
   // Claude alone, which is what this did, left a Codex-only user with no pill at all.
   const enabled = enabledProviders(visibleProviders)
-  if (!hasAnyUsage(claudeUsage, visibleProviders, visibleRemote)) return null
+  // An external profile also earns the pill. It is a popover-only row (never polled, no pill
+  // segment), so without this a user whose Claude only lives in `~/.claude-2` would have nothing
+  // to click and no way to reach the panel that has their numbers. The pill reads '···' until the
+  // popover's first fetch lands, exactly as it does for any other source still being read.
+  if (!hasAnyUsage(claudeUsage, visibleProviders, visibleRemote) && externalClaude.length === 0) {
+    return null
+  }
 
   // On an SSH project these are the HOST's limits — same shape, same labels, read somewhere else.
   const limits = scoped.pillLimits
@@ -462,7 +634,9 @@ export function UsageIndicator({
             <span key={p.provider} className="usage-pill__provider">
               {(limits.length > 0 || i > 0) && <span className="usage-pill__sep">·</span>}
               <span className="usage-pill__num">
-                {percentNumber(worst.usedPercent, percentMode)}% {labelFor(p.provider)}
+                {/* A balance has no percentage to print; it carries its own amount text. */}
+                {worst.amountText ?? `${percentNumber(worst.usedPercent, percentMode)}%`}{' '}
+                {labelFor(p.provider)}
               </span>
             </span>
           )
@@ -492,47 +666,70 @@ export function UsageIndicator({
           {/* The local Claude section belongs to a LOCAL project only. On an SSH project the
               remote blocks below carry the same limits, and rendering both would print the
               host's numbers twice under two different headings. */}
-          {scope.kind === 'local' &&
-            (scoped.accounts.length > 0 && claudeUsage ? (
-              <>
-                <AccountUsageBlock
-                  mode={percentMode}
-                  label={systemAccountDisplay(systemLabelSetting, claudeUsage.email)}
-                  // Avoid printing the email twice when it's already the display label.
-                  email={systemLabelSetting.trim() ? (claudeUsage.email ?? undefined) : undefined}
-                  u={claudeUsage}
-                  {...rowMark(null)}
-                />
-                {scoped.accounts.map((a) => (
+          {scope.kind === 'local' && (
+            <>
+              {scoped.accounts.length > 0 && claudeUsage ? (
+                <>
                   <AccountUsageBlock
-                    key={a.id}
                     mode={percentMode}
-                    label={a.label}
-                    email={a.email}
-                    u={acctUsage[a.id] ?? null}
-                    {...rowMark(a.id)}
+                    label={systemAccountDisplay(systemLabelSetting, claudeUsage.email)}
+                    // Avoid printing the email twice when it's already the display label.
+                    email={systemLabelSetting.trim() ? (claudeUsage.email ?? undefined) : undefined}
+                    u={claudeUsage}
+                    {...rowMark(null)}
+                    {...sectionProps({ kind: 'claude' })}
                   />
-                ))}
-              </>
-            ) : (
-              <>
-                {/* Claude's rows are bare when it is the only provider; once others share the
-                    panel they need a heading of their own to stay attributable. */}
-                {enabled.length > 0 && limits.length > 0 && (
-                  <div className="usage-account__label">Claude</div>
-                )}
-                {limits.map((l) => (
-                  <LimitRow key={limitKey(l)} limit={l} mode={percentMode} />
-                ))}
-                {!hasData && <div className="usage-popover__empty">No usage data.</div>}
-                {claudeUsage?.email && (
-                  <div className="usage-account">
-                    <div className="usage-account__label">Claude Account</div>
-                    <div className="usage-account__email">{claudeUsage.email}</div>
-                  </div>
-                )}
-              </>
-            ))}
+                  {scoped.accounts.map((a) => (
+                    <AccountUsageBlock
+                      key={a.id}
+                      mode={percentMode}
+                      label={a.label}
+                      email={a.email}
+                      u={acctUsage[a.id] ?? null}
+                      {...rowMark(a.id)}
+                      {...sectionProps({ kind: 'claude', accountId: a.id })}
+                    />
+                  ))}
+                </>
+              ) : (
+                <>
+                  {/* Claude's rows are bare when it is the only provider; once others share the
+                      panel they need a heading of their own to stay attributable. */}
+                  {enabled.length > 0 && limits.length > 0 && (
+                    <div className="usage-account__label">Claude</div>
+                  )}
+                  {limits.map((l) => (
+                    <LimitRow key={limitKey(l)} limit={l} mode={percentMode} />
+                  ))}
+                  {!hasData && <div className="usage-popover__empty">No usage data.</div>}
+                  {claudeUsage?.email && (
+                    <div className="usage-account">
+                      <div className="usage-account__label">Claude Account</div>
+                      <div className="usage-account__email">{claudeUsage.email}</div>
+                    </div>
+                  )}
+                </>
+              )}
+              {/* External profiles sit with the accounts because that is what they describe, but
+                  they render OUTSIDE the branch above: they are the only Claude rows a user with
+                  no managed accounts would have, and nesting them would hide them for exactly
+                  that user. Read-only rows — no "use for new sessions" offer, because these
+                  directories are not homes nodeterm minted and cannot launch into. */}
+              {externalClaude.map((p) => {
+                const id = externalProfileId(p)
+                return (
+                  <AccountUsageBlock
+                    key={id}
+                    mode={percentMode}
+                    label={p.label}
+                    u={acctUsage[id] ?? null}
+                    external
+                    {...sectionProps({ kind: 'claude', accountId: id })}
+                  />
+                )
+              })}
+            </>
+          )}
           {/* On an SSH project these are the whole panel; the host badge is what says the numbers
               were read somewhere other than this machine. */}
           {/* The same offer on an SSH project's rows — scoped as ever: only the host's system
@@ -543,6 +740,7 @@ export function UsageIndicator({
               row={r}
               mode={percentMode}
               {...rowMark(r.accountId)}
+              {...sectionProps({ kind: 'remote', hostKey: r.hostKey, accountId: r.accountId })}
             />
           ))}
           {scope.kind === 'ssh' && visibleRemote.length === 0 && (
@@ -554,7 +752,19 @@ export function UsageIndicator({
               Key on provider+accountId so each account renders distinctly, and reduce true
               duplicates (two settings entries → the same underlying account) to one row. */}
           {dedupeProviderRows(visibleProviders).map((p) => (
-            <ProviderBlock key={providerRowKey(p)} u={p} mode={percentMode} />
+            <ProviderBlock
+              key={providerRowKey(p)}
+              u={p}
+              mode={percentMode}
+              // An external profile row is named by the user, not by the provider — "Codex"
+              // twice with different numbers under it would not say which account is which.
+              label={profileLabelFor(p)}
+              {...sectionProps({
+                kind: 'provider',
+                provider: p.provider,
+                accountId: p.accountId
+              })}
+            />
           ))}
           {/* Issue #420 — "Switch account" where the limit is displayed: opens a terminal
               running the SYSTEM-scoped `claude /login` (createSystemLoginNode), so picking the

@@ -6640,6 +6640,43 @@ button.group-node__setup:disabled {
   color: rgba(var(--tint-rgb), 0.45);
   margin-bottom: 4px;
 }
+/* Section header + disclosure. Keeps `.usage-account__label`'s quiet voice so a collapsible panel
+   still reads like the readout it was; the chevron is the only affordance added. */
+.usage-section__head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 0;
+  margin-bottom: 4px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-size: 12px;
+  color: rgba(var(--tint-rgb), 0.45);
+  cursor: pointer;
+}
+.usage-section__head:hover { color: rgba(var(--tint-rgb), 0.75); }
+.usage-section__chevron {
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  transition: transform 0.12s ease;
+}
+.usage-section__chevron.is-collapsed { transform: rotate(-90deg); }
+.usage-section__label { font-weight: 500; }
+/* The reading a collapsed section would have led with, pushed to the far end so it lines up with
+   the number column an open row uses. */
+.usage-section__summary {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: rgba(var(--tint-rgb), 0.6);
+}
+/* A balance row's amount — the one reading that replaces the bar + percent entirely. */
+.usage-row__amount {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
 /* Host chip on a remote (SSH) account row — the same email can be signed in on several
    machines, so the row has to say WHERE these numbers came from. */
 .usage-account__host {

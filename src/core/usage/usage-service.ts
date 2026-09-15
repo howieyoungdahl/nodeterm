@@ -24,6 +24,7 @@ import {
   type RemoteUsageTarget
 } from './remote-claude-usage'
 import { fetchCodexUsage } from './codex-usage'
+import { fetchDeepseekUsage } from './deepseek-usage'
 import { fetchGeminiUsage } from './gemini-usage'
 import { fetchGrokUsage } from './grok-usage'
 import { fetchKimiUsage } from './kimi-usage'
@@ -37,6 +38,8 @@ import {
   hasProviderCookie
 } from './provider-cookie'
 import { usageCredsPaths } from '../claude-accounts-core'
+import type { ExternalUsageProfile } from '../../shared/external-profile'
+import { resolveExternalProfiles } from './external-profile-dir'
 import { claudeConfigDirFor } from '../claude-config-dir'
 import { platform } from '../platform'
 
@@ -63,6 +66,8 @@ const OTHER_PROVIDERS: { id: string; fetch: () => Promise<ProviderUsage> }[] = [
   // Codex is NOT here — it is account-scoped (one system row + one row per managed account,
   // built dynamically in runProviders so each row is keyed by its own accountId and can never
   // collapse into another). See the Codex block in runProviders and S6 §4.3 (no mixing).
+  // DeepSeek reports a prepaid balance rather than quota windows — see its `amountText` rows.
+  { id: 'deepseek', fetch: fetchDeepseekUsage },
   { id: 'gemini', fetch: fetchGeminiUsage },
   { id: 'grok', fetch: fetchGrokUsage },
   { id: 'kimi', fetch: fetchKimiUsage },
@@ -95,8 +100,11 @@ export function parseCreds(raw: string): OAuthCreds {
  * The Keychain leg is darwin-only by construction — on the Server Edition's Linux host the
  * `security` binary does not exist, so the file leg is the whole story there.
  */
-async function resolveCreds(accountId?: string): Promise<OAuthCreds> {
-  const configDir = accountId ? claudeConfigDirFor(accountId) : undefined
+async function resolveCreds(accountId?: string, configDirOverride?: string): Promise<OAuthCreds> {
+  // An external profile (`externalUsageProfiles`) names its directory directly; a managed account
+  // derives its own. The override never reaches a path builder that treats its input as an id —
+  // it is resolved and validated upstream (`resolveExternalProfiles`) and only ever READ here.
+  const configDir = configDirOverride ?? (accountId ? claudeConfigDirFor(accountId) : undefined)
   const { services, credsFile, identityFile } = usageCredsPaths(os.homedir(), configDir)
 
   let creds: OAuthCreds = { accessToken: null, email: null }
@@ -153,9 +161,19 @@ export async function resolveClaudeAccessToken(accountId?: string): Promise<stri
   return (await resolveCreds(accountId)).accessToken
 }
 
-export async function fetchUsage(accountId?: string): Promise<ClaudeUsage> {
+export async function fetchUsage(accountId?: string, configDirOverride?: string): Promise<ClaudeUsage> {
   const now = Date.now()
-  const { accessToken, email } = await resolveCreds(accountId)
+  let creds: OAuthCreds
+  try {
+    creds = await resolveCreds(accountId, configDirOverride)
+  } catch {
+    // An id that cannot be turned into a path — an external profile since removed from settings,
+    // or one whose directory now fails validation — is "nothing to show", the same fail-closed
+    // answer as a missing credentials file. Never a rejection: the renderer has no catch on this
+    // channel, and an unhandled rejection is not a signal anyone can act on.
+    return emptyUsage(null, now, 'unavailable')
+  }
+  const { accessToken, email } = creds
   if (!accessToken) return emptyUsage(email, now, 'unavailable')
   try {
     const ctrl = new AbortController()
@@ -213,6 +231,19 @@ export interface UsageServiceOptions {
    * Absent ⇒ the system Codex account only (the merged S4 flat-identity behavior is untouched).
    */
   codexAccounts?: () => Array<{ id: string; home: string; label: string; email?: string | null }>
+  /**
+   * Existing Claude profile directories to read usage from WITHOUT adopting them as managed
+   * accounts (settings' `externalUsageProfiles`, filtered to `provider: 'claude'`). Each is a
+   * read-only row: the directory is validated at read time and never written to, launched from,
+   * or deleted — which is what makes pointing one at a profile the user already has (`~/.claude-2`)
+   * safe. Fetched on demand like a managed account, never polled: it has no pill segment, so a
+   * background request would be spent on numbers nobody is looking at.
+   *
+   * The shell owns this because settings live in the shell, and it hands over DIRECTORIES rather
+   * than letting the renderer name a path per call — the same reason `codexAccounts` supplies a
+   * home. Must never throw. Absent ⇒ no external rows.
+   */
+  externalUsageProfiles?: () => readonly ExternalUsageProfile[]
   /**
    * Fired after any account's cache is (re)populated — the mirror wires this to a flush so the
    * phone-facing `usage` block refreshes when a poll lands. Best-effort; must never throw.
@@ -283,11 +314,26 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     }
   }
 
+  // External profile dirs, keyed by the id the renderer addresses them by. Re-read per fetch like
+  // the Codex account list, and fail-closed: a malformed settings list yields no external rows
+  // rather than a throw that would take the whole usage surface down with it.
+  const readExternalDirs = (): Map<string, string> => {
+    const dirs = new Map<string, string>()
+    try {
+      for (const p of resolveExternalProfiles(opts.externalUsageProfiles?.(), 'claude')) {
+        dirs.set(p.id, p.dir)
+      }
+    } catch {
+      // a throwing provider must never break the sweep
+    }
+    return dirs
+  }
+
   const run = async (accountId?: string): Promise<ClaudeUsage> => {
     const key = accountId ?? ''
     const pending = inFlight.get(key)
     if (pending) return pending
-    const p = fetchUsage(accountId)
+    const p = fetchUsage(accountId, accountId ? readExternalDirs().get(accountId) : undefined)
     inFlight.set(key, p)
     try {
       const u = await p
