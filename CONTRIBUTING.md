@@ -411,7 +411,10 @@ Two files, two audiences:
 
 - **`CONTRIBUTING.md`** (this file) — what another human needs before touching the code.
 - **`AGENT-REFERENCE.md`**: the deep invariants, per subsystem, with reasoning and measurements.
-  `AGENTS.md` is the shared routing file; `CLAUDE.md` is only its compatibility import.
+  `AGENTS.md` is the shared routing file, loaded natively by supported coding agents.
+  Claude Code requires 2.1.277+ and native AGENTS support enabled. Check `/context`
+  if using a third-party provider or disabling telemetry/hooks; those sessions may
+  omit AGENTS. Local or ancestor Claude instruction files can also suppress it.
 
 **If you change or discover something other contributors must know, update this file too.** An
 invariant that only lives in a commit message is one refactor away from being violated by someone

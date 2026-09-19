@@ -1,8 +1,10 @@
 # Nodeterm agent instructions
 
-This is the shared entrypoint for coding agents. `CLAUDE.md` imports this file
-for compatibility. Maintain shared instructions here and in the linked
-reference, never in a second provider-specific copy.
+This is the shared entrypoint for coding agents, loaded natively by supported
+Claude Code sessions (2.1.277+), Codex and OpenCode. Maintain shared instructions
+here and in the linked reference, never in a second provider-specific copy.
+Verify project instructions loaded before work, especially with third-party
+providers, telemetry/hooks disabled, or local/ancestor Claude instruction files.
 
 Before implementation, read `CONTRIBUTING.md`, then the applicable sections of
 [the engineering reference](AGENT-REFERENCE.md). Always read its
