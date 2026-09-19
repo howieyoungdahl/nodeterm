@@ -2,8 +2,8 @@
 
 Thanks for looking. This file is the short door: enough to get running, plus the house rules that
 actually get a pull request sent back. The long version — every subsystem and the reasoning behind
-its invariants — lives in `CLAUDE.md` at the repo root, which is also loaded automatically if you
-work with an AI coding agent.
+its invariants lives in `AGENT-REFERENCE.md` at the repo root. Coding agents
+start at `AGENTS.md`, which routes them to the relevant reference sections.
 
 nodeterm is licensed **BUSL-1.1** (converts to MIT after four years — see `LICENSE`). Contributions
 are accepted under that license.
@@ -221,7 +221,7 @@ The same applies to any hook-server signature change; this repo has shipped one 
 three times.
 
 **Do not take scrolling away from tmux.** It owns the mouse, the scrollback and the alternate
-screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
+screen. A previous design moved that into the emulator and failed structurally; `AGENT-REFERENCE.md` explains
 why in detail.
 
 **Keep renderer terminal memory separate from tmux history.** tmux may retain 50,000 operator-
@@ -410,7 +410,8 @@ checklists for exactly this.
 Two files, two audiences:
 
 - **`CONTRIBUTING.md`** (this file) — what another human needs before touching the code.
-- **`CLAUDE.md`** — the deep invariants, per subsystem, with the reasoning and the measurements.
+- **`AGENT-REFERENCE.md`**: the deep invariants, per subsystem, with reasoning and measurements.
+  `AGENTS.md` is the shared routing file; `CLAUDE.md` is only its compatibility import.
 
 **If you change or discover something other contributors must know, update this file too.** An
 invariant that only lives in a commit message is one refactor away from being violated by someone
