@@ -756,6 +756,10 @@ guessed value is refused. Instead call the loopback operator API directly: \`/op
 authenticated with the 0600 \`ops-token\` file in the Server data dir (\`Authorization: Bearer
 <token>\`, loopback peers only).
 
+Never print, log, or pass the ops-token on a command line (argv); a process listing on a shared
+machine could read it there. Pass it to curl on stdin instead, for example:
+\`printf 'header = "Authorization: Bearer %s"\\n' "$tok" | curl --config - ...\`.
+
 - \`GET /opsapi/nodes\` — list current nodes.
 - \`POST /opsapi/nodes\` — create one (\`projectId\`, \`cmd\`, \`cwd\`, \`title\`, \`width\`, \`height\`,
   all optional; defaults to the active project and that project's folder).
