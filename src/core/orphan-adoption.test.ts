@@ -8,6 +8,7 @@ import {
   planOrphanAdoption,
   type OrphanMirrorEntry
 } from './orphan-adoption'
+import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
 import type { CanvasNodeState, Project } from '../shared/types'
 
 /**
@@ -53,6 +54,25 @@ const plan = (over: {
   })
 
 describe('planOrphanAdoption', () => {
+  it('never adopts a hand-made session named after the ops-operator sentinel', () => {
+    // A live `nt-ops-operator` session (hand-made, or a leftover from some other tool) would
+    // otherwise become a real, carded, control-capable node whose id lets it spoof the
+    // `/opsapi/nodes` operator plane's own creator identity (headless-node-factory.ts `ownsSpawn`).
+    const result = plan({
+      sessionNames: [`nt-${OPS_OPERATOR_SOURCE_ID}`],
+      paneCwds: { [`nt-${OPS_OPERATOR_SOURCE_ID}`]: abs('srv', 'repo', 'src') }
+    })
+    expect(result.adopt).toEqual([])
+    expect(result.skipped).toEqual([
+      {
+        nodeId: OPS_OPERATOR_SOURCE_ID,
+        sessionName: `nt-${OPS_OPERATOR_SOURCE_ID}`,
+        cwd: null,
+        reason: 'reserved-node-id'
+      }
+    ])
+  })
+
   it('adopts a live session with no card into the project that owns its pane cwd', () => {
     const result = plan({
       sessionNames: ['nt-term-a'],

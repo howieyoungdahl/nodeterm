@@ -7,6 +7,7 @@ import {
 } from '../core/orphan-adoption'
 import { sessionName } from '../core/tmux-naming'
 import type { AgentState } from '../shared/agents/normalize'
+import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
 import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
@@ -15,12 +16,12 @@ import { WorkspaceMutationQueue } from './workspace-mutation-queue'
  * directly — never a spoofed live node id. `remove`/`update` read it back to recognize an
  * operator-created card without an explicit `?force=1`, and `list` surfaces it so a caller can
  * tell operator-spawned cards from agent-spawned ones.
+ *
+ * Defined in `shared/ops-operator-identity.ts` (re-exported here for every existing import of this
+ * module) so `headless-node-factory.ts`'s `ownsSpawn` can refuse it as a control-plane CALLER
+ * identity without this file and that one depending on each other.
  */
-// Charset-constrained to `isSafeNodeId` ([A-Za-z0-9._-]): the durable ownership ledger
-// (node-ownership-store.ts `record()`) silently refuses any sourceNodeId outside that charset
-// (fail-closed, by design), so a colon or other separator here would make `create()`'s ownership
-// stamp a no-op against the persistent store even though the in-memory test double accepts it.
-export const OPS_OPERATOR_SOURCE_ID = 'ops-operator'
+export { OPS_OPERATOR_SOURCE_ID }
 
 // Mirrors headless-node-factory.ts's `terminalSize()` clamp range and default terminal geometry.
 // Duplicated rather than imported: the operator plane (this file) is wired unconditionally in
@@ -53,6 +54,11 @@ function nextOperatorNodeId(): string {
  * (unparented) cards: a card inside a group frame is positioned in the frame's own local space, not
  * comparable to this root-space scan, and operator placement only needs to avoid the common case.
  */
+/** Bound on the collision-scan grid (below). A saved card's size is foreign data — a corrupt or
+ *  absurd value (width `1e12`, still valid JSON) must never turn one HTTP request into an
+ *  unbounded loop on the single event-loop thread; see the fallback below. */
+const MAX_PLACEMENT_SLOTS = 2_000
+
 function placeFromOrigin(
   project: Project,
   size: { width: number; height: number }
@@ -65,7 +71,7 @@ function placeFromOrigin(
       width: Math.max(1, candidate.size?.width || OPERATOR_DEFAULT_NODE_SIZE.width),
       height: Math.max(1, candidate.size?.height || OPERATOR_DEFAULT_NODE_SIZE.height)
     }))
-  for (let slot = 0; ; slot++) {
+  for (let slot = 0; slot < MAX_PLACEMENT_SLOTS; slot++) {
     const column = Math.floor(slot / 3)
     const row = slot % 3
     const candidate = {
@@ -83,6 +89,14 @@ function placeFromOrigin(
     )
     if (!collides) return { x: candidate.x, y: candidate.y }
   }
+  // The scan gave up rather than spin: place past the right edge of the widest occupied extent.
+  // Not guaranteed collision-free against every card (a huge one could still reach past it), but
+  // guaranteed to terminate, and clear of every NORMALLY sized card on the canvas.
+  const maxRight = occupied.reduce(
+    (max, rect) => (Number.isFinite(rect.x + rect.width) ? Math.max(max, rect.x + rect.width) : max),
+    0
+  )
+  return { x: maxRight + OPERATOR_H_GAP, y: 0 }
 }
 
 export type OpsPaneState = 'alive' | 'dead' | 'unknown' | 'none'
@@ -271,7 +285,16 @@ export interface OpsCreateInput {
 
 export type OpsCreateResult =
   | { ok: true; id: string; projectId: string; title: string; tmuxSession: string }
-  | { ok: false; status: number; error: string }
+  | {
+      ok: false
+      status: number
+      error: string
+      /** Set when the card was already persisted (a spawn/command failure, never a validation
+       *  refusal) — the CLI can retry the command or clean up by id without parsing the error
+       *  string. */
+      id?: string
+      tmuxSession?: string
+    }
 
 export interface OpsUpdateInput {
   title?: string
@@ -699,9 +722,18 @@ export class ServerNodeOps {
         error: 'create_not_supported: this server was not wired for operator node creation'
       }
     }
+    // The real tmux session name, computed up front: needed on every path below, success or
+    // failure, once the card is persisted (see the comment on the success return for why this is
+    // never `spawned.sessionId`).
+    const tmuxSession = sessionName(node.id)
     try {
       const spawned = await this.deps.createSession({
-        cwd: node.cwd,
+        // Same default `open()`/`ptyOptions()` uses for every other server-spawned terminal
+        // (headless-node-factory.ts): an explicit --cwd wins, else the project's own folder — never
+        // PtyManager's own fallback (the bearer holder's $HOME), which would put a `canvas new`
+        // with no --cwd in a different place than the project it was created against, and a later
+        // browser reopen of the same card (which resolves cwd the SAME way) would then diverge.
+        cwd: node.cwd || project.cwd,
         cols: OPERATOR_TERMINAL_COLS,
         rows: OPERATOR_TERMINAL_ROWS,
         persistKey: node.id,
@@ -711,7 +743,9 @@ export class ServerNodeOps {
         return {
           ok: false,
           status: 502,
-          error: `pty_spawn_failed: node ${node.id} was persisted but its terminal session could not be started`
+          error: `pty_spawn_failed: node ${node.id} was persisted but its terminal session could not be started`,
+          id: node.id,
+          tmuxSession
         }
       }
       if (input.cmd !== undefined && !(await this.deps.sendText?.(node.id, input.cmd))) {
@@ -720,25 +754,23 @@ export class ServerNodeOps {
           status: 502,
           error:
             `pty_command_failed: node ${node.id} was persisted and its session started, but the ` +
-            'initial command could not be delivered'
+            'initial command could not be delivered',
+          id: node.id,
+          tmuxSession
         }
       }
       // `spawned.sessionId` is PtyManager's own internal pty-registry id ("pty-N"), not the tmux
       // session name — `sessionName()` (core/tmux-naming.ts) is the single source of truth for
       // that, the same function `has-session`/`send-keys`/`kill-session` callers must use to find
       // this node's real backend.
-      return {
-        ok: true,
-        id: node.id,
-        projectId: project.id,
-        title: node.title,
-        tmuxSession: sessionName(node.id)
-      }
+      return { ok: true, id: node.id, projectId: project.id, title: node.title, tmuxSession }
     } catch (error) {
       return {
         ok: false,
         status: 502,
-        error: `pty_spawn_failed: ${error instanceof Error ? error.message : String(error)}`
+        error: `pty_spawn_failed: ${error instanceof Error ? error.message : String(error)}`,
+        id: node.id,
+        tmuxSession
       }
     }
   }

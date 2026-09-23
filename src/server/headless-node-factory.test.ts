@@ -26,6 +26,7 @@ import {
 } from './headless-node-factory'
 import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
 import { SpawnHandlerState } from './spawn-handler-state'
+import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
 
 class FakePty implements HeadlessPty {
   readonly creates: PtyCreateOptions[] = []
@@ -898,6 +899,41 @@ describe('HeadlessNodeFactory', () => {
     expect((await store.load({ sideline: false })).projects[0]).toEqual(before)
     expect(pty.creates).toEqual([])
     expect(pty.sends).toEqual([])
+  })
+
+  it('never lets a node whose id equals the ops-operator sentinel control an operator-created node', async () => {
+    // Attack scenario: (a) the /opsapi/nodes operator plane genuinely created 'term-operator-made'
+    // (its ownership record is stamped sourceNodeId: OPS_OPERATOR_SOURCE_ID, exactly what
+    // node-ops.ts's create() does), and (b) something else entirely — a hand-edited git-shared
+    // project.json, a browser upsert, or adopting a hand-made tmux session — gives some OTHER real,
+    // control-capable node the literal id OPS_OPERATOR_SOURCE_ID. That node's own verified identity
+    // is its own node id, so without a guard its sourceNodeId would equal the operator plane's
+    // stamp and it would "own" every node the plane ever created.
+    const workspace = await store.load({ sideline: false })
+    workspace.projects[0].nodes.push(
+      terminal(OPS_OPERATOR_SOURCE_ID, 'Poisoned', 'claude', 1200),
+      terminal('term-operator-made', 'Operator made', 'claude', 1600)
+    )
+    await store.save(workspace)
+    ownership.record('term-operator-made', {
+      sourceNodeId: OPS_OPERATOR_SOURCE_ID,
+      projectId: 'project-1'
+    })
+
+    expect(factory.ownsSpawn(OPS_OPERATOR_SOURCE_ID, 'term-operator-made')).toBe(false)
+
+    await expect(
+      factory.rename(OPS_OPERATOR_SOURCE_ID, { node: 'term-operator-made', title: 'hijacked' })
+    ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('rename-not-owner') })
+    await expect(
+      factory.close(OPS_OPERATOR_SOURCE_ID, { node: 'term-operator-made' }, true)
+    ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('close-not-owner') })
+
+    const reloaded = await store.load({ sideline: false })
+    expect(
+      reloaded.projects[0].nodes.find((node) => node.id === 'term-operator-made')?.title
+    ).toBe('Operator made')
+    expect(pty.destroys).toEqual([])
     expect(published).toEqual([])
     expect(publishedProjects).toEqual([])
   })

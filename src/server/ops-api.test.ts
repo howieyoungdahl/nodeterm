@@ -253,6 +253,57 @@ describe('/opsapi', () => {
     expect(await res.json()).toEqual({ error: 'unknown_project_id: no project "nope"' })
   })
 
+  it('forwards the persisted id/tmuxSession on a 502 create failure', async () => {
+    createResult = {
+      ok: false,
+      status: 502,
+      error: 'pty_command_failed: node term-abc was persisted...',
+      id: 'term-abc',
+      tmuxSession: 'nt-term-abc'
+    }
+    const res = await fetch(`${base}/opsapi/nodes`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({})
+    })
+    expect(res.status).toBe(502)
+    expect(await res.json()).toEqual({
+      error: 'pty_command_failed: node term-abc was persisted...',
+      id: 'term-abc',
+      tmuxSession: 'nt-term-abc'
+    })
+  })
+
+  it('requires a bearer token on POST and PATCH, and rejects a wrong one', async () => {
+    const noAuth = await fetch(`${base}/opsapi/nodes`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}'
+    })
+    expect(noAuth.status).toBe(401)
+    const wrongAuth = await fetch(`${base}/opsapi/nodes`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer wrong', 'content-type': 'application/json' },
+      body: '{}'
+    })
+    expect(wrongAuth.status).toBe(401)
+    expect(createCalls).toHaveLength(0)
+
+    const patchNoAuth = await fetch(`${base}/opsapi/nodes/term-abc`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'x' })
+    })
+    expect(patchNoAuth.status).toBe(401)
+    const patchWrongAuth = await fetch(`${base}/opsapi/nodes/term-abc`, {
+      method: 'PATCH',
+      headers: { authorization: 'Bearer wrong', 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'x' })
+    })
+    expect(patchWrongAuth.status).toBe(401)
+    expect(updateCalls).toHaveLength(0)
+  })
+
   it('PATCH renames/resizes and forwards the force query flag', async () => {
     const res = await fetch(`${base}/opsapi/nodes/term-abc?force=1`, {
       method: 'PATCH',

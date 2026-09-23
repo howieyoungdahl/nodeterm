@@ -47,6 +47,7 @@ import {
 import { assembleLaunchCommand } from '../shared/agents/launch'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 import { oneLine } from '../shared/one-line'
+import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
 import type {
   BridgeLink,
   CanvasNodeState,
@@ -1004,8 +1005,23 @@ export class HeadlessNodeFactory {
     this.publishChangeSet(project, nodes, [])
   }
 
-  /** Literal creator ownership: a caller may act only on nodes it freshly spawned this run. */
+  /**
+   * Literal creator ownership: a caller may act only on nodes it freshly spawned this run.
+   *
+   * `OPS_OPERATOR_SOURCE_ID` is refused as a CALLER identity here unconditionally, in both
+   * directions. It is the `/opsapi/nodes` operator plane's own ledger stamp, but it is also, by
+   * construction, a syntactically valid node id (`isSafeNodeId`), so a node whose own id happens to
+   * equal it — via a hand-edited git-shared `.nodeterm/project.json`, a browser-side upsert, or
+   * orphan-adopting a hand-made `nt-ops-operator` tmux session (guarded separately in
+   * `core/orphan-adoption.ts`) — would otherwise get a real per-node token and, calling any verb as
+   * `sourceNodeId: 'ops-operator'`, "own" every node the operator plane ever created (and every
+   * node IT then spawned would be auto-force-killable by an unauthenticated-looking DELETE). This
+   * closes that off at the one choke point every ownership check (`ownsMutation`, `list`'s
+   * `openedByCaller`) already routes through: that node can create things, but can never CONTROL
+   * anything through this identity, exactly as if it had spawned nothing at all.
+   */
   ownsSpawn(sourceNodeId: string, nodeId: string): boolean {
+    if (sourceNodeId === OPS_OPERATOR_SOURCE_ID) return false
     return this.ownership.ownerOf(nodeId)?.sourceNodeId === sourceNodeId
   }
 
@@ -1301,13 +1317,16 @@ export class HeadlessNodeFactory {
       // refusal, never a partial destructive success whose surviving ids the caller must guess.
       const frameIds = new Set<string>()
       for (const id of ids) {
-        const ownership = this.ownership.ownerOf(id)
-        if (!ownership || ownership.sourceNodeId !== sourceNodeId) {
+        // Route through `ownsSpawn` rather than reading `this.ownership.ownerOf` directly: it is
+        // the one choke point that also refuses `sourceNodeId === OPS_OPERATOR_SOURCE_ID` as a
+        // caller identity (see its own doc comment) — a duplicated inline check here bypassed that.
+        if (!this.ownsSpawn(sourceNodeId, id)) {
           return {
             ok: false,
             error: `close-not-owner: ${sourceNodeId} did not spawn ${id} during this server run`
           }
         }
+        const ownership = this.ownership.ownerOf(id)!
         const project = workspace.projects.find((candidate) => candidate.id === ownership.projectId)
         const target = project?.nodes.find((node) => node.id === id)
         if (target?.kind === 'group') {

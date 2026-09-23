@@ -214,7 +214,11 @@ export function createOpsApiHandler(
           }
           const result = await deps.createNode(input)
           if (!result.ok) {
-            sendJson(res, result.status, { error: result.error })
+            sendJson(res, result.status, {
+              error: result.error,
+              ...(result.id ? { id: result.id } : {}),
+              ...(result.tmuxSession ? { tmuxSession: result.tmuxSession } : {})
+            })
             return
           }
           sendJson(res, 201, {

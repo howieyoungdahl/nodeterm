@@ -278,12 +278,17 @@ describe.skipIf(!canDriveTmux)('operator node creation (POST/PATCH/DELETE /opsap
       body: JSON.stringify({ projectId: 'op-project', cmd: 'echo hello-from-operator' })
     })
     expect([201, 502]).toContain(res.status)
-    const body = (await res.json()) as { id?: string; error?: string }
+    const body = (await res.json()) as { id?: string; tmuxSession?: string; error?: string }
     if (res.status === 201) {
       expect(backendExists(body.id as string)).toBe(true)
       await fetch(`${base}/opsapi/nodes/${body.id}`, { method: 'DELETE', headers: auth })
     } else {
+      // Structured, not just prose: the CLI can retry the command or clean up by id without
+      // parsing the error string.
       expect(body.error).toContain('pty_command_failed')
+      expect(body.id).toBeTruthy()
+      expect(body.tmuxSession).toBe(`nt-${body.id}`)
+      await fetch(`${base}/opsapi/nodes/${body.id}`, { method: 'DELETE', headers: auth })
     }
   }, 20_000)
 
@@ -452,4 +457,134 @@ describe.skipIf(!canDriveTmux)('operator-created node canvas identity', () => {
 
     await fetch(`${base}/opsapi/nodes/${nodeId}`, { method: 'DELETE', headers: auth })
   }, 20_000)
+})
+
+/**
+ * Round 2 review nit (NIT-3): the earlier `requires force to PATCH a node this plane did not
+ * create` test only asserted a 404 on a nonexistent id — it never actually exercised the force
+ * gate. This seeds a REAL node through the real persisted ownership ledger (`node-ownership.json`,
+ * the same file `node-ownership-store.ts` reads at boot) with a sourceNodeId that is NOT the
+ * operator plane's, and a real tmux session so its pane genuinely reads `alive`. This is the exact
+ * kind of test that would have caught the `ops:operator` ownership-ledger charset bug: the earlier
+ * unit tests used the in-memory `createHeadlessNodeOwnership()` double, which has no charset gate.
+ */
+describe.skipIf(!canDriveTmux)('operator-plane force gate on a real, non-operator node', () => {
+  let dataDir = ''
+  let projectDir = ''
+  let base = ''
+  let auth: { authorization: string } = { authorization: '' }
+  let close: (() => Promise<void>) | undefined
+  const nodeId = 'manual-terminal'
+
+  beforeAll(async () => {
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-ops-force-gate-e2e-'))
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-ops-force-gate-project-'))
+    const workspace: Workspace = {
+      version: 2,
+      activeProjectId: 'force-project',
+      projects: [
+        {
+          id: 'force-project',
+          name: 'Force gate e2e',
+          color: '#0a84ff',
+          cwd: projectDir,
+          viewport: { x: 0, y: 0, zoom: 1 },
+          nodes: [
+            {
+              id: nodeId,
+              kind: 'terminal',
+              position: { x: 0, y: 0 },
+              size: { width: 640, height: 440 },
+              title: 'Manually seeded terminal',
+              color: '#d97757',
+              group: null
+            }
+          ],
+          bridges: [],
+          ropes: []
+        }
+      ]
+    }
+    fs.mkdirSync(dataDir, { recursive: true })
+    fs.writeFileSync(path.join(dataDir, 'workspace.json'), JSON.stringify(workspace), 'utf8')
+    // The real persisted ledger (node-ownership-store.ts's own file shape), stamped with a
+    // sourceNodeId that is NOT OPS_OPERATOR_SOURCE_ID — a node some OTHER real caller spawned.
+    fs.writeFileSync(
+      path.join(dataDir, 'node-ownership.json'),
+      JSON.stringify({
+        v: 1,
+        owners: {
+          [nodeId]: { sourceNodeId: 'director-card', projectId: 'force-project', recordedAt: Date.now() }
+        }
+      }),
+      'utf8'
+    )
+
+    const server = await startServer({
+      port: 0,
+      host: '127.0.0.1',
+      dataDir,
+      rendererDir: path.join(dataDir, 'no-renderer'),
+      insecureHttp: false,
+      passwordSeed: 'ops-force-gate-e2e-password',
+      installHooks: false,
+      headless: false
+    })
+    close = server.close
+    base = `http://127.0.0.1:${server.port}`
+    const token = fs.readFileSync(path.join(dataDir, 'ops-token'), 'utf8').trim()
+    auth = { authorization: `Bearer ${token}` }
+
+    // A real tmux session under this node's exact session name, so its pane genuinely reads
+    // `alive` (never simulated) — created after boot so the private tmux socket the setupFile
+    // minted for this worker is already the one `TMUX_SOCKET` resolves to.
+    execFileSync('tmux', ['-L', TMUX_SOCKET, 'new-session', '-d', '-s', sessionName(nodeId)], {
+      stdio: 'ignore'
+    })
+    expect(backendExists(nodeId)).toBe(true)
+  }, 30_000)
+
+  afterAll(async () => {
+    await close?.()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  it('PATCH without force is refused, with force succeeds', async () => {
+    const refused = await fetch(`${base}/opsapi/nodes/${nodeId}`, {
+      method: 'PATCH',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'hijacked' })
+    })
+    expect(refused.status).toBe(403)
+    expect((await refused.json()).error).toContain('force_required')
+
+    const forced = await fetch(`${base}/opsapi/nodes/${nodeId}?force=1`, {
+      method: 'PATCH',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'renamed with force' })
+    })
+    expect(forced.status).toBe(200)
+    expect(await forced.json()).toMatchObject({ id: nodeId, title: 'renamed with force' })
+  })
+
+  it('DELETE without force refuses a live pane, with force kills it', async () => {
+    expect(backendExists(nodeId)).toBe(true)
+
+    const refused = await fetch(`${base}/opsapi/nodes/${nodeId}`, { method: 'DELETE', headers: auth })
+    expect(refused.status).toBe(409)
+    expect((await refused.json()).error).toBe('pane_alive')
+    expect(backendExists(nodeId)).toBe(true)
+
+    const forced = await fetch(`${base}/opsapi/nodes/${nodeId}?force=1`, {
+      method: 'DELETE',
+      headers: auth
+    })
+    expect(forced.status).toBe(200)
+    expect(await forced.json()).toMatchObject({ ok: true, removedIds: [nodeId], forced: true })
+
+    const listed = await fetch(`${base}/opsapi/nodes`, { headers: auth })
+    const { nodes } = (await listed.json()) as { nodes: Array<{ id: string }> }
+    expect(nodes.find((n) => n.id === nodeId)).toBeUndefined()
+  })
 })

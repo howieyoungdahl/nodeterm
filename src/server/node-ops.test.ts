@@ -36,6 +36,7 @@ function harness(opts: {
   remote?: boolean
   destroyError?: Error
   massLimit?: DeadCardMassLimit
+  projectCwd?: string
   createSession?: (options: {
     cwd?: string
     cols: number
@@ -54,6 +55,7 @@ function harness(opts: {
         id: 'p1',
         name: 'One',
         color: '#0a84ff',
+        ...(opts.projectCwd ? { cwd: opts.projectCwd } : {}),
         viewport: { x: 0, y: 0, zoom: 1 },
         nodes: opts.nodes ?? [],
         bridges: [],
@@ -71,6 +73,7 @@ function harness(opts: {
   const warnings: string[] = []
   const ownership = createHeadlessNodeOwnership()
   const sessionsCreated: string[] = []
+  const createSessionCwds: Array<string | undefined> = []
   const sentText: Array<[string, string]> = []
   const store: NodeOpsWorkspace = {
     load: async () => structuredClone(workspace),
@@ -99,8 +102,9 @@ function harness(opts: {
       : {
           createSession:
             opts.createSession ??
-            (async ({ persistKey }) => {
+            (async ({ persistKey, cwd }) => {
               sessionsCreated.push(persistKey)
+              createSessionCwds.push(cwd)
               return { sessionId: `nt-${persistKey}`, fresh: true }
             })
         }),
@@ -125,6 +129,7 @@ function harness(opts: {
     probes,
     warnings,
     sessionsCreated,
+    createSessionCwds,
     sentText
   }
 }
@@ -350,11 +355,83 @@ describe('ServerNodeOps.create', () => {
     expect(h.workspace().projects[0].nodes).toHaveLength(1)
   })
 
-  it('reports 502 when the pty spawn fails, leaving the persisted card in place', async () => {
+  it('reports 502 with the persisted id and tmux session name when the pty spawn fails', async () => {
     const h = harness({ createSession: async () => ({ sessionId: '', fresh: false }) })
     const result = await h.service.create({})
     expect(result).toMatchObject({ ok: false, status: 502, error: expect.stringContaining('pty_spawn_failed') })
+    if (result.ok) throw new Error('unreachable')
+    expect(result.id).toBeTruthy()
+    expect(result.tmuxSession).toBe(`nt-${result.id}`)
     expect(h.workspace().projects[0].nodes).toHaveLength(1)
+    expect(h.workspace().projects[0].nodes[0].id).toBe(result.id)
+  })
+
+  it('reports 502 with the persisted id and tmux session name when the initial cmd cannot be typed', async () => {
+    const h = harness({ sendText: async () => false })
+    const result = await h.service.create({ cmd: 'echo hi' })
+    expect(result).toMatchObject({ ok: false, status: 502, error: expect.stringContaining('pty_command_failed') })
+    if (result.ok) throw new Error('unreachable')
+    expect(result.id).toBeTruthy()
+    expect(result.tmuxSession).toBe(`nt-${result.id}`)
+    expect(h.workspace().projects[0].nodes).toHaveLength(1)
+  })
+
+  it('reports 502 with the persisted id and tmux session name when the spawn throws', async () => {
+    const h = harness({
+      createSession: async () => {
+        throw new Error('boom')
+      }
+    })
+    const result = await h.service.create({})
+    expect(result).toMatchObject({ ok: false, status: 502, error: expect.stringContaining('boom') })
+    if (result.ok) throw new Error('unreachable')
+    expect(result.id).toBeTruthy()
+    expect(result.tmuxSession).toBe(`nt-${result.id}`)
+    expect(h.workspace().projects[0].nodes).toHaveLength(1)
+  })
+
+  it('defaults an omitted cwd to the project folder, like every other server-spawned terminal', async () => {
+    const h = harness({ projectCwd: '/srv/project-one' })
+    const result = await h.service.create({})
+    expect(result).toMatchObject({ ok: true })
+    expect(h.createSessionCwds).toEqual(['/srv/project-one'])
+    // The persisted card itself carries no cwd override (matches headless-node-factory.ts's own
+    // `open()`, which likewise leaves `node.cwd` unset when the caller passed none and only
+    // resolves the project fallback at spawn time).
+    if (!result.ok) throw new Error('unreachable')
+    expect(h.workspace().projects[0].nodes[0].cwd).toBeUndefined()
+  })
+
+  it('an explicit cwd still wins over the project folder', async () => {
+    const h = harness({ projectCwd: '/srv/project-one' })
+    const result = await h.service.create({ cwd: process.cwd() })
+    expect(result).toMatchObject({ ok: true })
+    expect(h.createSessionCwds).toEqual([process.cwd()])
+  })
+
+  it('caps the placement scan against a corrupt/huge saved card size instead of spinning forever', async () => {
+    const h = harness({
+      nodes: [
+        {
+          id: 'huge',
+          kind: 'terminal',
+          title: 'huge',
+          color: '#000',
+          group: null,
+          position: { x: 0, y: 0 },
+          // Valid JSON, absurd in practice — the scan must still terminate.
+          size: { width: 1e12, height: 1e12 }
+        }
+      ]
+    })
+    const start = Date.now()
+    const result = await h.service.create({})
+    expect(Date.now() - start).toBeLessThan(2_000)
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) throw new Error('unreachable')
+    const created = h.workspace().projects[0].nodes.find((n) => n.id === result.id)!
+    // Placed past the huge card's right edge, not layered on top of it.
+    expect(created.position.x).toBeGreaterThanOrEqual(1e12)
   })
 })
 
