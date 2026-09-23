@@ -760,12 +760,12 @@ Never print, log, or pass the ops-token on a command line (argv); a process list
 machine could read it there. Pass it to curl on stdin instead, for example:
 \`printf 'header = "Authorization: Bearer %s"\\n' "$tok" | curl --config - ...\`.
 
-- \`GET /opsapi/nodes\` — list current nodes.
-- \`POST /opsapi/nodes\` — create one (\`projectId\`, \`cmd\`, \`cwd\`, \`title\`, \`width\`, \`height\`,
+- \`GET /opsapi/nodes\`: list current nodes.
+- \`POST /opsapi/nodes\`: create one (\`projectId\`, \`cmd\`, \`cwd\`, \`title\`, \`width\`, \`height\`,
   all optional; defaults to the active project and that project's folder).
-- \`PATCH /opsapi/nodes/:id\` — rename and/or resize (\`title\`, \`width\`, \`height\`); a node the
+- \`PATCH /opsapi/nodes/:id\`: rename and/or resize (\`title\`, \`width\`, \`height\`); a node the
   operator did not create needs \`?force=1\`.
-- \`DELETE /opsapi/nodes/:id\` — close a node; one the operator created closes without \`force\`.
+- \`DELETE /opsapi/nodes/:id\`: close a node; one the operator created closes without \`force\`.
 
 A node created this way gets normal canvas identity and its own NODETERM_* env, so an agent
 started inside it can use the shim below right away.
