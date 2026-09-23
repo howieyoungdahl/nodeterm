@@ -6,6 +6,7 @@ import type { AgentState } from '../shared/agents/normalize'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
 import { createHeadlessNodeOwnership } from './headless-node-factory'
 import {
+  OPS_OPERATOR_SOURCE_ID,
   ServerNodeOps,
   deadCardMassRefusal,
   DEFAULT_DEAD_CARD_MASS_LIMIT,
@@ -35,6 +36,15 @@ function harness(opts: {
   remote?: boolean
   destroyError?: Error
   massLimit?: DeadCardMassLimit
+  createSession?: (options: {
+    cwd?: string
+    cols: number
+    rows: number
+    persistKey: string
+    ownerProjectId: string
+  }) => Promise<{ sessionId: string; fresh: boolean }>
+  sendText?: (nodeId: string, text: string) => Promise<boolean>
+  noCreateSession?: boolean
 } = {}) {
   let workspace: Workspace = {
     version: 2,
@@ -60,6 +70,8 @@ function harness(opts: {
   const probes: string[] = []
   const warnings: string[] = []
   const ownership = createHeadlessNodeOwnership()
+  const sessionsCreated: string[] = []
+  const sentText: Array<[string, string]> = []
   const store: NodeOpsWorkspace = {
     load: async () => structuredClone(workspace),
     save: async (next) => {
@@ -81,6 +93,23 @@ function harness(opts: {
     },
     statusOf: (id) => opts.status?.[id],
     ownerOf: (id) => ownership.ownerOf(id),
+    recordOwnership: (id, owner) => ownership.record(id, owner),
+    ...(opts.noCreateSession
+      ? {}
+      : {
+          createSession:
+            opts.createSession ??
+            (async ({ persistKey }) => {
+              sessionsCreated.push(persistKey)
+              return { sessionId: `nt-${persistKey}`, fresh: true }
+            })
+        }),
+    sendText:
+      opts.sendText ??
+      (async (id, text) => {
+        sentText.push([id, text])
+        return true
+      }),
     onRemoved: (ids) => removed.push(...ids),
     now: () => 1_800_000_000_000,
     ...(opts.massLimit ? { massLimit: opts.massLimit } : {}),
@@ -94,7 +123,9 @@ function harness(opts: {
     removed,
     destroyed,
     probes,
-    warnings
+    warnings,
+    sessionsCreated,
+    sentText
   }
 }
 
@@ -125,7 +156,8 @@ describe('ServerNodeOps', () => {
         paneState: 'alive',
         agentStatus: 'blocked',
         lastActivityAt: 1234,
-        ownerSession: 'director-card'
+        ownerSession: 'director-card',
+        operatorCreated: false
       },
       {
         id: 'sticky-a',
@@ -137,7 +169,8 @@ describe('ServerNodeOps', () => {
         paneState: 'none',
         agentStatus: null,
         lastActivityAt: null,
-        ownerSession: null
+        ownerSession: null,
+        operatorCreated: false
       }
     ])
     }
@@ -239,6 +272,145 @@ describe('ServerNodeOps', () => {
       expect.objectContaining({ id: 'child', position: { x: 112, y: 218 } })
     ])
     expect(h.workspace().projects[0].nodes[0].parentId).toBeUndefined()
+  })
+})
+
+/**
+ * The out-of-canvas operator create/update surface (`POST /opsapi/nodes`, `PATCH /opsapi/nodes/:id`)
+ * and the matching auto-force behavior `DELETE` gets for a node this plane created.
+ */
+describe('ServerNodeOps.create', () => {
+  it('creates into the workspace default project, stamps ownership, and spawns a session', async () => {
+    const h = harness()
+    const result = await h.service.create({})
+    expect(result).toMatchObject({ ok: true, projectId: 'p1' })
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.tmuxSession).toBe(`nt-${result.id}`)
+    expect(h.workspace().projects[0].nodes.map((n) => n.id)).toEqual([result.id])
+    expect(h.workspace().projects[0].nodes[0]).toMatchObject({
+      kind: 'terminal',
+      size: { width: 640, height: 440 },
+      role: 'worker'
+    })
+    expect(h.ownership.ownerOf(result.id)).toEqual({ sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' })
+    expect(h.sessionsCreated).toEqual([result.id])
+    expect(h.sentText).toEqual([])
+  })
+
+  it('honors an explicit projectId, title, size and cmd', async () => {
+    const h = harness({
+      nodes: [{ id: 'existing', kind: 'terminal', title: 'x', color: '#000', group: null, position: { x: 0, y: 0 }, size: { width: 640, height: 440 } }]
+    })
+    const result = await h.service.create({
+      projectId: 'p1',
+      title: 'My Terminal',
+      width: 700,
+      height: 500,
+      cmd: 'echo hi'
+    })
+    expect(result).toMatchObject({ ok: true, title: 'My Terminal' })
+    if (!result.ok) throw new Error('unreachable')
+    const created = h.workspace().projects[0].nodes.find((n) => n.id === result.id)!
+    expect(created.size).toEqual({ width: 700, height: 500 })
+    // Placed clear of the existing card at (0,0)/640x440.
+    expect(created.position.x >= 640 + 80 || created.position.y >= 440 + 36).toBe(true)
+    expect(h.sentText).toEqual([[result.id, 'echo hi']])
+  })
+
+  it('refuses an unknown projectId and names the known ones', async () => {
+    const h = harness()
+    const result = await h.service.create({ projectId: 'nope' })
+    expect(result).toMatchObject({ ok: false, status: 400 })
+    if (result.ok) throw new Error('unreachable')
+    expect(result.error).toContain('nope')
+    expect(result.error).toContain('p1')
+    expect(h.workspace().projects[0].nodes).toHaveLength(0)
+  })
+
+  it('refuses an ssh project as a local-only surface', async () => {
+    const h = harness({ remote: true })
+    const result = await h.service.create({ projectId: 'p1' })
+    expect(result).toMatchObject({ ok: false, status: 400, error: expect.stringContaining('ssh') })
+  })
+
+  it('refuses a cwd that does not exist or is not a directory, before touching the workspace', async () => {
+    const h = harness()
+    const missing = await h.service.create({ cwd: '/definitely/not/a/real/path/xyz' })
+    expect(missing).toMatchObject({ ok: false, status: 400, error: expect.stringContaining('cwd_not_found') })
+
+    const notADir = await h.service.create({ cwd: process.execPath })
+    expect(notADir).toMatchObject({ ok: false, status: 400, error: expect.stringContaining('cwd_not_a_directory') })
+    expect(h.workspace().projects[0].nodes).toHaveLength(0)
+  })
+
+  it('persists the card but reports 501 when the server has no session wiring', async () => {
+    const h = harness({ noCreateSession: true })
+    const result = await h.service.create({})
+    expect(result).toMatchObject({ ok: false, status: 501, error: expect.stringContaining('create_not_supported') })
+    expect(h.workspace().projects[0].nodes).toHaveLength(1)
+  })
+
+  it('reports 502 when the pty spawn fails, leaving the persisted card in place', async () => {
+    const h = harness({ createSession: async () => ({ sessionId: '', fresh: false }) })
+    const result = await h.service.create({})
+    expect(result).toMatchObject({ ok: false, status: 502, error: expect.stringContaining('pty_spawn_failed') })
+    expect(h.workspace().projects[0].nodes).toHaveLength(1)
+  })
+})
+
+describe('ServerNodeOps.update', () => {
+  it('renames and resizes an operator-created node without force', async () => {
+    const h = harness()
+    const created = await h.service.create({})
+    if (!created.ok) throw new Error('unreachable')
+    const result = await h.service.update(created.id, { title: 'renamed', width: 900 }, false)
+    expect(result).toMatchObject({ ok: true, title: 'renamed', size: { width: 900, height: 440 } })
+    expect(h.workspace().projects[0].nodes[0].title).toBe('renamed')
+  })
+
+  it('requires force for a node it did not create, and 404s an unknown id', async () => {
+    const h = harness({ nodes: [node('agent-a')] })
+    h.ownership.record('agent-a', { sourceNodeId: 'director-card', projectId: 'p1' })
+
+    const refused = await h.service.update('agent-a', { title: 'nope' }, false)
+    expect(refused).toMatchObject({ ok: false, status: 403 })
+
+    const allowed = await h.service.update('agent-a', { title: 'ok' }, true)
+    expect(allowed).toMatchObject({ ok: true, title: 'ok' })
+
+    const missing = await h.service.update('ghost', { title: 'x' }, true)
+    expect(missing).toMatchObject({ ok: false, status: 404 })
+  })
+
+  it('refuses a resize on a non-terminal node', async () => {
+    const h = harness({ nodes: [node('sticky-a', 'sticky')] })
+    h.ownership.record('sticky-a', { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' })
+    const result = await h.service.update('sticky-a', { width: 500 }, false)
+    expect(result).toMatchObject({ ok: false, status: 400, error: 'resize_requires_terminal_node' })
+  })
+})
+
+describe('ServerNodeOps.remove auto-force for operator-created nodes', () => {
+  it('kills the session and removes the card without an explicit force flag', async () => {
+    const h = harness({ pane: { 'op-node': true } })
+    h.ownership.record('op-node', { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' })
+    // Seed the card directly (bypassing create) so this test isolates remove's bypass logic.
+    h.workspace().projects[0].nodes.push(node('op-node'))
+
+    const result = await h.service.remove('op-node', false)
+    expect(result).toMatchObject({ ok: true, removedIds: ['op-node'], forced: true })
+    expect(h.destroyed).toEqual(['op-node'])
+    expect(h.workspace().projects[0].nodes).toHaveLength(0)
+  })
+
+  it('a non-operator alive node is still refused without force', async () => {
+    const h = harness({ pane: { 'agent-node': true } })
+    h.ownership.record('agent-node', { sourceNodeId: 'director-card', projectId: 'p1' })
+    h.workspace().projects[0].nodes.push(node('agent-node'))
+
+    const result = await h.service.remove('agent-node', false)
+    expect(result).toMatchObject({ ok: false, status: 409, error: 'pane_alive' })
+    expect(h.destroyed).toEqual([])
   })
 })
 

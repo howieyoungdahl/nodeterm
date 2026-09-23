@@ -1,11 +1,89 @@
+import { promises as fsPromises } from 'node:fs'
+
 import {
   planOrphanAdoption,
   type OrphanMirrorEntry,
   type OrphanSkipReason
 } from '../core/orphan-adoption'
+import { sessionName } from '../core/tmux-naming'
 import type { AgentState } from '../shared/agents/normalize'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
 import { WorkspaceMutationQueue } from './workspace-mutation-queue'
+
+/**
+ * Ownership-ledger `sourceNodeId` stamped on a node the `/opsapi/nodes` operator plane created
+ * directly — never a spoofed live node id. `remove`/`update` read it back to recognize an
+ * operator-created card without an explicit `?force=1`, and `list` surfaces it so a caller can
+ * tell operator-spawned cards from agent-spawned ones.
+ */
+// Charset-constrained to `isSafeNodeId` ([A-Za-z0-9._-]): the durable ownership ledger
+// (node-ownership-store.ts `record()`) silently refuses any sourceNodeId outside that charset
+// (fail-closed, by design), so a colon or other separator here would make `create()`'s ownership
+// stamp a no-op against the persistent store even though the in-memory test double accepts it.
+export const OPS_OPERATOR_SOURCE_ID = 'ops-operator'
+
+// Mirrors headless-node-factory.ts's `terminalSize()` clamp range and default terminal geometry.
+// Duplicated rather than imported: the operator plane (this file) is wired unconditionally in
+// index.ts, while headless-node-factory.ts backs the OPTIONAL `config.canvasControl` verified-node
+// control plane, and node-ops must not gain a hard dependency on that optional module.
+const OPERATOR_NODE_WIDTH_BOUNDS = { min: 280, max: 2400 }
+const OPERATOR_NODE_HEIGHT_BOUNDS = { min: 160, max: 1600 }
+const OPERATOR_DEFAULT_NODE_SIZE = { width: 640, height: 440 }
+const OPERATOR_TERMINAL_COLS = 120
+const OPERATOR_TERMINAL_ROWS = 36
+const OPERATOR_NODE_COLOR = '#5b8def'
+const OPERATOR_H_GAP = 80
+const OPERATOR_V_GAP = 36
+
+export { OPERATOR_NODE_WIDTH_BOUNDS, OPERATOR_NODE_HEIGHT_BOUNDS }
+
+function operatorNodeToken(): string {
+  return Math.random().toString(36).slice(2, 10)
+}
+
+/** Same `term-<ts36>-<token>` shape headless-node-factory.ts's `nextId('term')` mints. */
+function nextOperatorNodeId(): string {
+  return `term-${Date.now().toString(36)}-${operatorNodeToken()}`
+}
+
+/**
+ * Place a new card in the first free slot of a 3-row grid scanning out from the canvas origin —
+ * the same collision-avoidance approach `placeRight` uses in headless-node-factory.ts, anchored at
+ * (0,0) since an operator create has no source node to place relative to. Only considers top-level
+ * (unparented) cards: a card inside a group frame is positioned in the frame's own local space, not
+ * comparable to this root-space scan, and operator placement only needs to avoid the common case.
+ */
+function placeFromOrigin(
+  project: Project,
+  size: { width: number; height: number }
+): { x: number; y: number } {
+  const occupied = project.nodes
+    .filter((candidate) => !candidate.parentId)
+    .map((candidate) => ({
+      x: candidate.position.x,
+      y: candidate.position.y,
+      width: Math.max(1, candidate.size?.width || OPERATOR_DEFAULT_NODE_SIZE.width),
+      height: Math.max(1, candidate.size?.height || OPERATOR_DEFAULT_NODE_SIZE.height)
+    }))
+  for (let slot = 0; ; slot++) {
+    const column = Math.floor(slot / 3)
+    const row = slot % 3
+    const candidate = {
+      x: column * (size.width + OPERATOR_H_GAP),
+      y: row * (size.height + OPERATOR_V_GAP),
+      width: size.width,
+      height: size.height
+    }
+    const collides = occupied.some(
+      (rect) =>
+        candidate.x < rect.x + rect.width &&
+        candidate.x + candidate.width > rect.x &&
+        candidate.y < rect.y + rect.height &&
+        candidate.y + candidate.height > rect.y
+    )
+    if (!collides) return { x: candidate.x, y: candidate.y }
+  }
+}
 
 export type OpsPaneState = 'alive' | 'dead' | 'unknown' | 'none'
 export type OpsAgentStatus = 'working' | 'idle' | 'blocked' | null
@@ -23,6 +101,8 @@ export interface OpsNodeInventoryItem {
   lastActivityAt: number | null
   /** The creator card that owns this spawn for the current server run, when one exists. */
   ownerSession: string | null
+  /** True when this node was created directly by `POST /opsapi/nodes` (never a spoofed source). */
+  operatorCreated: boolean
 }
 
 export interface NodeOpsWorkspace {
@@ -36,6 +116,23 @@ export interface ServerNodeOpsDeps {
   destroySession(nodeId: string): Promise<void>
   statusOf(nodeId: string): { state?: AgentState; updatedAt: number } | undefined
   ownerOf(nodeId: string): { sourceNodeId: string } | undefined
+  /** Stamp the durable ownership ledger for a node `create()` just persisted. Absent = ownership is
+   *  never recorded and the node reads back as not operator-created (fails closed). */
+  recordOwnership?(nodeId: string, owner: { sourceNodeId: string; projectId: string }): void
+  /**
+   * Spawn the real terminal backend for an operator-created node (the same `PtyManager.createHeadless`
+   * the verified-node control plane uses). Absent = `create()` refuses with 501 rather than persist
+   * a card that can never have a session.
+   */
+  createSession?(options: {
+    cwd?: string
+    cols: number
+    rows: number
+    persistKey: string
+    ownerProjectId: string
+  }): Promise<{ sessionId: string; fresh: boolean }>
+  /** Type a `create()` node's initial `--cmd` once its session exists. */
+  sendText?(nodeId: string, text: string): Promise<boolean>
   onRemoved?(nodeIds: readonly string[]): void
   publishProject?(project: Project): void
   publishRemoval?(projectId: string, nodeId: string): void
@@ -162,6 +259,29 @@ export interface OpsAdoptResult {
 export type OpsRemoveResult =
   | { ok: true; removedIds: string[]; forced: boolean }
   | { ok: false; status: number; error: string; paneState?: OpsPaneState }
+
+export interface OpsCreateInput {
+  projectId?: string
+  cmd?: string
+  cwd?: string
+  title?: string
+  width?: number
+  height?: number
+}
+
+export type OpsCreateResult =
+  | { ok: true; id: string; projectId: string; title: string; tmuxSession: string }
+  | { ok: false; status: number; error: string }
+
+export interface OpsUpdateInput {
+  title?: string
+  width?: number
+  height?: number
+}
+
+export type OpsUpdateResult =
+  | { ok: true; id: string; title: string; size: { width: number; height: number } }
+  | { ok: false; status: number; error: string }
 
 const TIMESTAMPED_ID_PREFIXES = new Set([
   'term', 'ssh', 'sticky', 'group', 'editor', 'diff', 'video', 'web', 'browser', 'dino', 'trigger'
@@ -300,7 +420,8 @@ export class ServerNodeOps {
             paneState: await this.paneState(project, node),
             agentStatus: normalizedAgentStatus(status),
             lastActivityAt: status?.updatedAt ?? null,
-            ownerSession: this.deps.ownerOf(node.id)?.sourceNodeId ?? null
+            ownerSession: this.deps.ownerOf(node.id)?.sourceNodeId ?? null,
+            operatorCreated: this.deps.ownerOf(node.id)?.sourceNodeId === OPS_OPERATOR_SOURCE_ID
           }
         })())
       }
@@ -447,14 +568,19 @@ export class ServerNodeOps {
       if (matches.length !== 1) return { ok: false, status: 409, error: 'ambiguous_node_id' }
 
       const { project, node } = matches[0]
+      // An operator-created node (§create) is terminated and removed like a forced delete WITHOUT
+      // needing `?force=1` — it is this same principal's own card, so there is no third party's
+      // work to protect it from. Every other node's behavior is byte-for-byte what it was before.
+      const operatorCreated = this.deps.ownerOf(node.id)?.sourceNodeId === OPS_OPERATOR_SOURCE_ID
+      const effectiveForce = force || operatorCreated
       const paneState = await this.paneState(project, node)
-      if (paneState === 'alive' && !force) {
+      if (paneState === 'alive' && !effectiveForce) {
         return { ok: false, status: 409, error: 'pane_alive', paneState }
       }
-      if (paneState === 'unknown' && !force) {
+      if (paneState === 'unknown' && !effectiveForce) {
         return { ok: false, status: 503, error: 'pane_state_unknown', paneState }
       }
-      if (paneState === 'dead' && node.kind === 'terminal' && !force) {
+      if (paneState === 'dead' && node.kind === 'terminal' && !effectiveForce) {
         const confirmed = await this.paneState(project, node)
         if (confirmed === 'alive') {
           return { ok: false, status: 409, error: 'pane_alive', paneState: confirmed }
@@ -463,7 +589,7 @@ export class ServerNodeOps {
           return { ok: false, status: 503, error: 'pane_state_unknown', paneState: confirmed }
         }
       }
-      if (force && node.kind === 'terminal' && !project.ssh) {
+      if (effectiveForce && node.kind === 'terminal' && !project.ssh) {
         try {
           // Kill before persistence. A failed end is an unknown outcome and must keep the card.
           await this.deps.destroySession(node.id)
@@ -477,7 +603,190 @@ export class ServerNodeOps {
       this.deps.publishProject?.(project)
       this.deps.publishRemoval?.(project.id, node.id)
       this.deps.onRemoved?.([node.id])
-      return { ok: true, removedIds: [node.id], forced: force }
+      return { ok: true, removedIds: [node.id], forced: effectiveForce }
+    })
+  }
+
+  /**
+   * `POST /opsapi/nodes`: create a terminal node with no live source node to anchor it — the
+   * out-of-canvas path `HeadlessNodeFactory.open()` structurally refuses (it requires an already
+   * live, verified, control-capable caller). The ops-token principal IS the anchor here: ownership
+   * is stamped as {@link OPS_OPERATOR_SOURCE_ID}, never a spoofed live node id, so the ledger and
+   * every downstream "who owns this" read stay honest about a server-operator-created node.
+   *
+   * `cwd` is stat'd before the workspace transaction — a filesystem check has no business inside
+   * the serialized mutation window — and the PTY spawn itself happens OUTSIDE that window too,
+   * for the same non-cancellable-operation reason `launchPrepared` in headless-node-factory.ts
+   * gives: the card is already durable and published by the time the tmux spawn can fail, so a
+   * spawn failure is reported honestly rather than rolled back into an unknown state.
+   */
+  async create(input: OpsCreateInput): Promise<OpsCreateResult> {
+    if (input.cwd !== undefined) {
+      let stat: Awaited<ReturnType<typeof fsPromises.stat>>
+      try {
+        stat = await fsPromises.stat(input.cwd)
+      } catch {
+        return { ok: false, status: 400, error: `cwd_not_found: ${input.cwd}` }
+      }
+      if (!stat.isDirectory()) {
+        return { ok: false, status: 400, error: `cwd_not_a_directory: ${input.cwd}` }
+      }
+    }
+
+    const prepared = await this.runExclusive(async () => {
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const knownIds = (): string => workspace.projects.map((project) => project.id).join(', ') || '(none)'
+      let project: Project | undefined
+      if (input.projectId !== undefined) {
+        project = workspace.projects.find((candidate) => candidate.id === input.projectId)
+        if (!project) {
+          return {
+            ok: false as const,
+            status: 400,
+            error: `unknown_project_id: no project ${JSON.stringify(input.projectId)}; known ids: ${knownIds()}`
+          }
+        }
+      } else {
+        project = workspace.projects.find((candidate) => candidate.id === workspace.activeProjectId)
+        if (!project) {
+          return {
+            ok: false as const,
+            status: 400,
+            error: `no_default_project: workspace has no active project; pass projectId explicitly; known ids: ${knownIds()}`
+          }
+        }
+      }
+      if (project.ssh) {
+        return {
+          ok: false as const,
+          status: 400,
+          error: 'project_target_ssh_unsupported: the operator plane only creates local terminal sessions'
+        }
+      }
+
+      const size = {
+        width: input.width ?? OPERATOR_DEFAULT_NODE_SIZE.width,
+        height: input.height ?? OPERATOR_DEFAULT_NODE_SIZE.height
+      }
+      const id = nextOperatorNodeId()
+      const node: CanvasNodeState = {
+        id,
+        kind: 'terminal',
+        position: placeFromOrigin(project, size),
+        size,
+        title: input.title ?? `Operator ${id}`,
+        titleAuto: false,
+        role: 'worker',
+        color: OPERATOR_NODE_COLOR,
+        group: null,
+        tags: [],
+        ...(input.cwd !== undefined ? { cwd: input.cwd } : {})
+      }
+      project.nodes.push(node)
+      await this.deps.workspaceStore.save(workspace)
+      this.deps.recordOwnership?.(id, { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: project.id })
+      this.deps.publishProject?.(project)
+      this.deps.publishNode?.(project.id, node)
+      return { ok: true as const, project, node }
+    })
+    if (!prepared.ok) return prepared
+
+    const { project, node } = prepared
+    if (!this.deps.createSession) {
+      return {
+        ok: false,
+        status: 501,
+        error: 'create_not_supported: this server was not wired for operator node creation'
+      }
+    }
+    try {
+      const spawned = await this.deps.createSession({
+        cwd: node.cwd,
+        cols: OPERATOR_TERMINAL_COLS,
+        rows: OPERATOR_TERMINAL_ROWS,
+        persistKey: node.id,
+        ownerProjectId: project.id
+      })
+      if (!spawned.sessionId) {
+        return {
+          ok: false,
+          status: 502,
+          error: `pty_spawn_failed: node ${node.id} was persisted but its terminal session could not be started`
+        }
+      }
+      if (input.cmd !== undefined && !(await this.deps.sendText?.(node.id, input.cmd))) {
+        return {
+          ok: false,
+          status: 502,
+          error:
+            `pty_command_failed: node ${node.id} was persisted and its session started, but the ` +
+            'initial command could not be delivered'
+        }
+      }
+      // `spawned.sessionId` is PtyManager's own internal pty-registry id ("pty-N"), not the tmux
+      // session name — `sessionName()` (core/tmux-naming.ts) is the single source of truth for
+      // that, the same function `has-session`/`send-keys`/`kill-session` callers must use to find
+      // this node's real backend.
+      return {
+        ok: true,
+        id: node.id,
+        projectId: project.id,
+        title: node.title,
+        tmuxSession: sessionName(node.id)
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        status: 502,
+        error: `pty_spawn_failed: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }
+  }
+
+  /**
+   * `PATCH /opsapi/nodes/:id`: rename and/or resize. Allowed without `force` only for a node this
+   * same operator plane created ({@link OPS_OPERATOR_SOURCE_ID}); every other node needs the same
+   * explicit `?force=1` gate `DELETE` already requires, so an operator script cannot quietly rename
+   * or resize a live agent's own card.
+   */
+  async update(nodeId: string, input: OpsUpdateInput, force: boolean): Promise<OpsUpdateResult> {
+    return this.runExclusive(async () => {
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const matches = workspace.projects.flatMap((project) =>
+        project.nodes.filter((node) => node.id === nodeId).map((node) => ({ project, node }))
+      )
+      if (matches.length === 0) return { ok: false, status: 404, error: 'node_not_found' }
+      if (matches.length !== 1) return { ok: false, status: 409, error: 'ambiguous_node_id' }
+
+      const { project, node } = matches[0]
+      const operatorCreated = this.deps.ownerOf(nodeId)?.sourceNodeId === OPS_OPERATOR_SOURCE_ID
+      if (!operatorCreated && !force) {
+        return {
+          ok: false,
+          status: 403,
+          error: 'force_required: node was not created by the operator plane; retry with ?force=1'
+        }
+      }
+      if ((input.width !== undefined || input.height !== undefined) && node.kind !== 'terminal') {
+        return { ok: false, status: 400, error: 'resize_requires_terminal_node' }
+      }
+
+      const updated: CanvasNodeState = { ...node }
+      if (input.title !== undefined) {
+        updated.title = input.title
+        updated.titleAuto = false
+      }
+      if (input.width !== undefined || input.height !== undefined) {
+        updated.size = {
+          width: input.width ?? node.size.width,
+          height: input.height ?? node.size.height
+        }
+      }
+      project.nodes = project.nodes.map((candidate) => (candidate.id === nodeId ? updated : candidate))
+      await this.deps.workspaceStore.save(workspace)
+      this.deps.publishProject?.(project)
+      this.deps.publishNode?.(project.id, updated)
+      return { ok: true, id: nodeId, title: updated.title, size: updated.size }
     })
   }
 }
