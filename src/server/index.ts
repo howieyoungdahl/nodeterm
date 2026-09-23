@@ -490,6 +490,12 @@ export async function startServer(
         : undefined
     },
     ownerOf: (nodeId) => nodeOwnership.ownerOf(nodeId),
+    recordOwnership: (nodeId, owner) => nodeOwnership.record(nodeId, owner),
+    // Same PtyManager call the verified-node control plane's `attach()` makes
+    // (headless-node-factory.ts): one real tmux session on this Server's normal socket, keyed by
+    // the node id like every other card.
+    createSession: (options) => ptyManager.createHeadless(options),
+    sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
     onRemoved: (nodeIds) => {
       for (const nodeId of nodeIds) clearNode(nodeId)
       canvasControl?.forgetNodes(nodeIds)
@@ -926,6 +932,8 @@ export async function startServer(
     sweep: (dryRun, force) => nodeOps.sweep(dryRun, force),
     remove: (nodeId, force) => nodeOps.remove(nodeId, force),
     adoptOrphans: () => nodeOps.adoptOrphans(),
+    createNode: (input) => nodeOps.create(input),
+    updateNode: (nodeId, input, force) => nodeOps.update(nodeId, input, force),
     health: () => ({
       startedAt,
       uptimeMs: Math.max(0, Date.now() - startedAt),

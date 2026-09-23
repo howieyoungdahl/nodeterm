@@ -47,6 +47,7 @@ import {
 import { assembleLaunchCommand } from '../shared/agents/launch'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 import { oneLine } from '../shared/one-line'
+import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
 import type {
   BridgeLink,
   CanvasNodeState,
@@ -904,10 +905,32 @@ export class HeadlessNodeFactory {
     return { project, node }
   }
 
+  /**
+   * `OPS_OPERATOR_SOURCE_ID` is refused as a caller identity here, at the entry point every
+   * mutating (`resolveSource`) and read-only (`readOnlySource`) verb resolves its source through —
+   * before any lookup, mutation or `ownership.record` call. `ownsSpawn`'s refusal (see its own doc
+   * comment) only stops a poisoned `ops-operator` node from CONTROLLING what the `/opsapi/nodes`
+   * plane already created; a verified caller can still reach this far and open/spawn children,
+   * which would then be recorded owned by that same sentinel and inherit its ops-plane-created
+   * treatment (auto-force DELETE, `operatorCreated: true`, no-force PATCH). Refusing here closes
+   * that off too: such a node can neither mutate an existing node nor spawn a new one.
+   */
+  private reservedCallerRefusal(sourceNodeId: string): ServerControlReply | undefined {
+    if (sourceNodeId !== OPS_OPERATOR_SOURCE_ID) return undefined
+    return {
+      ok: false,
+      error:
+        `reserved-caller-identity: ${OPS_OPERATOR_SOURCE_ID} is the /opsapi/nodes operator ` +
+        'plane\'s own ledger identity and may never act as a control-plane caller'
+    }
+  }
+
   private async resolveSource(
     workspace: Workspace,
     nodeId: string
   ): Promise<{ project: Project; node: CanvasNodeState } | ServerControlReply> {
+    const reserved = this.reservedCallerRefusal(nodeId)
+    if (reserved) return reserved
     const matches = sourceProjects(workspace, nodeId)
     if (matches.length === 1) return matches[0]
     if (matches.length > 1) return this.sourceProjectError(nodeId, true)
@@ -1004,8 +1027,28 @@ export class HeadlessNodeFactory {
     this.publishChangeSet(project, nodes, [])
   }
 
-  /** Literal creator ownership: a caller may act only on nodes it freshly spawned this run. */
+  /**
+   * Literal creator ownership: a caller may act only on nodes it freshly spawned this run.
+   *
+   * `OPS_OPERATOR_SOURCE_ID` is refused as a CALLER identity here unconditionally. It is the
+   * `/opsapi/nodes` operator plane's own ledger stamp, but it is also, by construction, a
+   * syntactically valid node id (`isSafeNodeId`), so a node whose own id happens to equal it — via
+   * a hand-edited git-shared `.nodeterm/project.json` or a browser-side upsert (orphan-adopting a
+   * hand-made `nt-ops-operator` tmux session is refused separately, before it ever gets a card, in
+   * `core/orphan-adoption.ts`) — would otherwise get a real per-node token and, calling any verb as
+   * `sourceNodeId: 'ops-operator'`, "own" every node the operator plane ever created.
+   *
+   * This closes the CONTROL direction: the one choke point every ownership check (`ownsMutation`,
+   * `list`'s `openedByCaller`) already routes through. It does NOT by itself stop such a node from
+   * spawning new children (which `ownership.record` would then stamp `sourceNodeId: 'ops-operator'`
+   * too, inheriting the ops-plane-created treatment — auto-force DELETE, `operatorCreated: true`,
+   * no-force PATCH) — that half is closed separately, at `resolveSource`/`readOnlySource`
+   * (`reservedCallerRefusal`), the entry point every verb resolves its caller through before
+   * reaching here at all. Together the two refusals mean such a node can neither control an
+   * existing node nor spawn a new one.
+   */
   ownsSpawn(sourceNodeId: string, nodeId: string): boolean {
+    if (sourceNodeId === OPS_OPERATOR_SOURCE_ID) return false
     return this.ownership.ownerOf(nodeId)?.sourceNodeId === sourceNodeId
   }
 
@@ -1120,6 +1163,8 @@ export class HeadlessNodeFactory {
     sourceNodeId: string,
     args: Record<string, string>
   ): Promise<{ project: Project; node: CanvasNodeState } | ServerControlReply> {
+    const reserved = this.reservedCallerRefusal(sourceNodeId)
+    if (reserved) return reserved
     const flagError = unsupportedFlags(args, new Set())
     if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
     const workspace = await this.deps.workspaceStore.load({ sideline: false })
@@ -1301,13 +1346,16 @@ export class HeadlessNodeFactory {
       // refusal, never a partial destructive success whose surviving ids the caller must guess.
       const frameIds = new Set<string>()
       for (const id of ids) {
-        const ownership = this.ownership.ownerOf(id)
-        if (!ownership || ownership.sourceNodeId !== sourceNodeId) {
+        // Route through `ownsSpawn` rather than reading `this.ownership.ownerOf` directly: it is
+        // the one choke point that also refuses `sourceNodeId === OPS_OPERATOR_SOURCE_ID` as a
+        // caller identity (see its own doc comment) — a duplicated inline check here bypassed that.
+        if (!this.ownsSpawn(sourceNodeId, id)) {
           return {
             ok: false,
             error: `close-not-owner: ${sourceNodeId} did not spawn ${id} during this server run`
           }
         }
+        const ownership = this.ownership.ownerOf(id)!
         const project = workspace.projects.find((candidate) => candidate.id === ownership.projectId)
         const target = project?.nodes.find((node) => node.id === id)
         if (target?.kind === 'group') {

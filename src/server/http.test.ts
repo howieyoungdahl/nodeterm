@@ -36,6 +36,8 @@ beforeEach(async () => {
       sweep: async (dryRun) => ({ dryRun, affectedIds: [], scanned: 0 }),
       remove: async (id, force) => ({ ok: true, removedIds: [id], forced: force }),
       adoptOrphans: async () => ({ adopted: [], skipped: [], live: false }),
+      createNode: async () => ({ ok: false, status: 501, error: 'not_wired_for_this_test' }),
+      updateNode: async () => ({ ok: false, status: 501, error: 'not_wired_for_this_test' }),
       health: () => ({
         startedAt: 1,
         uptimeMs: 2,

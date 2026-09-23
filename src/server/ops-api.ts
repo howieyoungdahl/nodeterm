@@ -1,15 +1,40 @@
 import http from 'node:http'
+import path from 'node:path'
 
-import type {
-  OpsAdoptResult,
-  OpsNodeInventoryItem,
-  OpsRemoveResult,
-  OpsSweepResult
+import {
+  OPERATOR_NODE_HEIGHT_BOUNDS,
+  OPERATOR_NODE_WIDTH_BOUNDS,
+  type OpsAdoptResult,
+  type OpsCreateInput,
+  type OpsCreateResult,
+  type OpsNodeInventoryItem,
+  type OpsRemoveResult,
+  type OpsSweepResult,
+  type OpsUpdateInput,
+  type OpsUpdateResult
 } from './node-ops'
 import { opsBearerMatches } from './ops-token'
 import type { SpawnHandlerSnapshot } from './spawn-handler-state'
 
 const OPS_BODY_MAX_BYTES = 10 * 1024
+const OPS_CREATE_TITLE_MAX = 200
+const OPS_CREATE_CMD_MAX = 4_000
+const OPS_CREATE_STRING_MAX = 4_096
+
+/** No NUL bytes (never let a string field smuggle a C-string terminator into a downstream call),
+ *  within the given length. */
+function validString(value: unknown, maxLen: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLen && !value.includes('\u0000')
+}
+
+function validInt(value: unknown, bounds: { min: number; max: number }): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= bounds.min &&
+    value <= bounds.max
+  )
+}
 
 export interface OpsHealth {
   startedAt: number
@@ -28,6 +53,10 @@ export interface OpsApiDeps {
   remove(nodeId: string, force: boolean): Promise<OpsRemoveResult>
   /** The sweep's mirror image: card a live `nt-<id>` session that no project still lists. */
   adoptOrphans(): Promise<OpsAdoptResult>
+  /** Create a terminal node with no live source node to anchor it. See `ServerNodeOps.create`. */
+  createNode(input: OpsCreateInput): Promise<OpsCreateResult>
+  /** Rename and/or resize one node. `force` mirrors `remove`'s gate for a non-operator-created node. */
+  updateNode(nodeId: string, input: OpsUpdateInput, force: boolean): Promise<OpsUpdateResult>
   health(): OpsHealth | Promise<OpsHealth>
 }
 
@@ -123,12 +152,85 @@ export function createOpsApiHandler(
       }
 
       if (pathname === '/opsapi/nodes') {
-        if (method !== 'GET') {
-          res.setHeader('Allow', 'GET')
-          sendJson(res, 405, { error: 'method_not_allowed' })
+        if (method === 'GET') {
+          sendJson(res, 200, { nodes: await deps.nodes() })
           return
         }
-        sendJson(res, 200, { nodes: await deps.nodes() })
+        if (method === 'POST') {
+          const contentType = req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase()
+          if (contentType !== 'application/json') {
+            sendJson(res, 415, { error: 'application_json_required' })
+            return
+          }
+          let body: unknown
+          try {
+            body = await readJson(req)
+          } catch (error) {
+            const tooLarge = (error as NodeJS.ErrnoException)?.code === 'BODY_TOO_LARGE'
+            sendJson(res, tooLarge ? 413 : 400, { error: tooLarge ? 'body_too_large' : 'bad_json' })
+            return
+          }
+          if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            sendJson(res, 400, { error: 'body_must_be_an_object' })
+            return
+          }
+          const raw = body as Record<string, unknown>
+          const allowed = new Set(['projectId', 'cmd', 'cwd', 'title', 'width', 'height'])
+          const unknownKey = Object.keys(raw).find((key) => !allowed.has(key))
+          if (unknownKey) {
+            sendJson(res, 400, { error: `unknown_field: ${unknownKey}` })
+            return
+          }
+          const invalid: string[] = []
+          const input: OpsCreateInput = {}
+          if (raw.projectId !== undefined) {
+            if (validString(raw.projectId, OPS_CREATE_STRING_MAX)) input.projectId = raw.projectId
+            else invalid.push('projectId')
+          }
+          if (raw.cmd !== undefined) {
+            if (validString(raw.cmd, OPS_CREATE_CMD_MAX)) input.cmd = raw.cmd
+            else invalid.push('cmd')
+          }
+          if (raw.cwd !== undefined) {
+            if (validString(raw.cwd, OPS_CREATE_STRING_MAX) && path.isAbsolute(raw.cwd)) {
+              input.cwd = raw.cwd
+            } else invalid.push('cwd')
+          }
+          if (raw.title !== undefined) {
+            if (validString(raw.title, OPS_CREATE_TITLE_MAX)) input.title = raw.title
+            else invalid.push('title')
+          }
+          if (raw.width !== undefined) {
+            if (validInt(raw.width, OPERATOR_NODE_WIDTH_BOUNDS)) input.width = raw.width
+            else invalid.push('width')
+          }
+          if (raw.height !== undefined) {
+            if (validInt(raw.height, OPERATOR_NODE_HEIGHT_BOUNDS)) input.height = raw.height
+            else invalid.push('height')
+          }
+          if (invalid.length) {
+            sendJson(res, 400, { error: `invalid_field(s): ${invalid.join(', ')}` })
+            return
+          }
+          const result = await deps.createNode(input)
+          if (!result.ok) {
+            sendJson(res, result.status, {
+              error: result.error,
+              ...(result.id ? { id: result.id } : {}),
+              ...(result.tmuxSession ? { tmuxSession: result.tmuxSession } : {})
+            })
+            return
+          }
+          sendJson(res, 201, {
+            id: result.id,
+            projectId: result.projectId,
+            title: result.title,
+            tmuxSession: result.tmuxSession
+          })
+          return
+        }
+        res.setHeader('Allow', 'GET, POST')
+        sendJson(res, 405, { error: 'method_not_allowed' })
         return
       }
 
@@ -198,27 +300,82 @@ export function createOpsApiHandler(
         return
       }
 
-      const removeMatch = /^\/opsapi\/nodes\/([^/]+)$/.exec(pathname)
-      if (removeMatch) {
-        if (method !== 'DELETE') {
-          res.setHeader('Allow', 'DELETE')
-          sendJson(res, 405, { error: 'method_not_allowed' })
-          return
-        }
-        const nodeId = validNodeIdSegment(removeMatch[1])
+      const nodeMatch = /^\/opsapi\/nodes\/([^/]+)$/.exec(pathname)
+      if (nodeMatch) {
+        const nodeId = validNodeIdSegment(nodeMatch[1])
         if (!nodeId) {
           sendJson(res, 400, { error: 'invalid_node_id' })
           return
         }
-        const result = await deps.remove(nodeId, url.searchParams.get('force') === '1')
-        if (!result.ok) {
-          sendJson(res, result.status, {
-            error: result.error,
-            ...(result.paneState ? { paneState: result.paneState } : {})
-          })
+        if (method === 'DELETE') {
+          const result = await deps.remove(nodeId, url.searchParams.get('force') === '1')
+          if (!result.ok) {
+            sendJson(res, result.status, {
+              error: result.error,
+              ...(result.paneState ? { paneState: result.paneState } : {})
+            })
+            return
+          }
+          sendJson(res, 200, result)
           return
         }
-        sendJson(res, 200, result)
+        if (method === 'PATCH') {
+          const contentType = req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase()
+          if (contentType !== 'application/json') {
+            sendJson(res, 415, { error: 'application_json_required' })
+            return
+          }
+          let body: unknown
+          try {
+            body = await readJson(req)
+          } catch (error) {
+            const tooLarge = (error as NodeJS.ErrnoException)?.code === 'BODY_TOO_LARGE'
+            sendJson(res, tooLarge ? 413 : 400, { error: tooLarge ? 'body_too_large' : 'bad_json' })
+            return
+          }
+          if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            sendJson(res, 400, { error: 'body_must_be_an_object' })
+            return
+          }
+          const raw = body as Record<string, unknown>
+          const allowed = new Set(['title', 'width', 'height'])
+          const unknownKey = Object.keys(raw).find((key) => !allowed.has(key))
+          if (unknownKey) {
+            sendJson(res, 400, { error: `unknown_field: ${unknownKey}` })
+            return
+          }
+          if (raw.title === undefined && raw.width === undefined && raw.height === undefined) {
+            sendJson(res, 400, { error: 'body_must_set_title_width_or_height' })
+            return
+          }
+          const invalid: string[] = []
+          const input: OpsUpdateInput = {}
+          if (raw.title !== undefined) {
+            if (validString(raw.title, OPS_CREATE_TITLE_MAX)) input.title = raw.title
+            else invalid.push('title')
+          }
+          if (raw.width !== undefined) {
+            if (validInt(raw.width, OPERATOR_NODE_WIDTH_BOUNDS)) input.width = raw.width
+            else invalid.push('width')
+          }
+          if (raw.height !== undefined) {
+            if (validInt(raw.height, OPERATOR_NODE_HEIGHT_BOUNDS)) input.height = raw.height
+            else invalid.push('height')
+          }
+          if (invalid.length) {
+            sendJson(res, 400, { error: `invalid_field(s): ${invalid.join(', ')}` })
+            return
+          }
+          const result = await deps.updateNode(nodeId, input, url.searchParams.get('force') === '1')
+          if (!result.ok) {
+            sendJson(res, result.status, { error: result.error })
+            return
+          }
+          sendJson(res, 200, result)
+          return
+        }
+        res.setHeader('Allow', 'DELETE, PATCH')
+        sendJson(res, 405, { error: 'method_not_allowed' })
         return
       }
 

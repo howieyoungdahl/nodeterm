@@ -26,6 +26,7 @@ import {
 } from './headless-node-factory'
 import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
 import { SpawnHandlerState } from './spawn-handler-state'
+import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
 
 class FakePty implements HeadlessPty {
   readonly creates: PtyCreateOptions[] = []
@@ -900,6 +901,82 @@ describe('HeadlessNodeFactory', () => {
     expect(pty.sends).toEqual([])
     expect(published).toEqual([])
     expect(publishedProjects).toEqual([])
+  })
+
+  it('never lets a node whose id equals the ops-operator sentinel control an operator-created node', async () => {
+    // Attack scenario: (a) the /opsapi/nodes operator plane genuinely created 'term-operator-made'
+    // (its ownership record is stamped sourceNodeId: OPS_OPERATOR_SOURCE_ID, exactly what
+    // node-ops.ts's create() does), and (b) something else entirely — a hand-edited git-shared
+    // project.json, a browser upsert, or adopting a hand-made tmux session — gives some OTHER real,
+    // control-capable node the literal id OPS_OPERATOR_SOURCE_ID. That node's own verified identity
+    // is its own node id, so without a guard its sourceNodeId would equal the operator plane's
+    // stamp and it would "own" every node the plane ever created.
+    const workspace = await store.load({ sideline: false })
+    workspace.projects[0].nodes.push(
+      terminal(OPS_OPERATOR_SOURCE_ID, 'Poisoned', 'claude', 1200),
+      terminal('term-operator-made', 'Operator made', 'claude', 1600)
+    )
+    await store.save(workspace)
+    ownership.record('term-operator-made', {
+      sourceNodeId: OPS_OPERATOR_SOURCE_ID,
+      projectId: 'project-1'
+    })
+
+    expect(factory.ownsSpawn(OPS_OPERATOR_SOURCE_ID, 'term-operator-made')).toBe(false)
+
+    // Both calls are now refused even earlier, at the entry point every verb resolves its caller
+    // through (`resolveSource`'s `reservedCallerRefusal`), before `ownsMutation`/`ownsSpawn` is
+    // ever consulted — `ownsSpawn` returning false (asserted above) is what makes the guard correct
+    // in depth even if the entry-point check were ever bypassed for one verb.
+    await expect(
+      factory.rename(OPS_OPERATOR_SOURCE_ID, { node: 'term-operator-made', title: 'hijacked' })
+    ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('reserved-caller-identity') })
+    await expect(
+      factory.close(OPS_OPERATOR_SOURCE_ID, { node: 'term-operator-made' }, true)
+    ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('reserved-caller-identity') })
+
+    const reloaded = await store.load({ sideline: false })
+    expect(
+      reloaded.projects[0].nodes.find((node) => node.id === 'term-operator-made')?.title
+    ).toBe('Operator made')
+    expect(pty.destroys).toEqual([])
+    expect(published).toEqual([])
+    expect(publishedProjects).toEqual([])
+  })
+
+  it('refuses every request from a caller whose own id is the ops-operator sentinel, including spawning children', async () => {
+    // `ownsSpawn`'s refusal (previous test) only stops CONTROL of an already-existing operator-made
+    // node. This proves the other half: such a caller cannot reach `open()` at all, so it can never
+    // spawn a child that `ownership.record` would then stamp `sourceNodeId: OPS_OPERATOR_SOURCE_ID`
+    // too — the entry-point guard in `resolveSource`/`readOnlySource`.
+    const workspace = await store.load({ sideline: false })
+    workspace.projects[0].nodes.push(terminal(OPS_OPERATOR_SOURCE_ID, 'Poisoned', 'claude', 1200))
+    await store.save(workspace)
+
+    await expect(factory.openTerminal(OPS_OPERATOR_SOURCE_ID, {}, true)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('reserved-caller-identity')
+    })
+    await expect(
+      factory.openAgent(OPS_OPERATOR_SOURCE_ID, { agent: 'claude', prompt: 'hi' }, true)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('reserved-caller-identity')
+    })
+    await expect(factory.list(OPS_OPERATOR_SOURCE_ID, {})).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('reserved-caller-identity')
+    })
+
+    expect(pty.creates).toEqual([])
+    expect(published).toEqual([])
+    const reloaded = await store.load({ sideline: false })
+    expect(reloaded.projects[0].nodes.map((node) => node.id)).toEqual([
+      'term-source',
+      'term-upstream',
+      'term-owned',
+      OPS_OPERATOR_SOURCE_ID
+    ])
   })
 
   it('refuses to close an owned frame if doing so would reparent an unowned child', async () => {

@@ -1,6 +1,7 @@
 import path from 'path'
 
 import { NODE_COLORS } from '../shared/node-colors'
+import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
 import { isSafeNodeId } from '../shared/safe-id'
 import type { AgentId } from '../shared/agents/config'
 import type { CanvasNodeState, Project } from '../shared/types'
@@ -73,6 +74,10 @@ export type OrphanSkipReason =
   | 'unmatched-cwd'
   /** `nt-<rest>` whose `<rest>` is not a usable node id — it would become a persisted card id. */
   | 'unsafe-node-id'
+  /** `<rest>` equals the `/opsapi/nodes` operator plane's own ledger identity
+   *  ({@link OPS_OPERATOR_SOURCE_ID}) — a hand-made `nt-ops-operator` session is never carded, so it
+   *  can never receive a real per-node token and spoof that identity as a control-plane caller. */
+  | 'reserved-node-id'
 
 export interface OrphanSkip {
   nodeId: string
@@ -148,6 +153,10 @@ export function planOrphanAdoption(input: OrphanAdoptionInput): OrphanAdoptionPl
     if (knownIds.has(nodeId)) continue
     if (!isSafeNodeId(nodeId)) {
       skipped.push({ nodeId, sessionName: name, cwd: null, reason: 'unsafe-node-id' })
+      continue
+    }
+    if (nodeId === OPS_OPERATOR_SOURCE_ID) {
+      skipped.push({ nodeId, sessionName: name, cwd: null, reason: 'reserved-node-id' })
       continue
     }
     const cwd = input.paneCwdBySession.get(name)
