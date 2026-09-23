@@ -746,6 +746,30 @@ description: Create, organize and control nodes on the nodeterm canvas — open 
 You are running inside a node on the nodeterm canvas. You can create and control nodes by
 running the local CLI shim below. Every node you open is connected to your node by an edge.
 
+## Controlling the canvas from outside a node (operator API)
+
+Inside a node, use the shim below as documented; that remains the normal path.
+
+From a plain shell on the same machine (local or an SSH session), with no node open and no
+NODETERM_* identity, do not fabricate NODETERM_NODE_ID or the other NODETERM_* variables; a
+guessed value is refused. Instead call the loopback operator API directly: \`/opsapi/*\`,
+authenticated with the 0600 \`ops-token\` file in the Server data dir (\`Authorization: Bearer
+<token>\`, loopback peers only).
+
+- \`GET /opsapi/nodes\` — list current nodes.
+- \`POST /opsapi/nodes\` — create one (\`projectId\`, \`cmd\`, \`cwd\`, \`title\`, \`width\`, \`height\`,
+  all optional; defaults to the active project and that project's folder).
+- \`PATCH /opsapi/nodes/:id\` — rename and/or resize (\`title\`, \`width\`, \`height\`); a node the
+  operator did not create needs \`?force=1\`.
+- \`DELETE /opsapi/nodes/:id\` — close a node; one the operator created closes without \`force\`.
+
+A node created this way gets normal canvas identity and its own NODETERM_* env, so an agent
+started inside it can use the shim below right away.
+
+Where one is installed, a \`canvas\` CLI wraps this API (\`canvas ls\`, \`term\`, \`claude\`,
+\`director\`, \`rename\`, \`resize\`, \`close\`, \`remote status|up|doctor\`, \`prod\`); see that
+operator's personal knowledge tree for details.
+
 Run the shim (absolute path):
 
 \`\`\`sh
