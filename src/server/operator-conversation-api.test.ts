@@ -1,5 +1,5 @@
 import http from 'node:http'
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, rm, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -24,7 +24,7 @@ describe('operator conversation HTTP API', () => {
   let drain: (() => Promise<void>) | undefined
 
   async function setup(scopes: { read?: boolean; message?: boolean } = { read: true, message: true }) {
-    dir = await mkdtemp(path.join(os.tmpdir(), 'operator-api-'))
+    dir = await realpath(await mkdtemp(path.join(os.tmpdir(), 'operator-api-')))
     const transcript = path.join(dir, 'transcript.jsonl')
     await writeFile(transcript, [transcriptRow('user', [{ type: 'text', text: 'hello' }]),
       transcriptRow('assistant', [{ type: 'thinking', thinking: 'private reasoning' }, { type: 'text', text: 'Bearer abcdefghijklmnop' }])].join('\n') + '\n')

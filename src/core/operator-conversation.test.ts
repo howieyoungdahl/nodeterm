@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, appendFile, rm, mkdir, symlink, unlink } from 'node:fs/promises'
+import { mkdtemp, writeFile, appendFile, rm, mkdir, symlink, unlink, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -7,7 +7,7 @@ import { OperatorConversationError, readOperatorConversation } from './operator-
 let dir = ''
 afterEach(async () => { if (dir) await rm(dir, { recursive: true, force: true }); dir = '' })
 async function fixture(agent: 'claude' | 'codex', records: unknown[]) {
-  dir = await mkdtemp(path.join(os.tmpdir(), 'operator-conversation-'))
+  dir = await realpath(await mkdtemp(path.join(os.tmpdir(), 'operator-conversation-')))
   const file = path.join(dir, 'synthetic.jsonl')
   await writeFile(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n')
   const target = { projectId: 'p1', nodeId: 'n1', sessionId: 'session-123', generation: 'g1' }
@@ -164,7 +164,7 @@ describe('readOperatorConversation', () => {
   })
 
   it('preserves full pagination for a valid transcript larger than the former 16 MiB cap', async () => {
-    dir = await mkdtemp(path.join(os.tmpdir(), 'operator-conversation-large-'))
+    dir = await realpath(await mkdtemp(path.join(os.tmpdir(), 'operator-conversation-large-')))
     const file = path.join(dir, 'large.jsonl')
     const records = Array.from({ length: 19 }, (_, i) => claude('user', [{ type: 'text', text: `part-${i}-` + 'x'.repeat(900 * 1024) }]))
     await writeFile(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n')
