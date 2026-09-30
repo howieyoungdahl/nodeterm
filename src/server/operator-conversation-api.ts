@@ -76,7 +76,11 @@ export function createOperatorConversationApi(deps: OperatorConversationApiDeps)
       if (!principal) throw new OperatorTargetError('unauthorized', 401)
       caller = principal.id
       const permission = (op: OperatorOperation, t: OperatorSessionTarget): void => {
-        if (!operatorAllowed(principal, op, t)) throw new OperatorTargetError('scope_denied', 403)
+        // Body reads, receipt recovery and serialized admission can yield across a revocation.
+        const current = authenticateOperator(req.headers.authorization,
+          loadOperatorPrincipals(policyFile), deps.managementToken)
+        if (!current || current.id !== caller || !operatorAllowed(current, op, t))
+          throw new OperatorTargetError('scope_denied', 403)
       }
       const audit = (outcome: string, receiptId?: string): void =>
         appendOperatorAudit(deps.dataDir, { caller, operation, target, receiptId, outcome })
@@ -121,9 +125,7 @@ export function createOperatorConversationApi(deps: OperatorConversationApiDeps)
         result.items = result.items.map((item) => ({ ...item, text: credentialValues.reduce((text, secret) =>
           secret ? text.split(secret).join('[REDACTED CREDENTIAL]') : text, item.text) }))
         // Reading may yield while a replacement occurs or the policy is revoked.
-        const latest = authenticateOperator(req.headers.authorization,
-          loadOperatorPrincipals(policyFile), deps.managementToken)
-        if (!latest || !operatorAllowed(latest, 'read', target)) throw new OperatorTargetError('scope_denied', 403)
+        permission('read', target)
         deps.bindings.resolve(deps.projects(), target)
         audit('ok')
         sendJson(res, 200, result)
@@ -162,12 +164,19 @@ export function createOperatorConversationApi(deps: OperatorConversationApiDeps)
         await previous
         let entry: Awaited<ReturnType<OperatorReceiptStore['admit']>>
         try {
+          permission('message', target)
           entry = store.find(caller, key, target, body.text)!
           if (!entry) {
             deps.bindings.resolve(deps.projects(), target)
             audit('admission_started')
             entry = await store.admit(caller, key, target, body.text)
             isNew = true
+          }
+          try { permission('message', target) }
+          catch (error) {
+            // Preserve deduplication if revocation races the durable admission write.
+            if (isNew) await store.update(entry.receipt.id, 'failed', 'notPermitted')
+            throw error
           }
         } finally { release() }
         audit(isNew ? 'accepted' : 'duplicate', entry.receipt.id)

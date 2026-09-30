@@ -173,9 +173,15 @@ load/save queues can overwrite each other with stale snapshots. `/opsapi/health`
 spawn-handler state without awaiting the preparation or parallel external launches it diagnoses;
 timed-out non-cancellable launches remain visible until they actually settle. Credentials still
 never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
-The exact-scope conversation principal is separate from management and has a small external CLI;
+The conversation principal is separate from management and has a small external CLI;
 see `docs/operator-conversations.md` for credential handling, policy provisioning boundaries,
-receipt meaning, and WSL use.
+receipt meaning, and WSL use. Policy v1 keeps exact grants. Policy v2 also accepts the explicit
+`all-current-and-future-verified-sessions` tag independently for read and message; API and receipt
+versions remain v1. Never turn that tag into inferred identity from saved cards: verified hooks,
+exact session generations, live policy rechecks (including receipt/admission awaits and queued
+submission), drafts, audit and idempotency still apply. Old servers reject v2 policies in full;
+remove standing grants and publish validated exact-only v1 policy before a downgrade. Activation
+and revocation are administrator operations, not implicit credential provisioning at boot.
 
 **A Server Edition message is not submitted just because tmux accepted Enter.** A fresh agent
 composer can render a pasted envelope before it is ready to consume the submit key. Capture the
