@@ -537,11 +537,10 @@ export async function startServer(
     onRegistration: (agentId, nodeId, verified) =>
       canvasControl?.onHookRegistration(agentId, nodeId, verified),
     onEvent: (event) => {
-      operatorBindings.observe(event)
       canvasControl?.onAgentEvent(event)
     },
-    onTranscript: (agentId, nodeId, sessionId, transcriptPath) =>
-      operatorBindings.transcript(nodeId, sessionId, agentId, transcriptPath)
+    onSessionHook: (agentId, nodeId, payload, verified, transcriptPath) =>
+      operatorBindings.observeHook(agentId, nodeId, payload, verified, transcriptPath)
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote

@@ -137,6 +137,16 @@ The codebase is split by Electron process boundary — keep code on the correct 
   audit and durable idempotency. API/receipt versions stay v1; older servers reject v2 policies
   in full. See `docs/operator-conversations.md` for private atomic administrator activation,
   revocation, bootstrap and downgrade. Shipping this capability never activates a live grant.
+  Operator session discovery consumes native hooks and their jailed paths together before UI
+  normalization. Raw-before-normalized ordering otherwise attaches the first/resume path to an
+  absent or old generation that `SessionStart` replaces. Recognized authenticated parent hooks can
+  establish identity even without a normalized UI event. Child rollouts never bind the parent.
+  Missing paths remain unreadable and saved mirrors establish no authority after a Server restart;
+  recovery waits for fresh authenticated hook evidence, with a new boot generation. Operator JSONL
+  parsing caps each raw record at 16 MiB, 64 levels and 100,000 structural units before parsing.
+  Filtering private channels and redacting public blocks precede item/page splitting. Existing
+  whole-file, snapshot, item, cache and concurrent-read caps still apply. The disposable hook HTTP
+  regression must read after the first hook, without a later `Stop` concealing path loss.
   `SpawnHandlerState` synchronously observes both serialized preparation and parallel external
   launches, so health remains readable while its oldest operation is wedged. No operator verb
   creates, sends, or renames, and the surface is Server-only (Desktop/Mobile N/A).

@@ -52,6 +52,10 @@ export interface WireAgentStatusOptions {
   onRegistration?: (agentId: string, nodeId: string, verified: boolean) => void
   /** Operator reads consume only verified, jailed, exact-session transcript bindings. */
   onTranscript?: (agentId: string, nodeId: string, sessionId: string, transcriptPath: string) => void
+  /** One native hook, its authentication verdict and jailed path, before UI normalization.
+   * Consumers must process lifecycle and path atomically rather than wait for a state event. */
+  onSessionHook?: (agentId: string, nodeId: string, payload: Record<string, unknown>,
+    verified: boolean, transcriptPath?: string) => void
 }
 
 /**
@@ -170,8 +174,8 @@ export function wireAgentStatus(
   // `~/.claude/projects` OR a managed account's `{userData}/claude-accounts/<id>/projects`
   // (id-validated so a forged POST can't traverse out — see isSafeLocalTranscriptPath). Jail
   // transcript_path to those roots and skip the read otherwise.
-  const safeTranscriptPath = (tp: string | undefined): string | undefined => {
-    if (!tp) return undefined
+  const safeTranscriptPath = (tp: unknown): string | undefined => {
+    if (typeof tp !== 'string' || !tp) return undefined
     const abs = resolve(tp)
     // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
     // before) would otherwise fail the jail and its meter would silently never fill.
@@ -194,6 +198,10 @@ export function wireAgentStatus(
   // Registration reads the same label from the normalized stream above, preserving both-shell
   // raw-listener parity while HookServer remains the one authority that computes the answer.
   hooks.setRawListener((agentId, nodeId, payload, meta) => {
+    // Do this before any tail/mirror work can throw and before SessionStart rotates through
+    // the UI listener. Child rollout metadata must never attach to the parent session.
+    opts.onSessionHook?.(agentId, nodeId, payload, meta.verified,
+      agentId === 'codex' && payload.agent_id !== undefined ? undefined : safeTranscriptPath(payload.transcript_path))
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.
       // Everything the claude path does below hangs off `transcript_path`, and grok has none.

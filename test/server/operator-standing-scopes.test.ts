@@ -52,9 +52,9 @@ describe('standing operator scopes on disposable Server Edition', () => {
           { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `synthetic content ${i}` }] } }
         ].map((row) => JSON.stringify(row)).join('\n') + '\n', { mode: 0o600 })
         const nodeId = `standing-node-${i}`
-        // Raw transcript callbacks precede normalized SessionStart. A later Stop binds its path
-        // to the established session, as it does after an actual provider's first response.
-        for (const hook_event_name of ['SessionStart', 'Stop']) {
+        // The first authenticated hook must establish identity AND attach its path. A later
+        // Stop used to conceal the raw-before-normalized attachment defect in this fixture.
+        for (const hook_event_name of ['SessionStart']) {
           const response = await fetch(`http://127.0.0.1:${hookServer.getPort()}/hook/codex`, {
             method: 'POST', headers: { 'X-Nodeterm-Hook-Token': hookServer.getToken(),
               ...(authenticated ? { 'X-Nodeterm-Node-Token': nodeAuthToken(hookServer.nodeAuthSecretOrNull()!, nodeId) } : {}),
