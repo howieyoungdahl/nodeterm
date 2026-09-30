@@ -48,6 +48,8 @@ export interface OpsHealth {
 
 export interface OpsApiDeps {
   token: string
+  /** A separate principal authenticates versioned conversation routes. No management-token fallback. */
+  conversations?: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
   nodes(): Promise<OpsNodeInventoryItem[]>
   sweep(dryRun: boolean, force: boolean): Promise<OpsSweepResult>
   remove(nodeId: string, force: boolean): Promise<OpsRemoveResult>
@@ -143,6 +145,11 @@ export function createOpsApiHandler(
       }
       if (!isLoopbackPeer(req.socket.remoteAddress)) {
         sendJson(res, 403, { error: 'loopback_only' })
+        return
+      }
+      if (pathname === '/opsapi/v1' || pathname.startsWith('/opsapi/v1/')) {
+        if (deps.conversations) await deps.conversations(req, res)
+        else sendJson(res, 404, { error: 'not_found' })
         return
       }
       if (!opsBearerMatches(req.headers.authorization, deps.token)) {

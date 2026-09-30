@@ -27,6 +27,9 @@ export interface NormalizedAgentEvent {
   // true only for a genuine new turn (Claude UserPromptSubmit), so the renderer can
   // clear per-turn fan-out without clearing on every mid-turn tool event.
   newTurn?: boolean
+  /** Hook-server-derived digest of a submitted UserPromptSubmit prompt. Prompt text is never
+   * copied into normalized state, mirrors, or logs. */
+  submittedPromptSha256?: string
   sessionId?: string
   lastMessage?: string
   // blocked (Claude PermissionRequest) only: the deterministic-approval ticket the managed hook
@@ -364,8 +367,12 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
       ...(question ? { lastMessage: question } : {})
     }
   }
-  // SessionStart + tool events keep the node "working".
-  if (ev === 'SessionStart' || ev === 'PreToolUse' || ev === 'PostToolUse') {
+  // SessionStart keeps the Codex card's existing UI state, but also exposes the lifecycle
+  // boundary to process-local consumers (operator session bindings must rotate even when
+  // Codex reuses the same session_id after a process restart).
+  if (ev === 'SessionStart') return { ...base, kind: 'state', state: 'working', sessionPhase: 'start' }
+  // Tool events keep the node "working".
+  if (ev === 'PreToolUse' || ev === 'PostToolUse') {
     return { ...base, kind: 'state', state: 'working' }
   }
   if (ev === 'PermissionRequest') return { ...base, kind: 'state', state: 'waiting' }

@@ -57,9 +57,10 @@ export interface EnvelopeParts {
   message?: MessageIdentity
   /** Per-delivery, app-generated. Never supplied by, and never shown to, the sender. */
   nonce: string
-  sourceId: string
+  sourceId?: string
+  sourcePrincipal?: 'operator'
   sourceTitle: string
-  replyTo: string
+  replyTo?: string
   body: string
 }
 
@@ -128,8 +129,10 @@ export function buildEnvelope(p: EnvelopeParts): string {
   const nonce = oneLine(p.nonce)
   return [
     `--- ${FRAME_WORD} ${nonce} ---`,
-    `from: ${oneLine(p.sourceTitle)} (${oneLine(p.sourceId)})`,
-    `reply-to: ${oneLine(p.replyTo)}`,
+    p.sourcePrincipal === 'operator'
+      ? `from: ${oneLine(p.sourceTitle)} (operator)`
+      : `from: ${oneLine(p.sourceTitle)} (${oneLine(p.sourceId ?? '')})`,
+    ...(p.replyTo ? [`reply-to: ${oneLine(p.replyTo)}`] : []),
     ...(p.message ? [`message-metadata: ${oneLine(JSON.stringify(p.message))}`] : []),
     sanitizePasteText(p.body),
     `--- END ${FRAME_WORD} ${nonce} ---`

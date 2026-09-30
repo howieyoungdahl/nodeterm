@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
-import { randomUUID, timingSafeEqual } from 'crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync, chmodSync, unlinkSync } from 'fs'
 import { homedir } from 'os'
 import path from 'path'
@@ -28,6 +28,7 @@ import {
   type IdentityDecision
 } from './node-identity-policy'
 import { posixQuote } from '../../shared/ssh'
+import { submittedPromptForHash } from './submitted-prompt'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -765,8 +766,13 @@ class HookServer {
           // those agents have their own identity spine).
           const account = observedClaudeAccount(agentId, payload)
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
+          const submittedPromptSha256 = verified && normalized?.newTurn === true &&
+              typeof payload.prompt === 'string'
+            ? createHash('sha256').update(submittedPromptForHash(agentId, payload.prompt).replace(/\r\n/g, '\n')).digest('hex')
+            : undefined
           if (normalized && this.listener)
-            this.listener({ ...normalized, verified, clientRevision, ...(account ? { account } : {}) })
+            this.listener({ ...normalized, verified, clientRevision,
+              ...(submittedPromptSha256 ? { submittedPromptSha256 } : {}), ...(account ? { account } : {}) })
         }
         res.writeHead(204)
         res.end()

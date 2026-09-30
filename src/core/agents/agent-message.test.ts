@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   awaitReceipt,
   deliverAgentMessage,
+  watchForReceipt,
   RECEIPT_DEADLINE_MS,
   type DeliveryDeps,
   type DeliveryRequest,
@@ -120,6 +121,23 @@ async function deliverWithReceipt(
 }
 
 describe('deliverAgentMessage — sequencing', () => {
+  it('operator receipt requires exact verified session, submitted-prompt hash, and new turn', async () => {
+    const listeners = new Set<(event: ReceiptEvent) => void>()
+    const subscribe: DeliveryDeps['subscribeEvents'] = (cb) => { listeners.add(cb); return () => listeners.delete(cb) }
+    const watch = watchForReceipt('n-dst', subscribe, { sessionId: 'session-current', promptSha256: 'sha256-expected' })
+    let complete = false
+    const result = watch.wait(1000).then((signal) => { complete = true; return signal })
+    const emit = (event: Partial<ReceiptEvent>): void => listeners.forEach((cb) => cb({ nodeId: 'n-dst', verified: true, ...event }))
+    emit({ sessionId: 'old-session', submittedPromptSha256: 'sha256-expected', newTurn: true })
+    emit({ sessionId: 'session-current', submittedPromptSha256: 'wrong-hash', newTurn: true })
+    emit({ sessionId: 'session-current', submittedPromptSha256: 'sha256-expected', state: 'working' })
+    emit({ sessionId: 'session-current', submittedPromptSha256: 'sha256-expected', newTurn: true, verified: false })
+    await Promise.resolve()
+    expect(complete).toBe(false)
+    emit({ sessionId: 'session-current', submittedPromptSha256: 'sha256-expected', newTurn: true })
+    await expect(result).resolves.toBe('newTurn')
+  })
+
   it('delivers to a proven live detached session', async () => {
     const presence = vi.fn(async () => 'alive' as const)
     const r = recorder({ sessionPresence: presence })

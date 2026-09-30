@@ -173,6 +173,9 @@ load/save queues can overwrite each other with stale snapshots. `/opsapi/health`
 spawn-handler state without awaiting the preparation or parallel external launches it diagnoses;
 timed-out non-cancellable launches remain visible until they actually settle. Credentials still
 never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
+The exact-scope conversation principal is separate from management and has a small external CLI;
+see `docs/operator-conversations.md` for credential handling, policy provisioning boundaries,
+receipt meaning, and WSL use.
 
 **A Server Edition message is not submitted just because tmux accepted Enter.** A fresh agent
 composer can render a pasted envelope before it is ready to consume the submit key. Capture the

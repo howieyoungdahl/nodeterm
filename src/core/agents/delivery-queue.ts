@@ -67,12 +67,21 @@ export const DELIVERY_QUEUE_CAPACITY = 16
  *  queue keys everything on `targetNodeId` (the flush trigger and the per-target bound) and
  *  `sourceNodeId` (so an expiry can name who to tell); the rest travels untouched. */
 export interface QueuedDeliveryRequest {
-  sourceNodeId: string
+  sourceNodeId?: string
+  sourcePrincipal?: 'operator'
   targetNodeId: string
   sourceTitle: string
   /** For the expiry trace's `bodyChars` — the body itself is never traced (see agent-message-trace). */
   body: string
   message?: MessageIdentity
+  operator?: {
+    target: import('../../shared/operator-conversations').OperatorSessionTarget
+    messageId: string
+    callerId: string
+    authorize: () => Promise<boolean>
+    onOutcome: (outcome: AgentMessageOutcome) => void
+    onAccepted?: () => void
+  }
   [k: string]: unknown
 }
 
@@ -87,6 +96,7 @@ export interface DeliveryQueueDeps {
    * live state. This is what makes the queue safe: it caches no authorization decision.
    */
   deliver(req: QueuedDeliveryRequest, beforeSend: () => Promise<AgentMessageOutcome | undefined>): Promise<AgentMessageOutcome>
+  deliverOperator?(req: QueuedDeliveryRequest, beforeSend: () => Promise<AgentMessageOutcome | undefined>): Promise<AgentMessageOutcome>
   /** Canonical D15 authority adapter, independent of creator/control permission checks. */
   validateAssignment?: AssignmentValidator
   /** Record an outcome (`recordDelivery`). The queue traces `queued` on enqueue and `expired` on a
@@ -189,7 +199,18 @@ export class DeliveryQueue {
     req: QueuedDeliveryRequest,
     opts: { hibernated?: boolean } = {}
   ): Promise<AgentMessageOutcome> {
+    if (req.sourcePrincipal === 'operator') {
+      if (req.sourceNodeId || !req.operator || req.operator.target.nodeId !== req.targetNodeId)
+        return { kind: 'messageRejected', reason: 'invalid-operator-principal' }
+    } else if (!req.sourceNodeId || req.operator) {
+      return { kind: 'messageRejected', reason: 'invalid-agent-principal' }
+    }
     if (Buffer.byteLength(req.body) > MESSAGE_BODY_MAX_BYTES) return { kind: 'messageRejected', reason: 'body-too-large' }
+    if (req.operator) {
+      try {
+        if (!(await req.operator.authorize())) return { kind: 'notPermitted', reason: 'switch-off' }
+      } catch { return { kind: 'notPermitted', reason: 'switch-off' } }
+    }
     return this.messages.admit(req, (snapshot) => this.admit(snapshot, opts))
   }
 
@@ -228,12 +249,13 @@ export class DeliveryQueue {
     }
     const now = this.deps.now()
     const t = await this.deps.trace({
-      sourceNodeId: req.sourceNodeId,
+      ...(req.sourceNodeId ? { sourceNodeId: req.sourceNodeId } : {}),
+      ...(req.sourcePrincipal ? { sourcePrincipal: req.sourcePrincipal } : {}),
       sourceTitle: req.sourceTitle,
       targetNodeId: req.targetNodeId,
       outcome: 'queued',
       bodyChars: req.body.length,
-      messageId: req.message?.message_id, actionId: req.message?.action_id
+      messageId: req.message?.message_id ?? req.operator?.messageId, actionId: req.message?.action_id
     })
     const entry: QueueEntry = {
       req,
@@ -303,12 +325,19 @@ export class DeliveryQueue {
         const beforeSend = async (): Promise<AgentMessageOutcome | undefined> => {
           if (this.deps.now() >= entry.enqueuedAt + entry.ttlMs)
             return { kind: 'expired', traceId: entry.queuedTraceId, queuedForMs: this.deps.now() - entry.enqueuedAt }
+          if (entry.req.operator) {
+            try {
+              if (!(await entry.req.operator.authorize())) return { kind: 'notPermitted', reason: 'switch-off' }
+            } catch { return { kind: 'notPermitted', reason: 'switch-off' } }
+          }
           return this.messages.guard(entry.req, 'delivery')
         }
         const refusal = await beforeSend()
         outcome = refusal ?? (entry.attempts++ >= 3
           ? { kind: 'messageRejected', reason: 'retry-limit' }
-          : await this.deps.deliver(entry.req, beforeSend))
+          : await (entry.req.sourcePrincipal === 'operator' && this.deps.deliverOperator
+              ? this.deps.deliverOperator(entry.req, beforeSend)
+              : this.deps.deliver(entry.req, beforeSend)))
         if (refusal || (outcome.kind === 'messageRejected' && outcome.reason === 'retry-limit'))
           await this.traceOutcome(entry, outcome.kind)
       } catch {
@@ -345,7 +374,10 @@ export class DeliveryQueue {
       // targetGone, targetNotAgentPane…). The entry is done; tell the sender and move to the next.
       if (this.queues.get(nodeId)?.length === 0) this.queues.delete(nodeId)
       outcome = this.messages.record(entry.req, outcome)
-      this.observe(() => this.deps.onFlushed?.(entry.req, outcome))
+      this.observe(() => {
+        entry.req.operator?.onOutcome(outcome)
+        this.deps.onFlushed?.(entry.req, outcome)
+      })
     }
   }
 
@@ -378,18 +410,23 @@ export class DeliveryQueue {
     entry.cancelTimer()
     const queuedForMs = this.deps.now() - entry.enqueuedAt
     this.messages.record(entry.req, { kind: 'expired', traceId: entry.queuedTraceId, queuedForMs })
-    this.observe(() => this.deps.onExpired?.(entry.req, { traceId: entry.queuedTraceId, queuedForMs }))
+    this.observe(() => {
+      const outcome: AgentMessageOutcome = { kind: 'expired', traceId: entry.queuedTraceId, queuedForMs }
+      entry.req.operator?.onOutcome(outcome)
+      this.deps.onExpired?.(entry.req, { traceId: entry.queuedTraceId, queuedForMs })
+    })
     await this.traceOutcome(entry, 'expired')
   }
 
   private async traceOutcome(entry: QueueEntry, outcome: AgentMessageOutcome['kind']): Promise<{ traceId: string }> {
     try { return await this.deps.trace({
-      sourceNodeId: entry.req.sourceNodeId,
+      ...(entry.req.sourceNodeId ? { sourceNodeId: entry.req.sourceNodeId } : {}),
+      ...(entry.req.sourcePrincipal ? { sourcePrincipal: entry.req.sourcePrincipal } : {}),
       sourceTitle: entry.req.sourceTitle,
       targetNodeId: entry.req.targetNodeId,
       outcome,
       bodyChars: entry.req.body.length,
-      messageId: entry.req.message?.message_id,
+      messageId: entry.req.message?.message_id ?? entry.req.operator?.messageId,
       actionId: entry.req.message?.action_id
     }) } catch { return { traceId: entry.queuedTraceId || randomUUID() } }
   }

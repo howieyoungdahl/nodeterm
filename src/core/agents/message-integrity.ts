@@ -26,7 +26,7 @@ export interface MessageIdentity extends MessageAssignment {
 }
 
 export interface IdentifiedMessage {
-  sourceNodeId: string
+  sourceNodeId?: string
   targetNodeId: string
   body: string
   verb?: unknown
@@ -78,9 +78,9 @@ export function canonicalMessage(value: MessageIdentity, target: string): Messag
 }
 
 const rejected = (reason: string): AgentMessageOutcome => ({ kind: 'messageRejected', reason })
-const key = (req: IdentifiedMessage): string => JSON.stringify([req.sourceNodeId, req.message?.message_id])
+const key = (req: IdentifiedMessage): string => JSON.stringify([req.sourceNodeId ?? 'operator', req.message?.message_id])
 const fingerprint = (req: IdentifiedMessage): string => createHash('sha256')
-  .update(JSON.stringify([req.sourceNodeId, req.targetNodeId, req.verb ?? null, req.body, req.message]))
+  .update(JSON.stringify([req.sourceNodeId ?? 'operator', req.targetNodeId, req.verb ?? null, req.body, req.message]))
   .digest('hex')
 
 interface ReceiptEntry {
@@ -114,13 +114,13 @@ export class MessageIntegrity {
     for (const [oldId, entry] of this.receipts) {
       // Never evict pending admissions or unexpired identities to make room for new work.
       if (entry.outcome && entry.message.expires_at <= this.deps.now()) this.receipts.delete(oldId)
-      else if (entry.source === req.sourceNodeId && entry.message.action_id === message.action_id)
+      else if (entry.source === (req.sourceNodeId ?? 'operator') && entry.message.action_id === message.action_id)
         return this.attach(message, rejected('action-id-conflict'))
     }
     if (message.expires_at <= this.deps.now()) return this.attach(message, this.expired())
     if (message.created_at > this.deps.now()) return this.attach(message, rejected('future-message'))
     if (this.receipts.size >= this.capacity) return this.attach(message, rejected('receipt-capacity'))
-    const entry: ReceiptEntry = { fingerprint: hash, source: req.sourceNodeId, message,
+    const entry: ReceiptEntry = { fingerprint: hash, source: req.sourceNodeId ?? 'operator', message,
       pending: Promise.resolve().then(async () => {
         const refusal = await this.guard(snapshot, 'admission')
         return refusal ?? send(snapshot)

@@ -50,6 +50,8 @@ export interface WireAgentStatusOptions {
   onEvent?: (event: NormalizedAgentEvent) => void
   /** Authenticated normalized hook arrival, so a verified hand launch can register its node. */
   onRegistration?: (agentId: string, nodeId: string, verified: boolean) => void
+  /** Operator reads consume only verified, jailed, exact-session transcript bindings. */
+  onTranscript?: (agentId: string, nodeId: string, sessionId: string, transcriptPath: string) => void
 }
 
 /**
@@ -191,7 +193,7 @@ export function wireAgentStatus(
   // `meta` carries the per-node verified flag, but the raw tail/parser branches do not consume it.
   // Registration reads the same label from the normalized stream above, preserving both-shell
   // raw-listener parity while HookServer remains the one authority that computes the answer.
-  hooks.setRawListener((agentId, nodeId, payload, _meta) => {
+  hooks.setRawListener((agentId, nodeId, payload, meta) => {
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.
       // Everything the claude path does below hangs off `transcript_path`, and grok has none.
@@ -266,6 +268,8 @@ export function wireAgentStatus(
         return
       }
       const transcriptPath = safeTranscriptPath(p.transcript_path)
+      if (meta.verified && nodeId && p.session_id && transcriptPath)
+        opts.onTranscript?.(agentId, nodeId, p.session_id, transcriptPath)
       const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
       if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)
       if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
@@ -292,6 +296,8 @@ export function wireAgentStatus(
     // the real end (task-notification via the context tail) releases it.
     const asyncLaunch = p.hook_event_name === 'PostToolUse' && isAsyncSubagentLaunch(p.tool_response)
     const transcriptPath = safeTranscriptPath(p.transcript_path)
+    if (meta.verified && nodeId && p.session_id && transcriptPath)
+      opts.onTranscript?.(agentId, nodeId, p.session_id, transcriptPath)
     // Context-window meter: tail the session transcript (any event carrying both fields).
     if (p.session_id && transcriptPath) contextTail.track(p.session_id, transcriptPath)
     if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)

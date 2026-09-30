@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
@@ -143,6 +144,27 @@ describe('server operator API wiring', () => {
       deliveryQueueDepths: {},
       projects: []
     })
+  })
+
+  it('keeps conversation access disabled and the management credential powerless through actual server routing', async () => {
+    const route = `${base}/opsapi/v1/capabilities`
+    expect((await fetch(route, { headers: { authorization: `Bearer ${token}` } })).status).toBe(401)
+    expect((await fetch(route, { headers: { cookie } })).status).toBe(401)
+    const credential = 'synthetic-operator-bearer-00000000000000000000000000000'
+    const policyFile = path.join(dataDir, 'operator-conversations.json')
+    fs.writeFileSync(policyFile, JSON.stringify({ version: 1, principals: [{
+      id: 'synthetic-reader', tokenSha256: createHash('sha256').update(credential).digest('hex'),
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      read: [{ projectId: 'synthetic-project', nodeId: 'synthetic-node', sessionId: 'synthetic-session' }], message: []
+    }] }), { mode: 0o600 })
+    const headers = { authorization: `Bearer ${credential}` }
+    const capability = await fetch(route, { headers })
+    expect(capability.status).toBe(200)
+    expect(await capability.json()).toMatchObject({ version: 1, permissions: { read: true, message: false }, terminalSuggestions: false })
+    expect(await (await fetch(`${base}/opsapi/v1/sessions`, { headers })).json()).toMatchObject({ version: 1, targets: [] })
+    expect((await fetch(`${base}/opsapi/nodes`, { headers })).status).toBe(401)
+    fs.unlinkSync(policyFile)
+    expect((await fetch(route, { headers })).status).toBe(401)
   })
 })
 
