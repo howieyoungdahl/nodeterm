@@ -63,6 +63,60 @@ function parseJson(raw: string): unknown {
   }
 }
 
+/** Structured conversation blocks shared with the operator reader. Deliberately ignores
+ * reasoning, system/developer messages, and every unrecognized provider event. */
+export type SupportedConversationBlock = {
+  kind: 'user' | 'agent' | 'tool_call' | 'tool_result'
+  text: string
+  timestamp: string | null
+  sessionId?: string
+  identityOnly?: boolean
+}
+
+export function conversationBlocksFromRecord(agent: string, raw: string): SupportedConversationBlock[] {
+  const o = parseJson(raw) as any
+  if (!o) return []
+  const rawTimestamp = typeof o.timestamp === 'string' ? o.timestamp : typeof o.time === 'string' ? o.time : null
+  const timestamp = rawTimestamp && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(rawTimestamp) && Number.isFinite(Date.parse(rawTimestamp))
+    ? rawTimestamp
+    : null
+  if (agent === 'claude') {
+    const sessionId = typeof o.sessionId === 'string' ? o.sessionId : typeof o.session_id === 'string' ? o.session_id : undefined
+    const content = o.message?.content
+    if (o.type === 'user' && typeof content === 'string') return [{ kind: 'user', text: content, timestamp, sessionId }]
+    if (!Array.isArray(content)) return sessionId ? [{ kind: 'user', text: '', timestamp, sessionId, identityOnly: true }] : []
+    const out: SupportedConversationBlock[] = []
+    for (const c of content) {
+      if (o.type === 'user' && c?.type === 'text' && typeof c.text === 'string') out.push({ kind: 'user', text: c.text, timestamp, sessionId })
+      if (o.type === 'assistant' && c?.type === 'text' && typeof c.text === 'string') out.push({ kind: 'agent', text: c.text, timestamp, sessionId })
+      if (o.type === 'assistant' && c?.type === 'tool_use') out.push({ kind: 'tool_call', text: `${c.name || 'tool'} ${JSON.stringify(c.input ?? {})}`, timestamp, sessionId })
+      if (o.type === 'user' && c?.type === 'tool_result') out.push({ kind: 'tool_result', text: textOf(c.content), timestamp, sessionId })
+    }
+    return out.length ? out : sessionId ? [{ kind: 'user', text: '', timestamp, sessionId, identityOnly: true }] : []
+  }
+  if (agent === 'codex') {
+    const sessionId = o.type === 'session_meta'
+      ? (o.payload?.id ?? o.payload?.session_id)
+      : (o.session_id ?? o.sessionId ?? o.payload?.session_id)
+    if (o.type !== 'response_item') return sessionId ? [{ kind: 'user', text: '', timestamp, sessionId, identityOnly: true }] : []
+    const p = o.payload ?? {}
+    // Analysis-channel message records can contain private reasoning even when their content
+    // block is called output_text. Only public conversational channels may leave this boundary.
+    if (p.channel && p.channel !== 'final' && p.channel !== 'commentary')
+      return sessionId ? [{ kind: 'user', text: '', timestamp, sessionId, identityOnly: true }] : []
+    if (p.type === 'message' && (p.role === 'user' || p.role === 'assistant')) {
+      const kind = p.role === 'user' ? 'user' : 'agent'
+      return (Array.isArray(p.content) ? p.content : []).filter((c: any) => c?.type === (kind === 'user' ? 'input_text' : 'output_text') && typeof c.text === 'string')
+        .map((c: any) => ({ kind, text: c.text, timestamp, sessionId }))
+    }
+    if (p.type === 'function_call') return [{ kind: 'tool_call', text: `${p.name || 'tool'} ${typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments ?? {})}`, timestamp, sessionId }]
+    if (p.type === 'function_call_output') return [{ kind: 'tool_result', text: typeof p.output === 'string' ? p.output : JSON.stringify(p.output ?? ''), timestamp, sessionId }]
+    if (p.type === 'custom_tool_call') return [{ kind: 'tool_call', text: `${p.name || 'tool'} ${typeof p.input === 'string' ? p.input : JSON.stringify(p.input ?? {})}`, timestamp, sessionId }]
+    if (p.type === 'custom_tool_call_output') return [{ kind: 'tool_result', text: typeof p.output === 'string' ? p.output : JSON.stringify(p.output ?? ''), timestamp, sessionId }]
+  }
+  return []
+}
+
 /** One claude transcript JSONL line -> 0..n display strings. */
 export function linesFromClaude(raw: string): string[] {
   const o = parseJson(raw) as { type?: string; message?: { content?: unknown } } | undefined

@@ -66,7 +66,10 @@ export interface MessagingStoredNode {
  */
 export interface AgentMessagingDeps {
   paneOwner(nodeId: string): Promise<PaneOwner | null>
-  sendEnvelope(nodeId: string, envelope: string): Promise<boolean>
+  sendEnvelope(nodeId: string, envelope: string, options?: {
+    beforeAction?: () => Promise<boolean>
+    onAccepted?: () => void
+  }): Promise<boolean>
   hasLiveSession(nodeId: string): boolean
   /** Persistent sessions can outlive their browser attachment. Absence preserves desktop behavior. */
   sessionPresence?(nodeId: string): Promise<'alive' | 'dead' | 'unknown'>
@@ -111,6 +114,8 @@ export interface AgentMessagingDeps {
    * so a flush re-runs the whole gate chain against live state — the flush-time re-validation.
    */
   queue?: DeliveryQueue
+  /** Operator principal delivery shares the same target lock and pane primitive. */
+  operatorDeliver?(req: QueuedDeliveryRequest, beforeSend: () => Promise<AgentMessageOutcome | undefined>): Promise<AgentMessageOutcome>
   /**
    * Is the target node hibernated (Eco)? A hibernated node's pane is on a SHELL, so a direct
    * delivery refuses `targetNotAgentPane` FOREVER (gate 1) — the DECSET-2004 measurement's one unsafe
@@ -203,6 +208,7 @@ export function createDeliveryQueue(
   /** Append one messaging record to a project's board log. No-ops when the project cannot be
    *  resolved (an inline/cwd-less project has no log — Constraint 10 — the ring still holds it). */
   const senderBoardLog = (req: QueuedDeliveryRequest, title: string): void => {
+    if (!req.sourceNodeId || req.sourcePrincipal === 'operator') return
     const projectId = projectFor(req.sourceNodeId)
     if (!projectId) return
     const entry: BoardLogEntry = {
@@ -223,13 +229,16 @@ export function createDeliveryQueue(
         runDelivery(
           {
             verb: qreq.verb as AgentMessageDeliverRequest['verb'],
-            sourceNodeId: qreq.sourceNodeId,
+            sourceNodeId: qreq.sourceNodeId!,
             targetNodeId: qreq.targetNodeId,
             body: qreq.body
           },
           deps,
           { message: qreq.message, beforeSend }
         ),
+      deliverOperator: (qreq, beforeSend) => deps.operatorDeliver
+        ? deps.operatorDeliver(qreq, beforeSend)
+        : Promise.resolve({ kind: 'notPermitted', reason: 'unsupported-edition' }),
       // The trace leg: ring always, board log when the TARGET's owning project is resolvable.
       trace: (input) =>
         recordDelivery(input, {
@@ -257,7 +266,7 @@ export function createDeliveryQueue(
  * designed direction) but can never confirm a delivery (fail-closed, the receipt's).
  */
 export function onMessagingAgentEvent(
-  e: Pick<NormalizedAgentEvent, 'nodeId' | 'state' | 'newTurn' | 'verified'>,
+  e: Pick<NormalizedAgentEvent, 'nodeId' | 'state' | 'newTurn' | 'verified' | 'sessionId' | 'submittedPromptSha256'>,
   queue: DeliveryQueue | null = deliveryQueue
 ): void {
   if (!e?.nodeId) return
@@ -266,7 +275,9 @@ export function onMessagingAgentEvent(
     nodeId: e.nodeId,
     newTurn: e.newTurn,
     state: e.state,
-    verified: e.verified
+    verified: e.verified,
+    sessionId: e.sessionId,
+    submittedPromptSha256: e.submittedPromptSha256
   }
   for (const cb of [...receiptSubs]) cb(ev)
   // Deliver-on-idle flush trigger: the target finished a turn, so it is idle NOW. `onTargetIdle`
@@ -283,7 +294,7 @@ export function onMessagingAgentEvent(
 // different processes, and neither replaces the other.
 const nodeLocks = new Map<string, Promise<unknown>>()
 
-function withNodeLock<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
+export function withNodeLock<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
   const prev = nodeLocks.get(nodeId) ?? Promise.resolve()
   const run = prev.then(fn, fn)
   nodeLocks.set(
@@ -590,6 +601,53 @@ export async function runDelivery(
   } finally {
     reservation?.release()
   }
+}
+
+/** Operator sends have no source node and bypass creator ownership, but use the same lock, pane
+ * status gates, envelope transport, and verified receipt as agent sends. */
+export async function runOperatorDelivery(
+  req: QueuedDeliveryRequest,
+  deps: AgentMessagingDeps,
+  beforeSend: () => Promise<AgentMessageOutcome | undefined>,
+  onAccepted?: () => void
+): Promise<AgentMessageOutcome> {
+  const project = deps.projects().find((p) => p.id === req.operator?.target.projectId)
+  const node = project?.nodes.find((n) => n.id === req.targetNodeId)
+  const targetAgentId = node?.agentId ?? (deps.mirrorEntry ?? coreMirrorEntry)(req.targetNodeId)?.agentId ?? ''
+  const now = deps.now ?? (() => Date.now())
+  return deliverAgentMessage({
+    targetNodeId: req.targetNodeId,
+    sourcePrincipal: 'operator',
+    receiptSessionId: req.operator?.target.sessionId,
+    sourceTitle: req.sourceTitle,
+    traceMessageId: req.operator?.messageId,
+    body: req.body,
+    targetAgentId,
+    targetBinaries: binariesFor(targetAgentId, deps.customAgents()),
+    targetIsRemote: deps.isRemoteNode(req.targetNodeId),
+    targetLive: deps.sessionPresence ? undefined : deps.hasLiveSession(req.targetNodeId)
+  }, {
+    beforeSend,
+    sessionPresence: deps.sessionPresence ? (id) => deps.sessionPresence!(id) : undefined,
+    paneOwner: (id) => deps.paneOwner(id),
+    bracketPasteRequested: async () => true,
+    sendEnvelope: (id, envelope, options) => deps.sendEnvelope(id, envelope, {
+      ...(options?.beforeAction ? { beforeAction: options.beforeAction } : {}),
+      onAccepted: () => { options?.onAccepted?.(); onAccepted?.() }
+    }),
+    mirrorEntry: (id) => (deps.mirrorEntry ?? coreMirrorEntry)(id),
+    tokenFilePresent: (id) => nodeTokenFilePresent(id),
+    lock: withNodeLock,
+    now,
+    trace: (input) => recordDelivery(input, {
+      appendBoardLog: (entry) => {
+        const owner = deps.paneOwnerProject(req.targetNodeId)
+        return owner ? deps.appendBoardLog(owner, entry) : Promise.resolve(false)
+      },
+      now
+    }),
+    subscribeEvents: deps.subscribeReceipts ?? subscribeBus
+  })
 }
 
 /** The `AgentMessageOutcome` kinds a permitted-but-not-ready target produces — a busy agent, or a

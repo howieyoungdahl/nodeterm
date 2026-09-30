@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { MirrorEntry } from '../agent-status-mirror'
 import type { AgentState } from '../../shared/agents/normalize'
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
@@ -62,14 +63,19 @@ export interface ReceiptEvent {
   nodeId: string
   newTurn?: boolean
   state?: AgentState
+  sessionId?: string
+  submittedPromptSha256?: string
   /** The POST presented a per-node token this instance minted for this node id. */
   verified?: boolean
 }
 
 export interface DeliveryRequest {
   message?: MessageIdentity
+  traceMessageId?: string
   targetNodeId: string
-  sourceNodeId: string
+  sourceNodeId?: string
+  sourcePrincipal?: 'operator'
+  receiptSessionId?: string
   sourceTitle: string
   body: string
   /** The agent the TARGET node is configured to run — gate 1 checks the pane against its binaries. */
@@ -129,7 +135,11 @@ export interface DeliveryDeps {
    * the envelope did not reach the pane; a post-paste submit failure remains eligible for the
    * receipt watch's honest `stalled` outcome.
    */
-  sendEnvelope(nodeId: string, envelope: string): Promise<boolean>
+  sendEnvelope(nodeId: string, envelope: string, options?: {
+    beforeAction?: () => Promise<boolean>
+    onAccepted?: () => void
+  }): Promise<boolean>
+  onTransportAccepted?(): void
   /** The target's status mirror entry — gate 2's whole input. */
   mirrorEntry(nodeId: string): MirrorEntry | undefined
   /** `nodeTokenFilePresent(nodeId)`. */
@@ -237,15 +247,17 @@ export interface ReceiptWatch {
  */
 export function watchForReceipt(
   nodeId: string,
-  subscribe: DeliveryDeps['subscribeEvents']
+  subscribe: DeliveryDeps['subscribeEvents'],
+  expected?: { sessionId: string; promptSha256: string }
 ): ReceiptWatch {
   let buffered: ReceiptSignal | null = null
   let deliver: ((s: ReceiptSignal) => void) | null = null
   const unsub = subscribe((e) => {
     if (e.nodeId !== nodeId) return // another node's turn is not this node's receipt
     if (e.verified !== true) return // an unverifiable event is not evidence, here as everywhere
+    if (expected && (e.sessionId !== expected.sessionId || e.submittedPromptSha256 !== expected.promptSha256 || e.newTurn !== true)) return
     const signal: ReceiptSignal | null =
-      e.newTurn === true ? 'newTurn' : e.state === 'working' ? 'working' : null
+      e.newTurn === true ? 'newTurn' : !expected && e.state === 'working' ? 'working' : null
     if (!signal || buffered) return // first advance wins; later ones are the turn proceeding
     buffered = signal
     deliver?.(signal)
@@ -331,11 +343,14 @@ export async function deliverAgentMessage(
     receipt?: ReceiptSignal
   ): Promise<{ traceId: string; traced: TraceKind }> =>
     deps.trace({
-      sourceNodeId: req.sourceNodeId,
+      ...(req.sourceNodeId ? { sourceNodeId: req.sourceNodeId } : {}),
+      ...(req.sourcePrincipal ? { sourcePrincipal: req.sourcePrincipal } : {}),
       sourceTitle: req.sourceTitle,
       targetNodeId: req.targetNodeId,
       outcome,
-      messageId: req.message?.message_id,
+      ...(req.message?.message_id || req.traceMessageId
+        ? { messageId: req.message?.message_id ?? req.traceMessageId }
+        : {}),
       actionId: req.message?.action_id,
       ...(receipt ? { receipt } : {}),
       bodyChars
@@ -351,7 +366,7 @@ export async function deliverAgentMessage(
     // identity, or is aiming at a busy target must be refused WITHOUT a tmux round-trip (and, on an
     // SSH project, without an `ssh` one). The unit test asserts the probe never happens.
     const cheap = decidePreProbe({
-      sourceNodeId: req.sourceNodeId,
+      ...(req.sourceNodeId ? { sourceNodeId: req.sourceNodeId } : {}),
       targetNodeId: req.targetNodeId,
       notPermitted: req.notPermitted,
       retryAfterMs: req.retryAfterMs,
@@ -454,6 +469,7 @@ export async function deliverAgentMessage(
       message: req.message,
       nonce: (deps.nonce ?? newFrameNonce)(),
       sourceId: req.sourceNodeId,
+      sourcePrincipal: req.sourcePrincipal,
       sourceTitle: req.sourceTitle,
       replyTo: req.sourceNodeId,
       body: req.body
@@ -462,11 +478,31 @@ export async function deliverAgentMessage(
     // the post-write probe is still in flight — 2s locally, a real ssh round-trip remotely — and a
     // subscription opened after that probe would miss it and report `stalled` for a message that
     // demonstrably landed. See `watchForReceipt`: that miss is what makes an LLM send it twice.
-    const watch = watchForReceipt(req.targetNodeId, deps.subscribeEvents)
+    const operatorTransport = req.sourcePrincipal === 'operator'
+    const expectedReceipt = operatorTransport
+      ? { sessionId: req.receiptSessionId ?? '', promptSha256: createHash('sha256').update(payload.replace(/\r\n/g, '\n')).digest('hex') }
+      : undefined
+    const watch = watchForReceipt(req.targetNodeId, deps.subscribeEvents, expectedReceipt)
     let wrote: boolean
-    try { wrote = await deps.sendEnvelope(req.targetNodeId, payload) }
-    catch {
+    let acceptedNotified = false
+    try {
+      wrote = await deps.sendEnvelope(req.targetNodeId, payload, operatorTransport ? {
+        beforeAction: async () => !(await deps.beforeSend?.()),
+        onAccepted: () => {
+          acceptedNotified = true
+          try { deps.onTransportAccepted?.() } catch { /* acceptance observers cannot interrupt delivery */ }
+        }
+      } : undefined)
+    }
+    catch (error) {
       watch.cancel()
+      const refusal = error as { name?: string; reason?: string; pasted?: boolean }
+      if (refusal?.name === 'SettledEnvelopeGuardError') {
+        if (refusal.reason === 'composer-draft') return refuse({ kind: 'messageRejected', reason: 'human-composer-draft' })
+        if (refusal.reason === 'composer-unrecognized') return refuse({ kind: 'messageRejected', reason: 'composer-unrecognized' })
+        if (!refusal.pasted) return refuse({ kind: 'notPermitted', reason: 'switch-off' })
+        return refuse({ kind: 'unknown', reason: 'operator-revoked-after-paste' })
+      }
       return refuse({ kind: 'unknown', reason: 'delivery-exception' })
     }
     // The pane went away between the gate and the write. Not a failure of ours and not retryable:
@@ -475,6 +511,9 @@ export async function deliverAgentMessage(
     if (!wrote) {
       watch.cancel()
       return refuse({ kind: 'targetGone' })
+    }
+    if (!acceptedNotified) {
+      try { deps.onTransportAccepted?.() } catch { /* receipt callback cannot change delivery */ }
     }
 
     // G3, post-write. rev. 2's gate 3 was check-then-act — a TOCTOU where the body lands in a

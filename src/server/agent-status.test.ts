@@ -91,6 +91,34 @@ function lastAgentStatus(): Record<string, unknown> | undefined {
 }
 
 describe('wireAgentStatus', () => {
+  it('binds operator transcripts only from verified, jailed, non-child observations without changing legacy tailing', () => {
+    const fh = fakeHooks()
+    const context = recTail()
+    const observed: unknown[][] = []
+    wireAgentStatus(platform, {
+      hooks: fh.hooks as never,
+      contextTail: context.tail as never,
+      onTranscript: (...args) => observed.push(args)
+    })
+    const claudePath = path.join(os.homedir(), '.claude', 'projects', 'synthetic', 'session.jsonl')
+    const payload = { hook_event_name: 'Stop', session_id: 'synthetic-session', transcript_path: claudePath }
+    fh.fireRaw('claude', 'synthetic-node', payload, false)
+    expect(observed).toEqual([])
+    expect(context.calls).toContainEqual({ m: 'track', args: ['synthetic-session', path.resolve(claudePath)] })
+    fh.fireRaw('claude', 'synthetic-node', payload, true)
+    expect(observed).toEqual([['claude', 'synthetic-node', 'synthetic-session', path.resolve(claudePath)]])
+    expect(context.calls.filter((c) => c.m === 'track')).toHaveLength(2)
+    fh.fireRaw('claude', 'synthetic-node', { ...payload, transcript_path: path.join(dir, 'outside-jail.jsonl') }, true)
+    expect(observed).toHaveLength(1)
+    const codexPath = path.join(os.homedir(), '.codex', 'sessions', 'synthetic.jsonl')
+    fh.fireRaw('codex', 'synthetic-node', { ...payload, transcript_path: codexPath, agent_id: 'child' }, true)
+    expect(observed).toHaveLength(1)
+    fh.fireRaw('codex', 'synthetic-node', { ...payload, transcript_path: codexPath }, false)
+    expect(observed).toHaveLength(1)
+    fh.fireRaw('codex', 'synthetic-node', { ...payload, transcript_path: codexPath }, true)
+    expect(observed.at(-1)).toEqual(['codex', 'synthetic-node', 'synthetic-session', path.resolve(codexPath)])
+  })
+
   it('reports normalized hook registration with the verified identity label', () => {
     const fh = fakeHooks()
     const registrations: Array<[string, string, boolean]> = []

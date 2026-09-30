@@ -262,7 +262,7 @@ canvas state without weakening agent canvas-control ownership. On boot it loads 
 `0600`. The token is restart-stable, never printed, never derived from the browser password, and
 never accepted as `nt_session`. With a custom `NODETERM_DATA_DIR`, the token follows that data dir.
 
-Every `/opsapi/*` request must satisfy both gates:
+Every management `/opsapi/*` request (excluding the separately authenticated `/opsapi/v1/*` conversation namespace) must satisfy both gates:
 
 1. the actual TCP peer is loopback (`127.0.0.0/8` or `::1`) — forwarded headers and proxy trust do
    not widen this;
@@ -320,10 +320,14 @@ The v1 contract is deliberately narrow:
   list. Health does not enter the handler queue or await the external launches it observes, so a
   wedged node creation cannot wedge its diagnosis too.
 
-There are no create, send, rename, remote-exposure, or UI verbs here. **Surfaces:** Server Edition:
-full; Desktop: N/A (its operator is the local app/main process); Mobile companion: N/A (the bearer
-namespace is not routed remotely). Shipping this code does not alter a running service; activation
-happens only on a later operator-approved Server restart.
+Existing management also supports operator node creation (`POST /opsapi/nodes`) and rename/resize
+(`PATCH /opsapi/nodes/<id>`); these do not grant conversation reads or messaging. A separate,
+exact-scope operator conversation principal has its own `/opsapi/v1/*` routes for capabilities,
+session targets, transcript reads, message admission, and receipts. It is not the management bearer
+and does not weaken agent ownership. See [External operator conversation CLI](operator-conversations.md)
+for its client contract, manual provisioning proposal, and lifecycle limits. **Surfaces:** Server
+Edition: conversation API and CLI; Desktop: N/A; Mobile companion: N/A. Shipping code does not
+activate a live service or provision credentials.
 
 ### Reverse-proxy SSO (header trust)
 

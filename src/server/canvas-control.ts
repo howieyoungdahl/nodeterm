@@ -7,8 +7,10 @@ import {
   deliverFromControl,
   messagingEnabledVia,
   onMessagingAgentEvent,
+  runOperatorDelivery,
   type AgentMessagingDeps
 } from '../core/agents/agent-messaging'
+import { sendOperatorMessage as sendOperatorMessageCore, type OperatorDeliveryInput } from '../core/agents/operator-messaging'
 import { paneOwnerProject } from '../core/agents/pane-ownership'
 import {
   mirrorEntry,
@@ -31,6 +33,7 @@ import type { WorkspaceStore } from '../core/workspace-store'
 import type { NormalizedAgentEvent } from '../shared/agents/normalize'
 import { IPC } from '../shared/ipc'
 import type { Project, Settings } from '../shared/types'
+import type { AgentMessageOutcome } from '../core/agents/agent-message-decide'
 import {
   createServerEditionControlHandler,
   type ServerEditionControlActions
@@ -66,6 +69,7 @@ export interface ServerCanvasControl {
   onHookRegistration(agentId: string, nodeId: string, verified: boolean): void
   onAgentEvent(event: NormalizedAgentEvent): void
   deliveryQueueDepths(): Record<string, number>
+  sendOperatorMessage(input: OperatorDeliveryInput): Promise<AgentMessageOutcome>
   forgetNodes(nodeIds: readonly string[]): void
   installSkillInto(configDir: string): void
   stop(): void
@@ -182,8 +186,16 @@ export async function initServerCanvasControl(
     paneOwner: (nodeId) => deps.ptyManager.paneOwner(nodeId),
     // Server delivery has no renderer/xterm echo stream. Capture the headless pane instead and
     // separate paste from Enter so a fresh TUI cannot swallow the first submit keystroke.
-    sendEnvelope: (nodeId, envelope) =>
-      sendSettledEnvelope(deps.ptyManager, nodeId, envelope),
+    sendEnvelope: (nodeId, envelope, options) =>
+      sendSettledEnvelope({
+        captureSession: (id) => deps.ptyManager.captureSession(id),
+        captureStyledSession: (id) => deps.ptyManager.captureSession(id, false, true),
+        sendText: (id, text, sendOptions) => deps.ptyManager.sendText(id, text, sendOptions)
+      }, nodeId, envelope, options ? {
+        rejectPrefilledComposer: true,
+        beforeAction: options.beforeAction,
+        onAccepted: options.onAccepted
+      } : {}),
     hasLiveSession: (nodeId) => deps.ptyManager.hasLiveSession(nodeId),
     sessionPresence: (nodeId) => deps.ptyManager.sessionPresence(nodeId),
     mirrorEntry,
@@ -195,7 +207,8 @@ export async function initServerCanvasControl(
     callerOwnsTarget: (sourceNodeId, targetNodeId) =>
       factory.ownsSpawn(sourceNodeId, targetNodeId),
     customAgents: () => deps.settings().customAgents,
-    appendBoardLog: (projectId, entry) => deps.boardLog.append(projectId, entry)
+    appendBoardLog: (projectId, entry) => deps.boardLog.append(projectId, entry),
+    operatorDeliver: (req, beforeSend) => runOperatorDelivery(req, messaging, beforeSend, req.operator?.onAccepted)
   }
   const queue = createDeliveryQueue(messaging)
   messaging.queue = queue
@@ -241,6 +254,28 @@ export async function initServerCanvasControl(
       factory.onAgentEvent(event)
     },
     deliveryQueueDepths: () => queue.depths(),
+    sendOperatorMessage: (input) => sendOperatorMessageCore(input, {
+      queue,
+      deliver: (operatorInput, beforeSend) => runOperatorDelivery({
+        sourcePrincipal: 'operator',
+        sourceTitle: `Operator ${operatorInput.callerId}`,
+        targetNodeId: operatorInput.target.nodeId,
+        body: operatorInput.text,
+        operator: {
+          target: operatorInput.target,
+          callerId: operatorInput.callerId,
+          messageId: operatorInput.messageId,
+          authorize: operatorInput.authorize,
+          onOutcome: operatorInput.onOutcome,
+          onAccepted: operatorInput.onAccepted
+        }
+      }, messaging, beforeSend, operatorInput.onAccepted),
+      isCurrent: async (target) => {
+        const project = deps.workspaceStore.persistedCanvases().find((p) => p.id === target.projectId)
+        return !!project?.nodes.some((node) => node.id === target.nodeId) &&
+          await deps.ptyManager.sessionPresence(target.nodeId) === 'alive'
+      }
+    }),
     forgetNodes: (nodeIds) => factory.forgetNodes(nodeIds),
     installSkillInto,
     stop: () => {

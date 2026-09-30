@@ -88,6 +88,13 @@ describe('the envelope is non-forgeable by construction', () => {
     expect(buildEnvelope(parts({})).split('\n').length).toBe(5)
   })
 
+  it('identifies operator as a distinct principal and emits no node reply route', () => {
+    const e = buildEnvelope(parts({ sourcePrincipal: 'operator', sourceId: undefined, replyTo: undefined }))
+    expect(e).toContain('from: Alpha (operator)')
+    expect(e).not.toContain('reply-to:')
+    expect(e).not.toContain('(undefined)')
+  })
+
   it('the frame carries the nonce on both the open and the close line', () => {
     const e = buildEnvelope(parts({ nonce: A }))
     expect(e.split('\n')[0]).toBe(`--- NODETERM MESSAGE ${A} ---`)

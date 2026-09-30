@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
-import { randomUUID, timingSafeEqual } from 'crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync, chmodSync, unlinkSync } from 'fs'
 import { homedir } from 'os'
 import path from 'path'
@@ -765,8 +765,13 @@ class HookServer {
           // those agents have their own identity spine).
           const account = observedClaudeAccount(agentId, payload)
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
+          const submittedPromptSha256 = verified && normalized?.newTurn === true &&
+              typeof payload.prompt === 'string'
+            ? createHash('sha256').update(payload.prompt.replace(/\r\n/g, '\n')).digest('hex')
+            : undefined
           if (normalized && this.listener)
-            this.listener({ ...normalized, verified, clientRevision, ...(account ? { account } : {}) })
+            this.listener({ ...normalized, verified, clientRevision,
+              ...(submittedPromptSha256 ? { submittedPromptSha256 } : {}), ...(account ? { account } : {}) })
         }
         res.writeHead(204)
         res.end()

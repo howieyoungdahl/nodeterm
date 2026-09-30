@@ -27,6 +27,9 @@ export interface NormalizedAgentEvent {
   // true only for a genuine new turn (Claude UserPromptSubmit), so the renderer can
   // clear per-turn fan-out without clearing on every mid-turn tool event.
   newTurn?: boolean
+  /** Hook-server-derived digest of a submitted UserPromptSubmit prompt. Prompt text is never
+   * copied into normalized state, mirrors, or logs. */
+  submittedPromptSha256?: string
   sessionId?: string
   lastMessage?: string
   // blocked (Claude PermissionRequest) only: the deterministic-approval ticket the managed hook

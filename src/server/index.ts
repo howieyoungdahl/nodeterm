@@ -3,6 +3,8 @@ import { readAgentSessionName } from '../core/agent-session-name'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import path from 'path'
 import http from 'http'
+import { OperatorSessionBindings } from '../core/operator-session-bindings'
+import { createOperatorConversationApi } from './operator-conversation-api'
 
 import { ServerPlatform } from './platform-server'
 import { Auth } from './auth'
@@ -530,10 +532,16 @@ export async function startServer(
     intervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
     sweep: (dryRun) => nodeOps.sweep(dryRun)
   })
+  const operatorBindings = new OperatorSessionBindings()
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
     onRegistration: (agentId, nodeId, verified) =>
       canvasControl?.onHookRegistration(agentId, nodeId, verified),
-    onEvent: (event) => canvasControl?.onAgentEvent(event)
+    onEvent: (event) => {
+      operatorBindings.observe(event)
+      canvasControl?.onAgentEvent(event)
+    },
+    onTranscript: (agentId, nodeId, sessionId, transcriptPath) =>
+      operatorBindings.transcript(nodeId, sessionId, agentId, transcriptPath)
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
@@ -926,8 +934,18 @@ export async function startServer(
     }
   }
 
+  const operatorConversations = createOperatorConversationApi({
+    dataDir: config.dataDir,
+    managementToken: opsToken,
+    bindings: operatorBindings,
+    projects: () => workspaceStore.persistedCanvases(),
+    sendMessage: async (input) => canvasControl
+      ? canvasControl.sendOperatorMessage(input)
+      : { kind: 'notPermitted', reason: 'unsupported-edition' }
+  })
   const opsApi = createOpsApiHandler({
     token: opsToken,
+    conversations: operatorConversations,
     nodes: () => nodeOps.list(),
     sweep: (dryRun, force) => nodeOps.sweep(dryRun, force),
     remove: (nodeId, force) => nodeOps.remove(nodeId, force),
@@ -1010,6 +1028,7 @@ export async function startServer(
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })
+      await operatorConversations.drain()
     }
   }
 }

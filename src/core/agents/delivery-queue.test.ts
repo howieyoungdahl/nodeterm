@@ -40,7 +40,7 @@ function harness(over: Partial<DeliveryQueueDeps> = {}) {
       return nextOutcome
     },
     trace: async (input) => {
-      traced.push({ outcome: input.outcome, sourceNodeId: input.sourceNodeId, targetNodeId: input.targetNodeId })
+      traced.push({ outcome: input.outcome, sourceNodeId: input.sourceNodeId ?? 'operator', targetNodeId: input.targetNodeId })
       return { traceId: `trace-${traced.length}`, traced: 'memory' }
     },
     wake: (id) => woken.push(id),

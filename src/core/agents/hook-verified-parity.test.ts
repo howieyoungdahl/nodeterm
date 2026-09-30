@@ -12,6 +12,7 @@
 // Plus a source-level parity assertion: BOTH shells must register a 4-arg raw listener. This repo
 // has shipped a hook-server signature change to one shell only three times; the guard is cheap.
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -31,14 +32,14 @@ let dir = ''
 let events: NormalizedAgentEvent[] = []
 let raws: { agentId: string; nodeId: string; meta: { verified: boolean } | undefined }[] = []
 
-function post(nodeId: string, token?: string): Promise<Response> {
+function post(nodeId: string, token?: string, prompt = 'hi'): Promise<Response> {
   const headers: Record<string, string> = {
     'X-Nodeterm-Hook-Token': hookServer.getToken(),
     'content-type': 'application/x-www-form-urlencoded'
   }
   // A10 teaches the CLIENTS to send this; until then the test is the only caller that does.
   if (token !== undefined) headers['X-Nodeterm-Node-Token'] = token
-  const payload = JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt: 'hi' })
+  const payload = JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1', prompt })
   return fetch(`http://127.0.0.1:${hookServer.getPort()}/hook/claude`, {
     method: 'POST',
     headers,
@@ -73,10 +74,14 @@ beforeEach(() => {
 
 describe('hook server: the verified label on /hook/*', () => {
   it('labels an event verified when the node presents its own token', async () => {
-    const res = await post(NODE, nodeAuthToken(SECRET, NODE))
+    const submitted = 'first\r\nsecond'
+    const res = await post(NODE, nodeAuthToken(SECRET, NODE), submitted)
     expect(res.status).toBe(204)
     expect(events).toHaveLength(1)
     expect(events[0].verified).toBe(true)
+    expect(events[0].sessionId).toBe('s1')
+    expect(events[0].submittedPromptSha256).toBe(createHash('sha256').update('first\nsecond').digest('hex'))
+    expect(JSON.stringify(events[0])).not.toContain(submitted)
     expect(raws).toEqual([{ agentId: 'claude', nodeId: NODE, meta: { verified: true } }])
   })
 
@@ -92,6 +97,7 @@ describe('hook server: the verified label on /hook/*', () => {
     expect(res.status).toBe(204)
     expect(events).toHaveLength(1)
     expect(events[0].verified).toBe(false)
+    expect(events[0].submittedPromptSha256).toBeUndefined()
     expect(events[0].nodeId).toBe(NODE)
     expect(raws).toEqual([{ agentId: 'claude', nodeId: NODE, meta: { verified: false } }])
     expect(hookServer.isNodeProven('untokened-node')).toBe(false)
@@ -147,15 +153,10 @@ describe('both shells register a 4-arg raw listener', () => {
   const code = (rel: string): string =>
     readFileSync(join(root, rel), 'utf8').replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '')
 
-  // The rule this repo keeps re-learning: a hook-server change that lands on ONE shell.
-  // `verified` reaches the mirror through the NORMALIZED listener, so neither raw listener needs
-  // to read it — and that is a state worth pinning, because "neither" is as easy to break as
-  // "both". If a future change teaches one raw listener to branch on the flag, the other must
-  // change in the same commit or this fails.
-  it('neither raw listener branches on meta.verified — and if one ever does, both must', () => {
-    const branches = (s: string): boolean => /_?meta(\.verified|\?\.verified)/.test(s)
-    expect(branches(code('src/main/index.ts'))).toBe(branches(code('src/server/agent-status.ts')))
-  })
+  // Legacy transcript tailing still accepts unverified raw observations in both shells.
+  // Server's optional operator observer is a NEW, verified-only consumer, not a change to the
+  // shared legacy pipeline. Its positive/negative behavior is exercised in agent-status.test.ts;
+  // scanning an entire source file for any meta.verified branch no longer expresses parity.
 
   // Same one-shell-drift rule, next instance: the codex subagent branch (spawn_agent fan-out).
   // Both raw listeners must (a) tail the child rollout off SubagentStart via trackFile and

@@ -42,7 +42,8 @@ export interface DeliveryTraceEntry {
   actionId?: string
   traceId: string
   ts: number
-  sourceNodeId: string
+  sourceNodeId?: string
+  sourcePrincipal?: 'operator'
   targetNodeId: string
   /** The OUTCOME, not the attempt. */
   outcome: AgentMessageOutcomeKind
@@ -69,7 +70,8 @@ export interface TraceDeps {
 export interface DeliveryTraceInput {
   messageId?: string
   actionId?: string
-  sourceNodeId: string
+  sourceNodeId?: string
+  sourcePrincipal?: 'operator'
   sourceTitle: string
   targetNodeId: string
   outcome: AgentMessageOutcomeKind
@@ -106,7 +108,7 @@ export async function recordDelivery(
       kind: 'event',
       event: {
         type: 'agent-message',
-        from: input.sourceNodeId,
+        from: input.sourcePrincipal === 'operator' ? 'operator' : input.sourceNodeId ?? 'unknown',
         to: input.targetNodeId,
         title: input.messageId ? `${input.outcome} (${input.messageId})` : input.outcome
       }
@@ -120,7 +122,8 @@ export async function recordDelivery(
     ...(input.actionId ? { actionId: input.actionId } : {}),
     traceId,
     ts,
-    sourceNodeId: input.sourceNodeId,
+    ...(input.sourceNodeId ? { sourceNodeId: input.sourceNodeId } : {}),
+    ...(input.sourcePrincipal ? { sourcePrincipal: input.sourcePrincipal } : {}),
     targetNodeId: input.targetNodeId,
     outcome: input.outcome,
     ...(input.receipt ? { receipt: input.receipt } : {}),

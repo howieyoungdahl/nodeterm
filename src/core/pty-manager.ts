@@ -3895,7 +3895,7 @@ export class PtyManager {
    * Capture a session's output. `full` grabs the entire scrollback (`-S -`, for the
    * markdown view); otherwise the recent ~200 lines (AI naming, palette search).
    */
-  async captureSession(persistKey: string, full = false): Promise<string> {
+  async captureSession(persistKey: string, full = false, styled = false): Promise<string> {
     const live = this.liveSessionForPersistKey(persistKey)
     // Remote (ssh-project) node: there is no local tmux session — capture from the REMOTE tmux
     // over the project's ControlMaster (mirrors snapshotScrollback / destroySession).
@@ -3917,6 +3917,7 @@ export class PtyManager {
     // Backend choice belongs to the live generation, not to whichever binaries happen to be on
     // PATH. A native Windows profile remains session-host-backed beside an MSYS/Cygwin tmux.
     if (live?.sessionHost || !this.tmuxPath) {
+      if (styled) return '' // session-host capture has no styled, dim-preserving format
       return this.getSettings().tmuxEnabled && sessionHostSupported()
         ? sessionHostCapture(sessionName(persistKey), full)
         : ''
@@ -3924,7 +3925,7 @@ export class PtyManager {
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', sessionName(persistKey), '-S', full ? '-' : '-200'],
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', ...(styled ? ['-e'] : []), '-t', sessionName(persistKey), '-S', full ? '-' : '-200'],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return stdout

@@ -82,6 +82,18 @@ describe('recordDelivery — the durable leg', () => {
     expect(JSON.stringify(seen)).not.toMatch(/body/i)
     expect(recentDeliveries(1)[0].bodyChars).toBe(4096)
   })
+
+  it('records operator as a principal, never as a node identity', async () => {
+    let seen: BoardLogEntry | undefined
+    const result = await recordDelivery(input({ sourceNodeId: undefined, sourcePrincipal: 'operator' }), {
+      appendBoardLog: async (entry) => { seen = entry; return true },
+      now: () => 2
+    })
+    expect(seen?.event).toMatchObject({ from: 'operator', to: 'n-dst' })
+    expect(recentDeliveries(1)[0]).toMatchObject({ sourcePrincipal: 'operator', targetNodeId: 'n-dst' })
+    expect(recentDeliveries(1)[0]).not.toHaveProperty('sourceNodeId')
+    expect(result.traced).toBe('board-log')
+  })
 })
 
 describe('recordDelivery — the memory leg (Global Constraint 10)', () => {
