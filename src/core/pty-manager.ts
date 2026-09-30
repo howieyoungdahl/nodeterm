@@ -3925,7 +3925,9 @@ export class PtyManager {
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', ...(styled ? ['-e'] : []), '-t', sessionName(persistKey), '-S', full ? '-' : '-200'],
+        // Styled operator-composer inspection needs the current screen, not historical prompt
+        // frames in scrollback. Legacy plain context tails keep their existing 200-line window.
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', ...(styled ? ['-e'] : []), '-t', sessionName(persistKey), '-S', full ? '-' : styled ? '0' : '-200'],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return stdout

@@ -19,14 +19,18 @@ function config(exp = '2099-01-01T00:00:00Z') { return { version: 1, principals:
   read: [{ projectId: 'p1', nodeId: 'n1', sessionId: 's1' }], message: [] }] } }
 
 describe('operator conversation policy', () => {
-  it('requires exact, private, non-symlink policy and validates all fields', async () => {
+  it('requires an exact policy and validates its fields', async () => {
     const file = await policy(config())
     expect(loadOperatorPrincipals(file)).toHaveLength(1)
     await writeFile(file, JSON.stringify({ ...config(), permissive: true }))
     expect(loadOperatorPrincipals(file)).toEqual([])
-    await writeFile(file, JSON.stringify(config()))
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects permissive policy modes and symlinked policy paths', async () => {
+    const file = await policy(config())
     await chmod(file, 0o644)
     expect(loadOperatorPrincipals(file)).toEqual([])
+    await chmod(file, 0o600)
     const link = path.join(dir, 'link.json')
     await symlink(file, link)
     expect(loadOperatorPrincipals(link)).toEqual([])

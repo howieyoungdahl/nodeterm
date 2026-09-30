@@ -3,6 +3,8 @@ import type { AgentMessageOutcome } from './agent-message-decide'
 import { DeliveryQueue, type DeliveryQueueDeps } from './delivery-queue'
 import { sendOperatorMessage, type OperatorDeliveryInput } from './operator-messaging'
 import type { OperatorSessionTarget } from '../../shared/operator-conversations'
+import { normalizeFor } from '../../shared/agents/normalize'
+import { OperatorSessionBindings } from '../operator-session-bindings'
 
 const target: OperatorSessionTarget = { projectId: 'p1', nodeId: 'node-1', sessionId: 'session-a', generation: 'boot-a' }
 const delivered: AgentMessageOutcome = { kind: 'delivered', traceId: 'receipt-1', traced: 'memory', receipt: 'observed', signal: 'newTurn' }
@@ -49,6 +51,56 @@ function setup(over: Partial<DeliveryQueueDeps> = {}) {
 }
 
 describe('operator-principal delivery adapter', () => {
+  it('rotates a Codex session generation on same-id SessionStart and drops the old queued write', async () => {
+    const bindings = new OperatorSessionBindings()
+    const projects = [{ id: 'p1', nodes: [{ id: 'node-1', kind: 'terminal' }] }]
+    const codexStart = () => {
+      const normalized = normalizeFor('codex', {
+        nodeId: 'node-1', agentId: 'codex',
+        payload: { hook_event_name: 'SessionStart', session_id: 'session-a' }
+      })
+      expect(normalized).toMatchObject({ kind: 'state', state: 'working', sessionPhase: 'start' })
+      if (normalized) bindings.observe({ ...normalized, verified: true })
+    }
+    codexStart()
+    const original = bindings.targets(projects)[0]
+    const sent: string[] = []
+    let now = 1
+    const queue = new DeliveryQueue({
+      now: () => now,
+      deliver: async () => ({ kind: 'unknown', reason: 'unexpected-agent-path' }),
+      deliverOperator: async (req, beforeSend) => {
+        const refusal = await beforeSend()
+        if (refusal) return refusal
+        sent.push(req.body)
+        return delivered
+      },
+      trace: async () => ({ traceId: 'codex-restart', traced: 'memory' }),
+      onExpired: () => {}, onFlushed: () => {}, schedule: () => () => {}
+    })
+    const input: OperatorDeliveryInput = {
+      callerId: 'operator-7', target: original, text: 'queued private message', messageId: 'restart-test',
+      authorize: async () => true, onOutcome: () => {}
+    }
+    await expect(sendOperatorMessage(input, {
+      queue,
+      deliver: async () => ({ kind: 'targetBusy', state: 'working' }),
+      isCurrent: (candidate) => {
+        try { bindings.resolve(projects, candidate); return true } catch { return false }
+      }
+    })).resolves.toMatchObject({ kind: 'queued' })
+
+    // Codex SessionStart retains the same session_id when a process restarts.
+    codexStart()
+    const replacement = bindings.targets(projects)[0]
+    expect(replacement.generation).not.toBe(original.generation)
+    expect(() => bindings.resolve(projects, original)).toThrow()
+    now++
+    await queue.onTargetIdle(original.nodeId)
+    expect(sent).toEqual([])
+    expect(queue.depth(original.nodeId)).toBe(0)
+  })
+
   it('refuses an unauthorized operator before delivery or queue admission', async () => {
     const h = setup()
     h.setAllowed(false)

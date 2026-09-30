@@ -37,12 +37,18 @@ describe('OperatorReceiptStore', () => {
     expect(() => recovered.find('caller', 'request-001', target, 'changed')).toThrowError(expect.objectContaining({ code: 'idempotency_conflict' }))
   })
 
-  it('stores hashes rather than message text and fails closed on symlinked receipt files', async () => {
+  it('stores hashes rather than message text', async () => {
     const d = await fresh()
     const store = new OperatorReceiptStore(d)
     await store.admit('caller', 'request-001', target, 'private synthetic phrase')
     const raw = await readFile(path.join(d, 'operator-message-receipts.json'), 'utf8')
     expect(raw).not.toContain('private synthetic phrase')
+  })
+
+  it.skipIf(process.platform === 'win32')('fails closed on symlinked receipt files', async () => {
+    const d = await fresh()
+    const store = new OperatorReceiptStore(d)
+    await store.admit('caller', 'request-001', target, 'private synthetic phrase')
     const original = path.join(d, 'original.json')
     await readFile(path.join(d, 'operator-message-receipts.json')).then((x) => import('node:fs/promises').then((fs) => fs.writeFile(original, x)))
     await rm(path.join(d, 'operator-message-receipts.json'))
@@ -81,12 +87,24 @@ describe('OperatorReceiptStore', () => {
 })
 
 describe('operator audit', () => {
-  it('is content-free and refuses a permissive or symlinked audit file', async () => {
+  it('keeps audit records content-free', async () => {
     const d = await fresh()
     appendOperatorAudit(d, { caller: 'operator1', operation: 'message', target, outcome: 'accepted' })
     const audit = path.join(d, 'operator-conversation-audit.jsonl')
     expect(await readFile(audit, 'utf8')).not.toContain('secret')
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects permissive audit modes and symlinked audit paths', async () => {
+    const d = await fresh()
+    appendOperatorAudit(d, { caller: 'operator1', operation: 'message', target, outcome: 'accepted' })
+    const audit = path.join(d, 'operator-conversation-audit.jsonl')
     await chmod(audit, 0o644)
+    expect(() => appendOperatorAudit(d, { caller: 'operator1', operation: 'read', outcome: 'ok' })).toThrowError(expect.objectContaining({ code: 'audit_unavailable' }))
+    await chmod(audit, 0o600)
+    const original = path.join(d, 'original-audit.jsonl')
+    await writeFile(original, await readFile(audit))
+    await rm(audit)
+    await symlink(original, audit)
     expect(() => appendOperatorAudit(d, { caller: 'operator1', operation: 'read', outcome: 'ok' })).toThrowError(expect.objectContaining({ code: 'audit_unavailable' }))
   })
 })

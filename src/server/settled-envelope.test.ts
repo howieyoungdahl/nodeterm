@@ -55,18 +55,58 @@ const request = {
 afterEach(() => vi.useRealTimers())
 
 describe('sendSettledEnvelope', () => {
-  it('recognizes empty Claude/Codex composers and ignores only styled dim suggestions', () => {
-    expect(inspectOperatorComposer('\x1b[32m❯\x1b[0m \x1b[2mTry asking about your code\x1b[0m')).toBe('clear')
-    expect(inspectOperatorComposer('\x1b[32m›\x1b[0m ')).toBe('clear')
-    expect(inspectOperatorComposer('\x1b[32m❯\x1b[0m keep this draft')).toBe('draft')
+  const claudePane = (body: string) => [
+    '\x1b[38;5;239m❯\x1b[39m earlier submitted user message', '● READY_FIXTURE',
+    '\x1b[38;5;244m──────────────────────────────', `\x1b[39m❯ ${body}`,
+    '\x1b[38;5;244m──────────────────────────────',
+    '\x1b[39m  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m'
+  ].join('\n')
+  const codexPane = (body: string) => [
+    '\x1b[1;2m› \x1b[0mearlier submitted user message', '\x1b[2m• \x1b[0mREADY_FIXTURE', '',
+    `\x1b[1m›\x1b[0m ${body}`, '', '  GPT-6.1-Sol xhigh · /synthetic-project · Synthetic test'
+  ].join('\n')
+
+  it('bounds actual fullscreen Claude and Codex composers, excluding history and status chrome', () => {
+    for (const fixture of [claudePane, codexPane]) {
+      expect(inspectOperatorComposer(fixture(''))).toBe('clear')
+      expect(inspectOperatorComposer(fixture('unsent human draft'))).toBe('draft')
+      expect(inspectOperatorComposer(fixture('\nsecond-line human draft'))).toBe('draft')
+    }
+    expect(inspectOperatorComposer(claudePane('').replace('(shift+tab to cycle)', '(shift+tab to cycle) · ← 3 agents'))).toBe('clear')
+  })
+
+  it('refuses truncated, ambiguous, and unstyled native composer captures', () => {
+    expect(inspectOperatorComposer(claudePane('').replace(/\n[^\n]+$/, ''))).not.toBe('clear')
+    expect(inspectOperatorComposer(claudePane('\n\x1b[39m❯ ambiguous second prompt'))).not.toBe('clear')
+    expect(inspectOperatorComposer(codexPane('').replace(/\n[^\n]+$/, '\nunknown toolbar'))).not.toBe('clear')
+    expect(inspectOperatorComposer(claudePane('').replace(/\x1b\[[0-9;]*m/g, ''))).not.toBe('clear')
+    expect(inspectOperatorComposer(codexPane('human draft\n\n  GPT-6.1-Sol xhigh · /fake-footer'))).toBe('draft')
+  })
+
+  it('requires a known Claude/Codex layout and ignores only styled dim suggestions', () => {
+    expect(inspectOperatorComposer(claudePane('\x1b[2mTry asking about your code\x1b[0m'))).toBe('clear')
+    expect(inspectOperatorComposer(codexPane('\x1b[2mTry asking about your code\x1b[0m'))).toBe('clear')
+    expect(inspectOperatorComposer(claudePane('keep this draft'))).toBe('draft')
     expect(inspectOperatorComposer('plain unstyled terminal')).toBe('unknown')
+  })
+
+  it('fails closed on a dim unknown toolbar after a Codex-style active prompt', async () => {
+    const snapshot = '\x1b[1m›\x1b[0m \n\x1b[2mUnknown toolbar hint\x1b[0m'
+    const writes: string[] = []
+    expect(inspectOperatorComposer(snapshot)).toBe('unknown')
+    await expect(sendSettledEnvelope({
+      captureSession: async () => '', captureStyledSession: async () => snapshot,
+      sendText: async (_id, text) => { writes.push(text); return true }
+    }, 'target', 'envelope', { rejectPrefilledComposer: true }))
+      .rejects.toMatchObject({ reason: 'composer-unrecognized', pasted: false })
+    expect(writes).toEqual([])
   })
 
   it('refuses a prefilled human composer before paste and preserves the draft', async () => {
     const writes: string[] = []
     const pty: SettledEnvelopePty = {
       captureSession: async () => '',
-      captureStyledSession: async () => '\x1b[32m❯\x1b[0m human draft',
+      captureStyledSession: async () => claudePane('human draft'),
       sendText: async (_id, text) => { writes.push(text); return true }
     }
     await expect(sendSettledEnvelope(pty, 'target', 'envelope', { rejectPrefilledComposer: true }))
@@ -75,7 +115,7 @@ describe('sendSettledEnvelope', () => {
   })
 
   it.each(['2;22', '2;0', '38;2;111;222;123', '48;5;2'])('preserves a human draft under normal-intensity SGR %s', async (codes) => {
-    const snapshot = `\x1b[32m❯\x1b[0m \x1b[${codes}mhuman draft`
+    const snapshot = claudePane(`\x1b[${codes}mhuman draft`)
     const writes: string[] = []
     expect(inspectOperatorComposer(snapshot)).toBe('draft')
     await expect(sendSettledEnvelope({
@@ -93,7 +133,7 @@ describe('sendSettledEnvelope', () => {
     let allowed = true
     const pty: SettledEnvelopePty = {
       captureSession: async () => '',
-      captureStyledSession: async () => { await pendingCapture; return '\x1b[32m❯\x1b[0m ' },
+      captureStyledSession: async () => { await pendingCapture; return claudePane('') },
       sendText: async (_id, text) => { writes.push(text); return true }
     }
     const sent = sendSettledEnvelope(pty, 'target', 'envelope', {
@@ -111,9 +151,7 @@ describe('sendSettledEnvelope', () => {
     let pasted = false
     const pty: SettledEnvelopePty = {
       captureSession: async () => '',
-      captureStyledSession: async () => pasted
-        ? '\x1b[32m❯\x1b[0m envelope footer'
-        : '\x1b[32m❯\x1b[0m ',
+      captureStyledSession: async () => claudePane(pasted ? 'envelope footer' : ''),
       sendText: async (_id, text, opts) => {
         writes.push({ text, enter: opts?.enter })
         if (text) { pasted = true; allowed = false }

@@ -85,6 +85,26 @@ describe('hook server: the verified label on /hook/*', () => {
     expect(raws).toEqual([{ agentId: 'claude', nodeId: NODE, meta: { verified: true } }])
   })
 
+  it('hashes the exact body of Claude native multiline paste wrappers for verified new turns', async () => {
+    const envelope = '--- NODETERM MESSAGE abc123 ---\r\nreply-to: node-target\r\n\r\nhello operator'
+    const wrapped = `\n\n<pasted_content id="bc79">\n${envelope}\n</pasted_content id="bc79">\n`
+    const res = await post(NODE, nodeAuthToken(SECRET, NODE), wrapped)
+    expect(res.status).toBe(204)
+    expect(events).toHaveLength(1)
+    expect(events[0].submittedPromptSha256).toBe(createHash('sha256').update(envelope.replace(/\r\n/g, '\n')).digest('hex'))
+    expect(JSON.stringify(events[0])).not.toContain(envelope)
+    expect(JSON.stringify(events[0])).not.toContain(wrapped)
+  })
+
+  it('does not strip a Claude wrapper with mismatched ids', async () => {
+    const envelope = 'synthetic operator envelope'
+    const malformed = `\n\n<pasted_content id="bc79">\n${envelope}\n</pasted_content id="other">\n`
+    const res = await post(NODE, nodeAuthToken(SECRET, NODE), malformed)
+    expect(res.status).toBe(204)
+    expect(events[0].submittedPromptSha256).toBe(createHash('sha256').update(malformed).digest('hex'))
+    expect(events[0].submittedPromptSha256).not.toBe(createHash('sha256').update(envelope).digest('hex'))
+  })
+
   it('remembers a node that has proven itself', async () => {
     await post(NODE, nodeAuthToken(SECRET, NODE))
     expect(hookServer.isNodeProven(NODE)).toBe(true)

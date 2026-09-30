@@ -103,10 +103,14 @@ describe('external operator CLI', () => {
     }
   })
 
-  it('fails closed on loose credential permissions and protocol mismatch', async () => {
+  it.skipIf(process.platform === 'win32')('fails closed on loose credential permissions', async () => {
     const f = fixture(); fs.chmodSync(f.credential, 0o644)
     const local = await run([...baseArgs('http://127.0.0.1:1', f), 'capabilities'])
     expect(JSON.parse(local.stderr).error).toBe('credential_file_not_private')
+  })
+
+  it('rejects protocol mismatch', async () => {
+    const f = fixture()
     fs.chmodSync(f.credential, 0o600)
     const url = await server((_req, res) => { res.setHeader('content-type', 'application/json'); res.end('{"version":2}') })
     const mismatch = await run([...baseArgs(url, f), 'capabilities'])

@@ -28,6 +28,7 @@ import {
   type IdentityDecision
 } from './node-identity-policy'
 import { posixQuote } from '../../shared/ssh'
+import { submittedPromptForHash } from './submitted-prompt'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -767,7 +768,7 @@ class HookServer {
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
           const submittedPromptSha256 = verified && normalized?.newTurn === true &&
               typeof payload.prompt === 'string'
-            ? createHash('sha256').update(payload.prompt.replace(/\r\n/g, '\n')).digest('hex')
+            ? createHash('sha256').update(submittedPromptForHash(agentId, payload.prompt).replace(/\r\n/g, '\n')).digest('hex')
             : undefined
           if (normalized && this.listener)
             this.listener({ ...normalized, verified, clientRevision,

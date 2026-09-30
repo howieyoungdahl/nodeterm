@@ -104,18 +104,41 @@ export function inspectOperatorComposer(captureText: string): ComposerInspection
     for (const ch of raw.slice(cursor)) { text += ch; for (let i = 0; i < ch.length; i++) styles.push(dim) }
     rows.push({ text, dim: styles, sgr })
   }
-  const candidates: Array<{ start: number; row: typeof rows[number]; offset: number }> = []
+  const candidates: Array<{ start: number; row: typeof rows[number]; offset: number; glyph: string; glyphOffset: number }> = []
   rows.forEach((row, start) => {
     const match = /^\s*(?:│\s*)?([❯›])\s*/.exec(row.text)
-    if (match) candidates.push({ start, row, offset: match[0].length })
+    if (match) candidates.push({ start, row, offset: match[0].length, glyph: match[1], glyphOffset: match[0].indexOf(match[1]) })
   })
-  if (candidates.length !== 1) return 'unknown'
-  const { start, row, offset } = candidates[0]
+  let end = rows.length
+  let eligible = candidates
+  let recognizedLayout = false
+  let lastVisible = rows.length - 1
+  while (lastVisible >= 0 && !rows[lastVisible].text.trim()) lastVisible--
+  const footer = rows[lastVisible]?.text ?? ''
+  if (/^\s+⏵⏵ (?:auto|accept edits|bypass permissions) mode on\s+\(shift\+tab to cycle\)(?: · ← \d+ agents)?\s*$/.test(footer)) {
+    // Claude fullscreen has a styled, bounded composer between two horizontal rules.
+    // Earlier submitted prompts also start with ❯ but are outside this frame. More rules
+    // or prompt rows are ambiguous (including a draft trying to mimic the frame).
+    const rails = rows.flatMap((row, i) => /^─{20,}\s*$/.test(row.text) && row.sgr ? [i] : [])
+    if (rails.length !== 2 || rails[1] !== lastVisible - 1 || rows[rails[0]].text.trim() !== rows[rails[1]].text.trim()) return 'unknown'
+    eligible = candidates.filter((candidate) => candidate.glyph === '❯' && candidate.start > rails[0] && candidate.start < rails[1])
+    end = rails[1]
+    recognizedLayout = true
+  } else if (/^\s{2,}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · .+/.test(footer)) {
+    // Codex renders historical user prompt glyphs dim and the active glyph at normal intensity.
+    // Its model/effort footer bounds the multi-line composer; unknown footer variants refuse.
+    eligible = candidates.filter((candidate) => candidate.glyph === '›' && !candidate.row.dim[candidate.glyphOffset])
+    end = lastVisible
+    recognizedLayout = true
+  }
+  if (!recognizedLayout) return 'unknown'
+  if (eligible.length !== 1) return 'unknown'
+  const { start, row, offset } = eligible[0]
   if (!row.sgr || !captureText.includes('\x1b[')) return 'unknown'
   // Treat any visible non-dim material at or below the recognized prompt as occupied.
   // Multi-line composer drafts are common; checking only the prompt row would risk
   // appending after a draft whose first line happens to be empty.
-  for (let line = start; line < rows.length; line++) {
+  for (let line = start; line < end; line++) {
     const current = rows[line]
     const first = line === start ? offset : 0
     for (let i = first; i < current.text.length; i++) {
