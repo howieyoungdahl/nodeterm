@@ -33,7 +33,7 @@ The server endpoint remains loopback-only. Do not change its bind address or exp
 
 ## Operator principal policy (proposed provisioning, not activated)
 
-The server reads `operator-conversations.json` from its data directory on each request. When the file is absent, unreadable, non-private, malformed, or invalid, access is denied. Provisioning is a manual operation only after the operator approves the specific principal and exact scope. This draft and the CLI do not create credentials, write policy, change server settings, or activate the feature.
+The server reads `operator-conversations.json` from its data directory on each request and again across asynchronous read, receipt, admission and submission boundaries. When the file is absent, unreadable, non-private, malformed, or invalid, access is denied. Provisioning is a manual operation only after the operator approves the specific principal and the read and message scopes independently. This draft and the CLI do not create credentials, write policy, change server settings, or activate the feature.
 
 The policy shape is:
 
@@ -52,15 +52,23 @@ The policy shape is:
 }
 ```
 
-`read` and `message` are independent exact target allowlists. Keep grants minimal and time-bounded. The on-disk policy stores only the token hash, never the token. The separate raw bearer belongs only in a locally protected credential file (mode `0600` on Linux/WSL); never put it in source control, a prompt, shell history, argv, or logs. The existing management `ops-token` cannot authenticate to this API and must not be reused. Do not include a real hash or credential in a reviewed draft.
+Version 1 retains independent exact target allowlists. Version 2 additionally accepts this exact tagged entry in either array:
+
+```json
+{"kind":"all-current-and-future-verified-sessions"}
+```
+
+For example, an approved standing read grant with no message authority is `"read": [{"kind":"all-current-and-future-verified-sessions"}], "message": []` under `"version": 2`. To grant standing message authority independently, put the same entry in `message`. Exact entries may remain alongside it, and exact-only v2 policies keep their previous meaning. Wildcards, other tags, extra fields on the tagged entry, and standing entries under v1 reject the entire policy.
+
+A standing grant applies across projects to every current and future session verified by this Server's authenticated hooks. Persisted cards, status files and unverified hook reports do not establish session identity. Every read and new message still requires the exact target and current generation returned by `sessions`; stale or ambiguous bindings refuse. Unsupported transcript providers and message transports retain their existing refusals. A standing grant creates no canvas-control ownership, management or lifecycle permission. Keep grants time-bounded. The on-disk policy stores only the token hash, never the token. The separate raw bearer belongs only in a locally protected credential file (mode `0600` on Linux/WSL); never put it in source control, a prompt, shell history, argv, or logs. The existing management `ops-token` cannot authenticate to this API and must not be reused. Do not include a real hash or credential in a reviewed draft.
 
 ## Lifecycle, receipts, and rollback
 
-Policy edits take effect on the next request. Removing a principal or target grant revokes later reads and deliveries, but cannot unsend an already admitted message. Restarting the server changes session generations; operators must call `sessions` again, obtain the fresh exact target, and submit a new idempotency key only for a genuinely new message. There is no queued-message replay after restart.
+Policy edits take effect without a restart. Removing the last applicable read grant denies later reads. Removing the last applicable message grant denies receipt retrieval and unsent deliveries, including queued messages. Removing the principal revokes both operations. Remaining exact grants continue to apply after a standing tag is removed. An async operation retains the original principal id as well as the bearer and target. Revocation during durable admission records a failed receipt while preserving deduplication; it never dispatches that message. Revocation cannot retract bytes already submitted to a provider. An acknowledgement arriving later may still update the durable receipt as historical evidence, but callers lacking current message authority cannot retrieve it. Restarting the server changes session generations; operators must call `sessions` again, obtain the fresh exact target, and submit a new idempotency key only for a genuinely new message. There is no queued-message replay after restart.
 
 An `accepted` receipt means the request was admitted and durably recorded. It does not prove that the target received or understood the text. `queued` means it is awaiting delivery. `acknowledged` requires an authenticated submission event matching both the pinned session and the SHA-256 of the exact operator envelope, not an unrelated working/next-turn event. Claude's exact full native `<pasted_content>` scaffold is unwrapped before hashing; extra text, mismatched IDs and ambiguous/nested wrappers do not match. Even an acknowledgement proves submission, not comprehension or completion. Providers without the full authenticated submitted prompt cannot produce this acknowledgement. Poll `receipt` when necessary. A missing terminal suggestion is never evidence that text was submitted; the transcript endpoint exposes submitted conversation records, while capability output reports that terminal suggestions are disabled.
 
-For rollback, revoke/remove the principal policy entry first. Preserve `operator-message-receipts.json` and `operator-conversation-audit.jsonl` during rollback and migration. Do not delete or reset idempotency records: doing so can make a retry submit the same message again. Restore the previous compatible server build, leaving the policy revoked until reapproved; then re-query `sessions` because generations may have changed. No server activation, credential provisioning, live request, transcript read, or message send is part of preparing this documentation/CLI draft.
+For rollback, revoke/remove the affected principal's policy entry first. Preserve `operator-message-receipts.json` and `operator-conversation-audit.jsonl` during rollback and migration. Do not delete or reset idempotency records: doing so can make a retry submit the same message again. Old exact-only servers reject a v2 policy in full, denying all principals rather than interpreting standing authority. Before a downgrade, remove every standing entry and validate an exact-only v1 policy, preserving the other principals and their approved exact grants. Keep the affected principal revoked until reapproved. Use the host's approved activation procedure to restore the previous build, then re-query `sessions` because generations may have changed. No server activation, credential provisioning, live request, transcript read, or message send is part of preparing this documentation/CLI draft.
 
 ## API and fern integration
 
@@ -84,9 +92,113 @@ Errors are sanitized codes: `unauthorized` (401), `scope_denied` (403), `stale_t
 
 ## Migration and approval checklist
 
-There is no database migration or automatic credential provisioning. On an approved compatible Server build, the absent policy keeps this API unavailable. Before activation the operator must approve the principal, expiry and exact read/message scopes separately; a local administrator then provisions a fresh random token and its hash in private files. Never reuse the existing management credential. No wildcard or whole-canvas grant exists.
+There is no database migration or automatic credential provisioning. On an approved compatible Server build, the absent policy keeps this API unavailable. Before activation the operator must approve the principal, expiry and read/message scopes separately, including whether each is exact or standing. Standing grants require policy version 2. Existing v1 policies work unchanged on this build. Never reuse the existing management credential.
 
-Version 1 requires both a Server build containing these routes and a matching CLI. Older servers return an unavailable route; unknown response versions fail closed. Receipt schema mismatches or corrupt/non-private files deny sends, not reset history. At 2,000 retained receipts admission stops; archival/retention changes need a reviewed design preserving deduplication. A restart fails pending receipts as `server_restarted` with `delivery_unknown_no_replay`; it does not automatically send them again. The audit file contains IDs, operation, time and outcome only, never message bodies or credentials.
+The HTTP API, CLI response protocol and receipt format remain version 1, independently of the policy file's version 2. No CLI change is needed for standing grants: it still enumerates verified targets and uses their exact generations. Older servers without the routes return unavailable; unknown response versions fail closed. Receipt schema mismatches or corrupt/non-private files deny sends, not reset history. At 2,000 retained receipts admission stops; archival/retention changes need a reviewed design preserving deduplication. A restart fails pending receipts as `server_restarted` with `delivery_unknown_no_replay`; it does not automatically send them again. The audit file contains IDs, operation, time and outcome only, never message bodies or credentials.
+
+## Administrator activation and revocation (documentation only)
+
+This procedure is for the administrator to run after an approved build is active. It changes a principal's standing scopes once, without session-by-session grants, a restart or changes to other principals. Obtain separate approval for standing read and standing message, the principal id and its expiry. With `bootstrap = false`, the existing credential is preserved. With `bootstrap = true`, it can start from an absent policy or add a new principal: it generates a fresh separate bearer in a new private file and refuses to overwrite an existing credential or principal. Preparing this documentation executes neither path. Never paste bearer bytes into a command, a prompt or a log.
+
+Use the source and dependencies from the approved build. Ensure the Server data directory and this shell are owned by the Server account and private (`0700` on Linux/WSL). Only one administrator edits policy at a time; the comparison before publication detects changes but is not a concurrency lock. Replace the paths below locally; none is a credential. The compiled helpers use the production parser and atomic publication implementation.
+
+```sh
+umask 077
+export OPERATOR_ADMIN_DATA_DIR=/protected/path/to/nodeterm-server
+export OPERATOR_ADMIN_HELPERS=$(mktemp -d)
+./node_modules/.bin/esbuild src/server/operator-conversation-policy.ts src/core/fs-atomic.ts \
+  --bundle --platform=node --format=cjs --outbase=src --outdir="$OPERATOR_ADMIN_HELPERS"
+node --input-type=module <<'NODE'
+import fs from 'node:fs'
+import path from 'node:path'
+import { createRequire } from 'node:module'
+import { randomUUID, randomBytes } from 'node:crypto'
+const require = createRequire(import.meta.url)
+const { loadOperatorPrincipals, tokenDigest, OPERATOR_POLICY_FILE, OPERATOR_STANDING_SCOPE_KIND } =
+  require(path.join(process.env.OPERATOR_ADMIN_HELPERS, 'server/operator-conversation-policy.js'))
+const { writeFileAtomic } = require(path.join(process.env.OPERATOR_ADMIN_HELPERS, 'core/fs-atomic.js'))
+
+// Edit only these non-secret choices. Approval must cover each selected operation.
+const principalId = 'fern-external-task'
+const bootstrap = false // true only for an explicitly approved new principal and new private credential
+const action = 'activate' // 'revoke-standing' removes selected tags; 'revoke-principal' removes all its authority
+const operations = ['read', 'message'] // use ['read'] or ['message'] for independent selection
+const approvedExpiry = '2026-12-31T00:00:00Z' // activation only, use the actually approved date
+if (!['activate', 'revoke-standing', 'revoke-principal'].includes(action) ||
+    !operations.length || operations.some((op) => !['read', 'message'].includes(op))) throw Error('invalid_choices')
+const dataDir = process.env.OPERATOR_ADMIN_DATA_DIR
+const credentialFile = path.join(dataDir, 'fern-operator.token') // bootstrap only; never overwrite
+const dir = fs.lstatSync(dataDir)
+if (!dir.isDirectory() || dir.isSymbolicLink() || (process.platform !== 'win32' &&
+    ((dir.mode & 0o077) !== 0 || dir.uid !== process.getuid()))) throw Error('private_directory_required')
+const file = path.join(dataDir, OPERATOR_POLICY_FILE)
+let original
+try {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+  try {
+  const stat = fs.fstatSync(fd)
+  if (!stat.isFile() || stat.size > 65536 || (process.platform !== 'win32' &&
+      ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid()))) throw Error('private_policy_required')
+  original = fs.readFileSync(fd, 'utf8')
+  } finally { fs.closeSync(fd) }
+} catch (error) {
+  if (error.code !== 'ENOENT' || !bootstrap || action !== 'activate') throw error
+}
+const policy = original === undefined ? { version: 1, principals: [] } : JSON.parse(original)
+if (Object.keys(policy).length !== 2 || ![1, 2].includes(policy.version) || !Array.isArray(policy.principals) || (original !== undefined &&
+    loadOperatorPrincipals(file).length !== policy.principals.length)) throw Error('invalid_existing_policy')
+let principal = policy.principals.find((p) => p.id === principalId)
+let freshToken
+if (bootstrap) {
+  if (principal || action !== 'activate') throw Error('bootstrap_requires_new_principal')
+  freshToken = randomBytes(32).toString('base64url')
+  principal = { id: principalId, tokenSha256: tokenDigest(freshToken), expiresAt: approvedExpiry, read: [], message: [] }
+  policy.principals.push(principal)
+} else if (!principal) throw Error('existing_principal_required')
+if (action === 'revoke-principal') policy.principals = policy.principals.filter((p) => p.id !== principalId)
+else {
+  if (action === 'activate') {
+    if (!Number.isFinite(Date.parse(approvedExpiry)) || Date.parse(approvedExpiry) <= Date.now()) throw Error('future_expiry_required')
+    principal.expiresAt = approvedExpiry
+    policy.version = 2
+  }
+  for (const op of operations) {
+    principal[op] = principal[op].filter((scope) => scope.kind !== OPERATOR_STANDING_SCOPE_KIND)
+    if (action === 'activate') principal[op].push({ kind: OPERATOR_STANDING_SCOPE_KIND })
+  }
+}
+const candidate = path.join(dataDir, `.operator-policy-candidate-${randomUUID()}`)
+const backup = path.join(dataDir, `.operator-policy-backup-${randomUUID()}`)
+const credentialStaging = path.join(dataDir, `.operator-credential-${randomUUID()}`)
+let credentialCreated = false
+let published = false
+try {
+  await writeFileAtomic(candidate, JSON.stringify(policy, null, 2) + '\n', { mode: 0o600 })
+  if (loadOperatorPrincipals(candidate).length !== policy.principals.length) throw Error('invalid_candidate')
+  if (original === undefined ? fs.existsSync(file) : fs.readFileSync(file, 'utf8') !== original) throw Error('policy_changed_retry_review')
+  if (original !== undefined) fs.writeFileSync(backup, original, { flag: 'wx', mode: 0o600 })
+  if (freshToken) {
+    await writeFileAtomic(credentialStaging, freshToken + '\n', { mode: 0o600 })
+    // Atomic, exclusive publication: a pre-existing credential causes EEXIST, never replacement.
+    fs.linkSync(credentialStaging, credentialFile)
+    credentialCreated = true
+  }
+  await writeFileAtomic(file, fs.readFileSync(candidate), { mode: 0o600 })
+  published = true
+  console.log('Policy published; private backup:', original === undefined ? 'none (new policy)' : backup)
+} finally {
+  fs.rmSync(candidate, { force: true })
+  fs.rmSync(credentialStaging, { force: true })
+  if (credentialCreated && !published) fs.rmSync(credentialFile, { force: true })
+}
+NODE
+rm -rf -- "$OPERATOR_ADMIN_HELPERS"
+unset OPERATOR_ADMIN_HELPERS OPERATOR_ADMIN_DATA_DIR
+```
+
+The existing principal's token hash stays unchanged. Exact grants and all other principals are preserved. Receipt and audit files are never touched. `revoke-standing` removes only the selected standing tags, leaving any old exact grants active; use `revoke-principal` for full revocation of that principal. Unsent queued messages and subsequent receipt reads are denied only when the caller loses all applicable message authority. Read revocation independently denies transcript reads. No receipt history is replayed or deleted. Read-only `capabilities` and `sessions` with the private credential can confirm the selected authority after publication; they never send a test message. Do not add a send as an activation probe. Bootstrap publishes the raw bearer in `fern-operator.token`, with `0600` mode and an atomic exclusive hard link from private staging. A filesystem without hard-link support refuses before policy publication; use a private local filesystem supporting this primitive. Configure fern with that file path, never copy its contents into argv or logs.
+
+On Windows, the administrator must enforce equivalent private ACLs on the directory, policy, backup and helper directory. The parser does not attest Windows ACLs. For downgrade, while the affected principal remains revoked, remove standing tags from every remaining principal, set `version` to `1`, validate with the old build's parser and atomically publish before downgrading. Do not restore a backup containing the standing principal automatically: doing so reactivates authority and requires approval. Keep backups private and out of source control.
 
 Use the standalone CLI from the approved build's commit, not an unrelated source checkout; test with `capabilities` before integration. Disposable Linux/WSL sessions have exercised Claude Code 2.1.286 (Opus 5.5 xhigh) and Codex CLI 0.159.2 (GPT-6.1 Sol xhigh), with human-draft preservation and authenticated correlated receipts. A real Codex same-ID resume rotated generation and refused stale reads/sends without pane writes. The Windows CI selection includes the operator API/CLI, reader, policy, receipts, queue, authenticated generation and composer tests; a green job from an older selection is not evidence for these suites.
 

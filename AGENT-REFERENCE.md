@@ -129,6 +129,14 @@ The codebase is split by Electron process boundary — keep code on the correct 
   inventory, the single-delete force gate, and the one conservative dead-card sweep engine that
   the periodic reaper also calls. Operator and agent read/modify/save transactions share one
   `WorkspaceMutationQueue`, so neither can publish a stale snapshot over the other.
+  The separate operator conversation policy accepts exact grants in v1 and an explicit
+  `all-current-and-future-verified-sessions` tag in v2, independently for read and message.
+  This selects authority only: current-run verified hooks and exact session generations remain
+  mandatory. Recheck the policy and original principal id after async reads, receipt recovery and
+  admission waits, and before queued submission. Preserve drafts, correlated transport receipts,
+  audit and durable idempotency. API/receipt versions stay v1; older servers reject v2 policies
+  in full. See `docs/operator-conversations.md` for private atomic administrator activation,
+  revocation, bootstrap and downgrade. Shipping this capability never activates a live grant.
   `SpawnHandlerState` synchronously observes both serialized preparation and parallel external
   launches, so health remains readable while its oldest operation is wedged. No operator verb
   creates, sends, or renames, and the surface is Server-only (Desktop/Mobile N/A).

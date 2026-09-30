@@ -322,10 +322,13 @@ The v1 contract is deliberately narrow:
 
 Existing management also supports operator node creation (`POST /opsapi/nodes`) and rename/resize
 (`PATCH /opsapi/nodes/<id>`); these do not grant conversation reads or messaging. A separate,
-exact-scope operator conversation principal has its own `/opsapi/v1/*` routes for capabilities,
+operator conversation principal has its own `/opsapi/v1/*` routes for capabilities,
 session targets, transcript reads, message admission, and receipts. It is not the management bearer
 and does not weaken agent ownership. See [External operator conversation CLI](operator-conversations.md)
-for its client contract, manual provisioning proposal, and lifecycle limits. **Surfaces:** Server
+for its client contract, manual provisioning procedure, and lifecycle limits. Policy v1 keeps exact
+grants; v2 adds an explicit standing scope for current and future verified sessions, independently
+for read and message. Authenticated session generations and live revocation still apply. The HTTP
+API and receipts stay v1; old servers deny the whole v2 policy. **Surfaces:** Server
 Edition: conversation API and CLI; Desktop: N/A; Mobile companion: N/A. Shipping code does not
 activate a live service or provision credentials.
 
