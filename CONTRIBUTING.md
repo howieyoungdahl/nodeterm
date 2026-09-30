@@ -185,7 +185,9 @@ and revocation are administrator operations, not implicit credential provisionin
 
 Operator hook consumers must establish the session generation and attach its jailed path in one
 operation before UI normalization. Raw hooks arrive first; attaching to an old or absent binding
-then rotating on `SessionStart` loses the first/resume path. Recognized authenticated parent hooks
+then rotating on `SessionStart` loses the first/resume path. Keep the first accepted path fixed for
+that generation; changing it requires a fresh lifecycle/identity boundary, so delayed same-ID
+hooks cannot replace a resumed rollout. Recognized authenticated parent hooks
 can establish identity without a UI state transition. Saved mirrors confer no authority after boot.
 Large operator records have independent byte, nesting and structure budgets before JSON parsing;
 filter private channels and redact public text before splitting pages. Keep the file, output, cache

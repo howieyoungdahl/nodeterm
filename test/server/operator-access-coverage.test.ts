@@ -129,6 +129,19 @@ describe('operator authenticated hook coverage', () => {
     expect(await read(resumed)).toMatchObject({ status: 200 })
   })
 
+  it('cannot replace a resumed generation path with a delayed same-ID hook', async () => {
+    await hook('SessionStart')
+    const original = (await targets())[0]
+    const replacement = path.join(path.dirname(transcript), 'resumed.jsonl')
+    writeTranscript(replacement, 'resumed public message')
+    await hook('SessionStart', { transcript_path: replacement })
+    const resumed = (await targets())[0]
+    await hook('PostToolUse', { transcript_path: transcript })
+    expect(await targets()).toEqual([resumed])
+    expect(await read(original)).toMatchObject({ status: 409, body: { error: 'stale_target' } })
+    expect(await read(resumed)).toMatchObject({ status: 200, body: { items: [{ text: 'resumed public message' }] } })
+  })
+
   it('denies unverified, child and malformed discovery and keeps the path jail', async () => {
     await hook('Stop', {}, false)
     await hook('PostToolUse', { agent_id: 'synthetic-child' })

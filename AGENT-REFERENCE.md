@@ -139,7 +139,9 @@ The codebase is split by Electron process boundary — keep code on the correct 
   revocation, bootstrap and downgrade. Shipping this capability never activates a live grant.
   Operator session discovery consumes native hooks and their jailed paths together before UI
   normalization. Raw-before-normalized ordering otherwise attaches the first/resume path to an
-  absent or old generation that `SessionStart` replaces. Recognized authenticated parent hooks can
+absent or old generation that `SessionStart` replaces. The first accepted path stays fixed for its
+generation; a path change needs a fresh lifecycle/identity boundary, preventing delayed same-ID
+hooks from replacing a resumed rollout. Recognized authenticated parent hooks can
   establish identity even without a normalized UI event. Child rollouts never bind the parent.
   Missing paths remain unreadable and saved mirrors establish no authority after a Server restart;
   recovery waits for fresh authenticated hook evidence, with a new boot generation. Operator JSONL

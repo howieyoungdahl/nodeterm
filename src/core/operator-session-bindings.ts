@@ -88,10 +88,12 @@ export class OperatorSessionBindings {
     }
   }
 
-  /** Called only with a jailed path from a verified raw hook, never from API input. */
+  /** Called only with a jailed path from a verified raw hook, never from API input.
+   * A generation's first path is immutable: a delayed same-ID hook cannot switch it back
+   * to an earlier rollout. Legitimate path replacement needs a new lifecycle/identity boundary. */
   transcript(nodeId: string, sessionId: string, agentId: string, transcriptPath: string): void {
     const session = this.sessions.get(nodeId)
-    if (session?.sessionId === sessionId && session.agentId === agentId)
+    if (session?.sessionId === sessionId && session.agentId === agentId && session.transcriptPath === undefined)
       session.transcriptPath = transcriptPath
   }
 
