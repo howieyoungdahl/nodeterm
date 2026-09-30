@@ -113,9 +113,101 @@ describe('readOperatorConversation', () => {
     await expect(readOperatorConversation(f.target, f.agent, f.file, firstPage.nextCursor!, 1)).rejects.toMatchObject({ code: 'transcript_changed' })
   })
 
-  it('rejects oversized raw records explicitly', async () => {
-    const f = await fixture('claude', [claude('user', [{ type: 'text', text: 'x'.repeat(1024 * 1024 + 1) }])])
+  it('paginates a public record over 1 MiB without losing text', async () => {
+    const text = 'public phrase with unicode 🦉 '.repeat(45_000)
+    const f = await fixture('claude', [claude('user', [{ type: 'text', text }])])
+    const parts: string[] = []
+    let cursor: string | undefined
+    do {
+      const page = await readOperatorConversation(f.target, f.agent, f.file, cursor, 200)
+      parts.push(...page.items.map((item) => item.text))
+      cursor = page.nextCursor ?? undefined
+    } while (cursor)
+    expect(parts.join('')).toBe(text)
+    expect(parts.length).toBeGreaterThan(100)
+  })
+
+  it('rejects records beyond the bounded large-record budget explicitly', async () => {
+    const f = await fixture('claude', [claude('user', [{ type: 'text', text: 'x'.repeat(16 * 1024 * 1024 + 1) }])])
     await expect(readOperatorConversation(f.target, f.agent, f.file, undefined, 10)).rejects.toMatchObject({ code: 'transcript_record_too_large', status: 413 })
+  })
+
+  it('bounds nesting and structure before parsing both public and private records', async () => {
+    const f = await fixture('claude', [claude('user', 'public')])
+    const nested = '['.repeat(65) + '0' + ']'.repeat(65)
+    for (const raw of [
+      `{"type":"system","sessionId":"session-123","metadata":${nested}}`,
+      JSON.stringify(claude('user', Array.from({ length: 26_000 }, () => ({ type: 'text', text: 'public' }))))
+    ]) {
+      await writeFile(f.file, raw + '\n')
+      await expect(readOperatorConversation(f.target, f.agent, f.file, undefined, 10))
+        .rejects.toMatchObject({ code: 'transcript_record_too_complex', status: 413 })
+    }
+  })
+
+  it('validates malformed large records instead of treating them as empty content', async () => {
+    const f = await fixture('claude', [claude('user', 'public')])
+    for (const raw of [
+      JSON.stringify(claude('user', 'ordinary phrase '.repeat(80_000))).slice(0, -1),
+      '{"sessionId":"session-123","metadata":"escaped \\" text","oops":}',
+      '{"type":"system","sessionId":"session-123","metadata":[' + '1,'.repeat(100) + ']}'
+    ]) {
+      await writeFile(f.file, raw + '\n')
+      await expect(readOperatorConversation(f.target, f.agent, f.file, undefined, 10))
+        .rejects.toMatchObject({ code: 'invalid_transcript', status: 409 })
+    }
+  })
+
+  it('filters large private records and nested private channels before emitting public pages', async () => {
+    const privateText = 'private reasoning marker '.repeat(50_000)
+    const f = await fixture('claude', [
+      claude('assistant', [{ type: 'thinking', thinking: privateText }, { type: 'text', text: 'public final' }]),
+      claude('assistant', [{ type: 'text', text: privateText }], { channel: 'analysis' }),
+      claude('assistant', [{ type: 'text', channel: 'summary', text: privateText }]),
+      claude('user', [{ type: 'tool_result', content: [{ type: 'text', channel: 'analysis', text: privateText }, { type: 'text', text: 'public result' }] }])
+    ])
+    const page = await readOperatorConversation(f.target, f.agent, f.file, undefined, 20)
+    expect(page.items.map((item) => item.text)).toEqual(['public final', 'public result'])
+    await writeFile(f.file, [
+      codex('session_meta', { id: 'session-123', base_instructions: privateText }),
+      codex('response_item', { type: 'message', role: 'assistant', channel: 'analysis', content: [{ type: 'output_text', text: privateText }] }),
+      codex('response_item', { type: 'message', role: 'assistant', channel: 'final', content: [
+        { type: 'output_text', channel: 'analysis', text: privateText }, { type: 'output_text', text: 'codex public final' }
+      ] })
+    ].map((row) => JSON.stringify(row)).join('\n'))
+    const codexPage = await readOperatorConversation(f.target, 'codex', f.file, undefined, 20)
+    expect(codexPage.items.map((item) => item.text)).toEqual(['codex public final'])
+  })
+
+  it('redacts a large tool result across input read, item and page boundaries', async () => {
+    const secret = 'synthetic-current-credential-'.repeat(3)
+    const meta = codex('session_meta', { id: 'session-123' })
+    const empty = JSON.stringify(meta) + '\n' + JSON.stringify(codex('response_item', { type: 'function_call_output', output: '' }))
+    const contentStart = empty.indexOf('"output":"') + '"output":"'.length
+    const prefix = 'public tool output '.repeat(4000).slice(0, 64 * 1024 - contentStart - 12)
+    const text = prefix + secret + ' public suffix '.repeat(80_000) +
+      ' API_KEY="synthetic quoted secret" Cookie: sid=synthetic-cookie\n' +
+      keyMarker('BEGIN', 'RSA') + '\nsynthetic-key-material\n' + keyMarker('END', 'RSA')
+    const f = await fixture('codex', [meta,
+      codex('response_item', { type: 'function_call_output', output: text })])
+    expect(contentStart + prefix.length).toBeLessThan(64 * 1024)
+    expect(contentStart + prefix.length + secret.length).toBeGreaterThan(64 * 1024)
+    let cursor: string | undefined
+    const parts: string[] = []
+    do {
+      const page = await readOperatorConversation(f.target, f.agent, f.file, cursor, 200, [secret])
+      expect(page.items.every((item) => item.kind === 'tool_result')).toBe(true)
+      expect(Buffer.byteLength(page.items.map((item) => item.text).join(''))).toBeLessThanOrEqual(128 * 1024)
+      parts.push(...page.items.map((item) => item.text))
+      cursor = page.nextCursor ?? undefined
+    } while (cursor)
+    const output = parts.join('')
+    for (const marker of [secret, 'synthetic quoted secret', 'synthetic-cookie', 'synthetic-key-material'])
+      expect(output).not.toContain(marker)
+    expect(output).toContain('[REDACTED CREDENTIAL]')
+    expect(output).toContain('[REDACTED PRIVATE KEY]')
+    expect(output.startsWith(prefix)).toBe(true)
+    expect(parts.length).toBeGreaterThan(100)
   })
 
   it('paginates from the head, tolerates append without changing the captured ordering, rejects replacement and tampering', async () => {

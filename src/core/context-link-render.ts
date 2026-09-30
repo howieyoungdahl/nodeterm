@@ -19,13 +19,14 @@ const TOOL_ARG_MAX = 200
 const TOOL_RESULT_MAX = 500
 
 /** Claude tool_result content: a string, or content parts carrying `.text`. */
-function textOf(content: unknown): string {
+function textOf(content: unknown, publicOnly = false): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
     return content
       .map((c) => {
-        const part = c as { type?: string; text?: string }
-        return part && part.type === 'text' ? part.text ?? '' : ''
+        const part = c as { type?: string; text?: string; channel?: string }
+        return part && part.type === 'text' && (!publicOnly || !part.channel ||
+          part.channel === 'final' || part.channel === 'commentary') ? part.text ?? '' : ''
       })
       .filter(Boolean)
       .join('\n')
@@ -74,7 +75,12 @@ export type SupportedConversationBlock = {
 }
 
 export function conversationBlocksFromRecord(agent: string, raw: string): SupportedConversationBlock[] {
-  const o = parseJson(raw) as any
+  return conversationBlocksFromValue(agent, parseJson(raw))
+}
+
+/** Already parsed, budget-checked operator records need no second JSON parse. */
+export function conversationBlocksFromValue(agent: string, value: unknown): SupportedConversationBlock[] {
+  const o = value as any
   if (!o) return []
   const rawTimestamp = typeof o.timestamp === 'string' ? o.timestamp : typeof o.time === 'string' ? o.time : null
   const timestamp = rawTimestamp && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(rawTimestamp) && Number.isFinite(Date.parse(rawTimestamp))
@@ -83,14 +89,18 @@ export function conversationBlocksFromRecord(agent: string, raw: string): Suppor
   if (agent === 'claude') {
     const sessionId = typeof o.sessionId === 'string' ? o.sessionId : typeof o.session_id === 'string' ? o.session_id : undefined
     const content = o.message?.content
+    if ((o.channel && o.channel !== 'final' && o.channel !== 'commentary') ||
+      (o.message?.channel && o.message.channel !== 'final' && o.message.channel !== 'commentary'))
+      return sessionId ? [{ kind: 'user', text: '', timestamp, sessionId, identityOnly: true }] : []
     if (o.type === 'user' && typeof content === 'string') return [{ kind: 'user', text: content, timestamp, sessionId }]
     if (!Array.isArray(content)) return sessionId ? [{ kind: 'user', text: '', timestamp, sessionId, identityOnly: true }] : []
     const out: SupportedConversationBlock[] = []
     for (const c of content) {
+      if (c?.channel && c.channel !== 'final' && c.channel !== 'commentary') continue
       if (o.type === 'user' && c?.type === 'text' && typeof c.text === 'string') out.push({ kind: 'user', text: c.text, timestamp, sessionId })
       if (o.type === 'assistant' && c?.type === 'text' && typeof c.text === 'string') out.push({ kind: 'agent', text: c.text, timestamp, sessionId })
       if (o.type === 'assistant' && c?.type === 'tool_use') out.push({ kind: 'tool_call', text: `${c.name || 'tool'} ${JSON.stringify(c.input ?? {})}`, timestamp, sessionId })
-      if (o.type === 'user' && c?.type === 'tool_result') out.push({ kind: 'tool_result', text: textOf(c.content), timestamp, sessionId })
+      if (o.type === 'user' && c?.type === 'tool_result') out.push({ kind: 'tool_result', text: textOf(c.content, true), timestamp, sessionId })
     }
     return out.length ? out : sessionId ? [{ kind: 'user', text: '', timestamp, sessionId, identityOnly: true }] : []
   }
@@ -106,7 +116,8 @@ export function conversationBlocksFromRecord(agent: string, raw: string): Suppor
       return sessionId ? [{ kind: 'user', text: '', timestamp, sessionId, identityOnly: true }] : []
     if (p.type === 'message' && (p.role === 'user' || p.role === 'assistant')) {
       const kind = p.role === 'user' ? 'user' : 'agent'
-      return (Array.isArray(p.content) ? p.content : []).filter((c: any) => c?.type === (kind === 'user' ? 'input_text' : 'output_text') && typeof c.text === 'string')
+      return (Array.isArray(p.content) ? p.content : []).filter((c: any) => c?.type === (kind === 'user' ? 'input_text' : 'output_text') && typeof c.text === 'string' &&
+        (!c.channel || c.channel === 'final' || c.channel === 'commentary'))
         .map((c: any) => ({ kind, text: c.text, timestamp, sessionId }))
     }
     if (p.type === 'function_call') return [{ kind: 'tool_call', text: `${p.name || 'tool'} ${typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments ?? {})}`, timestamp, sessionId }]

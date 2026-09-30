@@ -183,6 +183,17 @@ submission), drafts, audit and idempotency still apply. Old servers reject v2 po
 remove standing grants and publish validated exact-only v1 policy before a downgrade. Activation
 and revocation are administrator operations, not implicit credential provisioning at boot.
 
+Operator hook consumers must establish the session generation and attach its jailed path in one
+operation before UI normalization. Raw hooks arrive first; attaching to an old or absent binding
+then rotating on `SessionStart` loses the first/resume path. Keep the first accepted path fixed for
+that generation; changing it requires a fresh lifecycle/identity boundary, so delayed same-ID
+hooks cannot replace a resumed rollout. Recognized authenticated parent hooks
+can establish identity without a UI state transition. Saved mirrors confer no authority after boot.
+Large operator records have independent byte, nesting and structure budgets before JSON parsing;
+filter private channels and redact public text before splitting pages. Keep the file, output, cache
+and concurrent-read limits as well. Disposable regression fixtures must exercise the actual hook
+HTTP ordering, without a later `Stop` hiding the first-event failure.
+
 **A Server Edition message is not submitted just because tmux accepted Enter.** A fresh agent
 composer can render a pasted envelope before it is ready to consume the submit key. Capture the
 composed pane after Enter; if it did not advance, send one bounded retry and capture again. The

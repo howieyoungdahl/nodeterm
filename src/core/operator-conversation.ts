@@ -2,11 +2,15 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
-import { conversationBlocksFromRecord } from './context-link-render'
+import { conversationBlocksFromValue } from './context-link-render'
 import type { OperatorConversationItem, OperatorConversationPage, OperatorSessionTarget } from '../shared/operator-conversations'
 
 const MAX_FILE_BYTES = 256 * 1024 * 1024
-const MAX_RECORD_BYTES = 1024 * 1024
+// Large public tool results are normal. Bound allocation and parser work independently of
+// output pagination: increasing the byte budget alone permits deeply nested/wide JSON bombs.
+const MAX_RECORD_BYTES = 16 * 1024 * 1024
+const MAX_RECORD_DEPTH = 64
+const MAX_RECORD_STRUCTURE = 100_000
 const MAX_ITEMS = 200_000
 const MAX_ITEM_CHARS = 12_000
 const MAX_SNAPSHOT_TEXT_BYTES = 96 * 1024 * 1024
@@ -31,6 +35,29 @@ export class OperatorConversationError extends Error {
 }
 
 function fail(code: string, status: number): never { throw new OperatorConversationError(code, status) }
+
+/** Preflight before JSON.parse/stringify can allocate a huge tree or recurse into it. This is
+ * a budget scanner, not a permissive JSON parser: JSON.parse still validates every byte. */
+function parseBoundedRecord(raw: string): unknown {
+  if (Buffer.byteLength(raw) > MAX_RECORD_BYTES) fail('transcript_record_too_large', 413)
+  let depth = 0, structure = 0, quoted = false, escaped = false
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charCodeAt(i)
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (c === 92) escaped = true
+      else if (c === 34) quoted = false
+      continue
+    }
+    if (c === 34) { quoted = true; structure++ }
+    else if (c === 123 || c === 91) { depth++; structure++ }
+    else if (c === 125 || c === 93) depth--
+    else if (c === 44 || c === 58) structure++
+    if (depth > MAX_RECORD_DEPTH || structure > MAX_RECORD_STRUCTURE)
+      fail('transcript_record_too_complex', 413)
+  }
+  try { return JSON.parse(raw) } catch { fail('invalid_transcript', 409) }
+}
 function targetKey(t: OperatorSessionTarget): string { return JSON.stringify([t.projectId, t.nodeId, t.sessionId, t.generation]) }
 function redactEnvAssignments(s: string): string {
   const edits: Array<{ start: number; end: number; replacement: string }> = []
@@ -101,13 +128,12 @@ async function readSnapshot(filePath: string, target: OperatorSessionTarget, age
     let outputBytes = 0
     let identity: string | undefined
     const decoder = new StringDecoder('utf8')
-    let carry = ''
+    let carry: string[] = []
+    let carryBytes = 0
     let readBytes = 0
     const consume = (raw: string) => {
       if (!raw.trim()) return
-      if (Buffer.byteLength(raw) > MAX_RECORD_BYTES) fail('transcript_record_too_large', 413)
-      try { JSON.parse(raw) } catch { fail('invalid_transcript', 409) }
-      const blocks = conversationBlocksFromRecord(agentId, raw)
+      const blocks = conversationBlocksFromValue(agentId, parseBoundedRecord(raw))
       for (const block of blocks) {
         if (block.sessionId) {
           if (identity && identity !== block.sessionId) fail('session_mismatch', 409)
@@ -127,8 +153,23 @@ async function readSnapshot(filePath: string, target: OperatorSessionTarget, age
         }
       }
     }
-    // Stream the complete bounded snapshot. The cap rejects oversized inputs; it never returns
-    // a silent tail or a partial transcript as if it were complete.
+    // Assemble a large record once. Repeatedly concatenating/splitting the entire carry on each
+    // 64 KiB read made work quadratic in record length when the record budget grew.
+    const feed = (text: string): void => {
+      const lines = text.split('\n')
+      for (let i = 0; i < lines.length; i++) {
+        const part = lines[i]
+        carryBytes += Buffer.byteLength(part)
+        if (carryBytes > MAX_RECORD_BYTES) fail('transcript_record_too_large', 413)
+        if (part) carry.push(part)
+        if (i < lines.length - 1) {
+          consume(carry.join('').replace(/\r$/, ''))
+          carry = []
+          carryBytes = 0
+        }
+      }
+    }
+    // Stream the complete bounded snapshot. Limits fail explicitly, never return a silent tail.
     const buffer = Buffer.alloc(64 * 1024)
     while (readBytes < stat.size) {
       const { bytesRead } = await fd.read(buffer, 0, Math.min(buffer.length, stat.size - readBytes), readBytes)
@@ -136,14 +177,10 @@ async function readSnapshot(filePath: string, target: OperatorSessionTarget, age
       const b = buffer.subarray(0, bytesRead)
       readBytes += bytesRead
       digest.update(b)
-      const text = carry + decoder.write(b)
-      const lines = text.split('\n')
-      carry = lines.pop() ?? ''
-      if (Buffer.byteLength(carry) > MAX_RECORD_BYTES) fail('transcript_record_too_large', 413)
-      for (const raw of lines) consume(raw.replace(/\r$/, ''))
+      feed(decoder.write(b))
     }
-    carry += decoder.end()
-    if (carry) consume(carry.replace(/\r$/, ''))
+    feed(decoder.end())
+    if (carry.length) consume(carry.join('').replace(/\r$/, ''))
     const after = await fd.stat()
     if (readBytes !== stat.size || after.dev !== stat.dev || after.ino !== stat.ino || after.size < stat.size) fail('transcript_changed', 409)
     if (identity !== target.sessionId) fail('session_mismatch', 409)

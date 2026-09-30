@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import type { NormalizedAgentEvent } from '../shared/agents/normalize'
+import { normalizeFor, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { CLAUDE_HOOK_EVENTS } from '../shared/agents/hook-events'
+import { CODEX_EVENTS } from './agents/hooks/codex'
 import type { OperatorSessionTarget } from '../shared/operator-conversations'
 
 interface BoundSession {
@@ -34,6 +36,32 @@ export class OperatorSessionBindings {
   private readonly bootId = randomUUID()
   private readonly sessions = new Map<string, BoundSession>()
 
+  /** Discovery uses authenticated native hooks, including ones with no UI state transition.
+   * Apply lifecycle and its path together: raw listeners run before the normalized UI stream,
+   * and attaching to the previous generation loses the first/resume path on rotation. */
+  observeHook(agentId: string, nodeId: string, payload: Record<string, unknown>, verified: boolean,
+    transcriptPath?: string): void {
+    // A Codex child's session_id is its parent's, but transcript_path belongs to the child.
+    if (agentId === 'codex' && payload.agent_id !== undefined) return
+    const normalized = normalizeFor(agentId, { agentId, nodeId, payload })
+    const eventName = payload.hook_event_name ?? (agentId === 'codex' ? payload.hookEventName : undefined)
+    const recognized = typeof eventName === 'string' && (
+      agentId === 'claude' ? (CLAUDE_HOOK_EVENTS as readonly string[]).includes(eventName) :
+      agentId === 'codex' ? (CODEX_EVENTS as readonly string[]).includes(eventName) || eventName === 'SessionEnd' : false)
+    if (!normalized && !recognized) return
+    const event: NormalizedAgentEvent = { ...(normalized ?? { agentId, nodeId, kind: 'session',
+      sessionId: typeof payload.session_id === 'string' ? payload.session_id : undefined }), verified }
+    // A recognized native session hook establishes identity even when its normalized kind is
+    // subagent/recurring rather than state. This grants no creator ownership or UI state.
+    if (recognized) {
+      event.kind = 'session'
+      event.sessionPhase = eventName === 'SessionStart' ? 'start' : eventName === 'SessionEnd' ? 'end' : undefined
+    }
+    this.observe(event)
+    if (verified && event.sessionPhase !== 'end' && safeOperatorId(event.sessionId) && transcriptPath)
+      this.transcript(nodeId, event.sessionId, agentId, transcriptPath)
+  }
+
   observe(event: NormalizedAgentEvent): void {
     if (!safeOperatorId(event.nodeId)) return
     if (event.verified !== true) {
@@ -44,7 +72,12 @@ export class OperatorSessionBindings {
     }
     if (event.sessionPhase === 'end') { this.sessions.delete(event.nodeId); return }
     if (event.kind !== 'state' && event.kind !== 'session') return
-    if (!safeOperatorId(event.sessionId)) return
+    if (!safeOperatorId(event.sessionId)) {
+      // An authenticated lifecycle boundary with missing identity cannot keep the old
+      // generation readable or deliverable while a replacement's identity is unknown.
+      if (event.sessionPhase === 'start') this.sessions.delete(event.nodeId)
+      return
+    }
     const current = this.sessions.get(event.nodeId)
     if (!current || current.sessionId !== event.sessionId || current.agentId !== event.agentId ||
       event.sessionPhase === 'start') {
@@ -55,10 +88,12 @@ export class OperatorSessionBindings {
     }
   }
 
-  /** Called only with a jailed path from a verified raw hook, never from API input. */
+  /** Called only with a jailed path from a verified raw hook, never from API input.
+   * A generation's first path is immutable: a delayed same-ID hook cannot switch it back
+   * to an earlier rollout. Legitimate path replacement needs a new lifecycle/identity boundary. */
   transcript(nodeId: string, sessionId: string, agentId: string, transcriptPath: string): void {
     const session = this.sessions.get(nodeId)
-    if (session?.sessionId === sessionId && session.agentId === agentId)
+    if (session?.sessionId === sessionId && session.agentId === agentId && session.transcriptPath === undefined)
       session.transcriptPath = transcriptPath
   }
 
