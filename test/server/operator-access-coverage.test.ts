@@ -22,7 +22,8 @@ const config = () => ({ port: 0, host: '127.0.0.1', dataDir,
 const auth = { authorization: `Bearer ${token}` }
 
 beforeEach(async () => {
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'nt-operator-coverage-')))
+  // Match the reader's async resolver so hooks present an exact canonical fixture path.
+  root = await fs.promises.realpath(fs.mkdtempSync(path.join(os.tmpdir(), 'nt-operator-coverage-')))
   dataDir = path.join(root, 'server')
   fs.mkdirSync(dataDir, { mode: 0o700 })
   const codexDir = path.join(root, 'codex')
@@ -31,6 +32,7 @@ beforeEach(async () => {
   process.env.CODEX_HOME = codexDir
   transcript = path.join(codexDir, 'sessions', 'synthetic.jsonl')
   writeTranscript(transcript, 'first public message')
+  expect(await fs.promises.realpath(transcript)).toBe(transcript)
   fs.writeFileSync(path.join(dataDir, 'workspace.json'), JSON.stringify({ version: 3,
     activeProjectId: 'synthetic-project', entries: [{ id: 'synthetic-project', project: {
       id: 'synthetic-project', name: 'Synthetic coverage', cwd: root, color: '#0a84ff',
