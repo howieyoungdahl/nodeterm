@@ -53,12 +53,12 @@ export function cleanupEligible(e: CleanupEvidence, now: number): boolean {
 export interface SessionCleanupDeps {
   dataDir: string
   load(): Promise<Workspace>
-  save(workspace: Workspace): Promise<void>
+  save(workspace: Workspace, check?: () => string | undefined): Promise<void>
   exclusive<T>(work: () => Promise<T>): Promise<T>
   probe(project: Project, node: CanvasNodeState): Promise<CleanupEvidence>
   publish?(project: Project): void
   activityVersion?(): number
-  reserveSessions?(nodeIds: string[]): (() => void) | null
+  reserveSessions?(nodeIds: string[]): (() => void | Promise<void>) | null | Promise<(() => void | Promise<void>) | null>
   now?(): number
 }
 
@@ -127,7 +127,7 @@ export class SessionCleanup {
   async archive(input: unknown): Promise<{ version: 1; receipt: CleanupReceipt }> {
     const request = this.selections(input)
     return this.locked(async () => {
-      const release = this.deps.reserveSessions?.(request.nodeIds)
+      const release = await this.deps.reserveSessions?.(request.nodeIds)
       if (release === null) fail('session_cleanup_or_reap_in_progress')
       try {
         const plan = this.plans.get(request.planId)
@@ -161,7 +161,8 @@ export class SessionCleanup {
           if (this.now() >= plan.expiresAt || cleanupHash(await this.deps.load()) !== plan.workspaceHash) fail('workspace_or_preview_changed')
           if (this.deps.activityVersion?.() !== activityVersion) fail('activity_during_validation')
           for (const item of items) workspace.projects.find(p => p.id === item.projectId)!.nodes.find(n => n.id === item.nodeId)!.cleanupArchiveId = id
-          await this.deps.save(workspace)
+          await this.deps.save(workspace, () => this.deps.activityVersion?.() !== activityVersion ?
+            'activity_during_publication' : this.now() >= plan.expiresAt ? 'preview_expired_during_publication' : undefined)
         })
         // OS input/output cannot be locked by the workspace FIFO. Check again before hiding cards.
         // A raced turn gets its presentation restored; no terminal was stopped at either boundary.
@@ -201,7 +202,7 @@ export class SessionCleanup {
         await this.write(receipt)
         this.plans.delete(plan.id)
         return { version: 1, receipt }
-      } finally { release?.() }
+      } finally { await release?.() }
     })
   }
   async receipt(id: string): Promise<{ version: 1; receipt: CleanupReceipt }> {

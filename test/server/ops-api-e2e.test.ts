@@ -148,8 +148,8 @@ describe('server operator API wiring', () => {
   it('wires safe cleanup preview/receipt discovery on the real disposable Server', async () => {
     const headers = { authorization: `Bearer ${token}` }
     const preview = await fetch(`${base}/opsapi/cleanup/preview`, { headers })
-    expect(preview.status).toBe(200)
-    expect(await preview.json()).toMatchObject({ version: 1, dryRun: true, plan: { rows: [] } })
+    expect(preview.status).toBe(503)
+    expect(await preview.json()).toEqual({ version: 1, error: 'revision_aware_cleanup_required' })
     const receipts = await fetch(`${base}/opsapi/cleanup/receipts`, { headers })
     expect(await receipts.json()).toEqual({ version: 1, receiptIds: [] })
     expect((await fetch(`${base}/opsapi/cleanup/preview`, { headers: { cookie } })).status).toBe(401)

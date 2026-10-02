@@ -4,7 +4,10 @@ import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sw
 import path from 'path'
 import http from 'http'
 import { OperatorSessionBindings } from '../core/operator-session-bindings'
-import { CleanupReservations, SessionCleanup } from '../core/session-cleanup'
+import { SessionCleanup } from '../core/session-cleanup'
+import { createCleanupPersistence } from '../core/session-cleanup-persistence'
+import { FileCleanupReservations } from '../core/session-cleanup-reservations'
+import { cleanupReaperGuards } from '../core/session-cleanup-protection'
 import { CleanupActivity, createCleanupProbe } from '../core/session-cleanup-probe'
 import { sessionName } from '../core/tmux-naming'
 import { createOperatorConversationApi } from './operator-conversation-api'
@@ -537,11 +540,11 @@ export async function startServer(
   })
   const operatorBindings = new OperatorSessionBindings()
   const cleanupActivity = new CleanupActivity()
-  const cleanupReservations = new CleanupReservations()
+  const cleanupReservations = new FileCleanupReservations()
+  const cleanupPersistence = createCleanupPersistence(workspaceStore)
   const sessionCleanup = new SessionCleanup({
     dataDir: config.dataDir,
-    load: () => workspaceStore.load({ sideline: false }),
-    save: workspace => workspaceStore.save(workspace),
+    ...cleanupPersistence,
     exclusive: work => workspaceMutationQueue.run(work),
     probe: createCleanupProbe({ tmuxBin: () => ptyManager.getTmuxBin(), status: mirrorEntry,
       lastActivity: nodeLastActivityAt, activity: cleanupActivity }),
@@ -842,12 +845,7 @@ export async function startServer(
   // for a Mac serving the browser UI, where available bytes are not the OS's pressure signal (see
   // hostMemReader). Kept identical to the desktop shell so the two cannot drift.
   const sessionReaper = createSessionReaper({
-    reserveKill: (_socket, name) => cleanupReservations.reserve([name]),
-    protectedSessions: async () => {
-      const receiptIds = await sessionCleanup.protectedNodeIds()
-      const workspace = await workspaceStore.load({ sideline: false })
-      return [...receiptIds.map(sessionName), ...workspace.projects.flatMap(p => p.nodes.filter(n => n.cleanupArchiveId).map(n => sessionName(n.id)))]
-    },
+    ...cleanupReaperGuards(config.dataDir, cleanupReservations, () => sessionCleanup.protectedNodeIds()),
     tmuxBin: () => ptyManager.getTmuxBin(),
     shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
   })

@@ -416,7 +416,7 @@ export interface SessionReaperOpts {
   /** Presentation archives retain their original backend. An unreadable ledger protects all. */
   protectedSessions?: (socket: string) => Promise<Iterable<string>>
   /** An archive and a reaper kill cannot hold the same session-scoped lease. */
-  reserveKill?: (socket: string, name: string) => (() => void) | null
+  reserveKill?: (socket: string, name: string) => (() => void | Promise<void>) | null | Promise<(() => void | Promise<void>) | null>
   /** Lazy tmux binary resolver (PtyManager resolves after init; null = tmux unavailable → no-op). */
   tmuxBin: () => string | null
   /** tmux sockets to sweep. Default: the local socket + the SSH-remote socket — a host that serves
@@ -558,7 +558,8 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
       const stillDetached = new Set(fresh.filter((s) => s.clients === 0).map((s) => s.name))
       for (const name of names) {
         if (!stillDetached.has(name)) continue
-        const release = opts.reserveKill?.(socket, name)
+        let release: (() => void | Promise<void>) | null | undefined
+        try { release = await opts.reserveKill?.(socket, name) } catch { continue }
         if (release === null) continue
         try {
           // Re-read protection while leased: an archive could have committed since `fresh`.
@@ -575,7 +576,10 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
           )
         } catch {
           // A vanished-in-between session or a kill failure changes nothing; next sweep re-plans.
-        } finally { release?.() }
+        } finally {
+          // Uncertain ownership keeps the lease; never turn a release error into an unhandled sweep.
+          try { await release?.() } catch { /* fail closed for the next sweep */ }
+        }
       }
     }
     return killed

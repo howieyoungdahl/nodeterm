@@ -62,11 +62,12 @@ The known completed Codex screen requires the CLI's `Worked for …` completion
 footer and its exact empty `Ask Codex to do anything` placeholder. The live shell,
 Codex client and persistent code-mode helper can survive completion; unknown
 descendants remain work. Unknown CLI versions/prompt variants remain excluded.
-An empty local shell prompt with no job descendants also qualifies. A current,
-verified explicit done hook permits the exited agent's empty shell to qualify.
-Restored or idle-inferred done metadata cannot provide that proof.
-An exited Codex review's known footer above its empty shell prompt supplies its
-own semantic proof even after a Server restart; titles never supply that proof.
+The pane must also have a live Codex foreground process. A shell's prompt
+punctuation cannot prove an empty input buffer or distinguish a quiet `read`
+builtin. Plain shells and exited reviews with old footers remain unknown and
+ineligible until a trusted shell input-boundary adapter exists. They are still
+listed for review. Restored, idle-inferred or explicit done metadata alone cannot
+provide that input proof; titles never supply it.
 
 Working, waiting, blocked, pending launch, unanswered input, child tasks and
 recurring activity veto eligibility. A done parent does not finish its children.
@@ -89,24 +90,38 @@ retained after an uncertain/partial save and can be undone after restart. Invali
 receipts or unknown targets refuse. Undo never recreates deleted IDs and never
 overrides a different archive marker. Later title/position edits survive.
 
-The legacy WorkspaceStore is not a filesystem CAS. The workflow re-reads disk
-after awaited probes, checks the synchronous hook epoch and rechecks activity
-after save before publishing the archive. An observed raced turn restores the
-archive presentation. A recovery failure retains the receipt for inspection.
-The original backend is never interrupted during those windows. Arbitrary
-non-cooperative disk writes can still race publication; PR #30's revision-aware
-writer needs separate integration before stronger multi-writer guarantees can be
-claimed. Do not independently merge this branch over that overlapping work.
+Publication requires PR #30's retained raw revision contract. Legacy writers
+refuse with `revision_aware_cleanup_required`; there is no whole-workspace save
+fallback. Preview does not enroll revisions. Authorized saves enroll one exact
+caller base, validate marker-only changes and conditionally commit only selected
+projects. Index bytes, sibling files and unknown metadata remain untouched.
+Publication conflicts, refusals and unknown acknowledgments preserve prepared
+receipts; no failed write is automatically replayed on a newer base. The actual
+PR #30 writer checks the activity guard under its publication lock. The workflow
+also rechecks activity after save and restores presentation on an observed race.
+A recovery failure retains the receipt. No terminal is interrupted.
 
-Both the dead-card timer and memory/session reaper preserve archived IDs. The
-session reaper takes a session lease, rechecks protection at kill time and does no
-killing if its archive-protection read fails. Prepared and applied receipts also
-protect IDs when a legacy workspace read falls back to empty. Archiving reduces
+The integration deliverable is composed on PR #30's exact `b19c9cca` contract.
+PR #30 (or a compatible retained-writer integration) must land before cleanup
+can activate. Current main lacks that contract and the operator routes. This
+adapter resolves cleanup's persistence compatibility; PR #30's broader rollout
+gates remain its owner's responsibility. Do not merge this source over an
+incompatible writer or independently discard the raw history/recovery records.
+
+Both Desktop and Server memory/session reapers use the same protection adapter.
+It reads raw project files rather than a fallback empty workspace and refuses
+reaping on missing, corrupt, changing or publication-locked metadata. The
+Server dead-card timer also preserves archived IDs. A private host-wide file
+lease keyed by socket and exact session name prevents archive/reaper races
+across runtime processes. Protection is checked again while leased before any
+kill. Server prepared and applied receipts also protect uncertain saves. Archiving reduces
 UI clutter; it intentionally does not reclaim backend RAM by stopping processes.
 
 If a process died holding `transaction.lock`, quiesce cleanup writers, retain and
 inspect receipts and current project files, then use a separately reviewed exact
-lock recovery. There is no age-based lock theft or automatic receipt/log deletion.
+lock recovery. Session leases under the host temp directory follow the same
+rule: never steal them because of age. Do not remove another owner's token.
+There is no automatic receipt, transcript or history deletion.
 
 ## Surfaces and path boundary
 
