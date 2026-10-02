@@ -70,6 +70,9 @@ export interface NormalizedAgentEvent {
   sessionTitle?: string
   // session lifecycle phase: 'start' resets to idle, 'end' resets + clears loop/fan-out
   sessionPhase?: 'start' | 'end'
+  /** Explicit provider startup, never resume/reconnect/unknown. Cleanup also requires a fresh
+   * current-host process marker; this lifecycle label alone cannot establish child coverage. */
+  freshSession?: boolean
   // subagent
   toolUseId?: string
   subagentType?: string
@@ -346,6 +349,7 @@ interface CodexPayload {
   hook_event_name?: string
   hookEventName?: string
   session_id?: string
+  source?: string
   prompt?: string
   tool_name?: string
   tool_input?: { prompt?: string; question?: string; questions?: { question?: string }[] }
@@ -410,7 +414,10 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
     }
   }
   // SessionStart + tool events keep the node "working".
-  if (ev === 'SessionStart' || ev === 'PreToolUse' || ev === 'PostToolUse') {
+  if (ev === 'SessionStart') {
+    return { ...base, kind: 'state', state: 'working', sessionPhase: 'start', freshSession: p.source === 'startup' }
+  }
+  if (ev === 'PreToolUse' || ev === 'PostToolUse') {
     return { ...base, kind: 'state', state: 'working' }
   }
   if (ev === 'PermissionRequest') return { ...base, kind: 'state', state: 'waiting' }
