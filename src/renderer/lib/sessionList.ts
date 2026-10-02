@@ -7,6 +7,7 @@ import type { ProjectIcon } from '@shared/project-icon'
 import { relativeTime } from './relativeTime'
 
 export interface SessionNodeInput {
+  cleanupArchiveId?: string
   id: string
   kind: NodeKind
   title: string
@@ -346,7 +347,7 @@ export function buildSessionList(
     const source = isActive && liveActiveNodes ? liveActiveNodes : p.nodes
     const groupNodes = source.filter((n) => n.kind === 'group')
     const groupById = new Map(groupNodes.map((n) => [n.id, n]))
-    const terminals = source.filter((n) => n.kind === 'terminal')
+    const terminals = source.filter((n) => n.kind === 'terminal' && !n.cleanupArchiveId)
 
     // A frame's parent, but only when that parent is a frame we know AND the chain terminates.
     // A cyclic parentId (hand-edited project.json, a bad merge) would otherwise recurse forever;
@@ -473,7 +474,7 @@ export function buildStatusList(
   projects.forEach((p, pidx) => {
     const isActive = p.id === activeProjectId
     for (const n of p.nodes) {
-      if (n.kind !== 'terminal') continue
+      if (n.kind !== 'terminal' || n.cleanupArchiveId) continue
       // For the active project, prefer the live node (fresh title/agent) when one exists; for the
       // rest, the persisted node is already current. This mirrors buildSessionList's live-vs-store
       // choice without ever dropping the persisted set as the ownership key.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { planServerChange, type EdgeRef } from './serverChange'
+import { applyCleanupChanges, planServerChange, type EdgeRef } from './serverChange'
 import type { CanvasNodeState, Project } from '@shared/types'
 
 const node = (id: string, over: Partial<CanvasNodeState> = {}): CanvasNodeState => ({
@@ -31,6 +31,28 @@ const caller = node('term-caller')
 const first = node('term-first')
 
 describe('planServerChange', () => {
+  it('lands archive and undo immediately on held nodes without replacing unsaved edits', () => {
+    const base = project([caller, first])
+    const archived = project([node(caller.id, { cleanupArchiveId: 'receipt' }), first])
+    const input = { base, incoming: archived, liveNodeIds: [caller.id, first.id], liveRopes: [], liveBridges: [] }
+    const plan = planServerChange(input)
+    expect(plan.added).toEqual([])
+    expect(plan.cleanupChanges).toEqual([{ id: caller.id, cleanupArchiveId: 'receipt' }])
+    const live = [ { id: caller.id, position: { x: 777, y: 10 }, selected: true, data: { title: 'unsaved edit', cleanupArchiveId: undefined as string | undefined } },
+      { id: first.id, position: { x: 100, y: 100 }, selected: true, data: { title: first.title, cleanupArchiveId: undefined as string | undefined } } ]
+    const hidden = applyCleanupChanges(live, plan.cleanupChanges)
+    expect(hidden[0]).toMatchObject({ hidden: true, selected: false, position: { x: 777 }, data: { title: 'unsaved edit', cleanupArchiveId: 'receipt' } })
+    expect(hidden[1]).toBe(live[1])
+    expect(applyCleanupChanges(hidden, plan.cleanupChanges)).toBe(hidden)
+    const undo = planServerChange({ ...input, base: archived, incoming: base })
+    const restored = applyCleanupChanges(hidden, undo.cleanupChanges)
+    expect(restored[0]).toMatchObject({ hidden: false, position: { x: 777 }, data: { title: 'unsaved edit', cleanupArchiveId: undefined } })
+  })
+  it('does not overwrite locally removed nodes or unchanged archive markers', () => {
+    const p = project([node(caller.id, { cleanupArchiveId: 'receipt' })])
+    expect(planServerChange({ base: p, incoming: p, liveNodeIds: [], liveRopes: [], liveBridges: [] }).cleanupChanges).toEqual([])
+    expect(planServerChange({ base: p, incoming: p, liveNodeIds: [caller.id], liveRopes: [], liveBridges: [] }).cleanupChanges).toEqual([])
+  })
   it('installs a rope the server added, and adopts the node it points at', () => {
     // The whole reason this path exists: `open-agent` appends BOTH a node and a rope, and the old
     // external-change classifier saw the changed `ropes` array as a conflict.

@@ -65,7 +65,7 @@ describe('pty create: a local Codex spawn fails closed on a missing selected acc
     fake = fakePlatform({ userDataDir })
     initPlatform(fake)
     const { PtyManager } = await import('./pty-manager')
-    new PtyManager().registerIpc()
+    new PtyManager({cleanupBootId:'private-fixture-boot'}).registerIpc()
   })
   afterEach(() => {
     resetPlatformForTests()
@@ -102,6 +102,7 @@ describe('pty create: a local Codex spawn fails closed on a missing selected acc
     expect(spawned).toHaveLength(1)
     expect(spawned[0].env.CODEX_HOME).toBe(home)
     expect(spawned[0].env.NODETERM_CODEX_ACCOUNT_ID).toBe('acct-real')
+    expect(spawned[0].env.NODETERM_CLEANUP_BOOT).toBe('private-fixture-boot')
   })
 
   it('a system Codex node (no account id) always spawns and clears any managed scope explicitly', async () => {

@@ -379,6 +379,12 @@ and instruction installation; temporary test paths must never reach live provide
 
 ## Testing
 
+Session cleanup is presentation-only: age never permits session termination or
+history deletion. Preserve archive markers through serializers and exclude them
+from automatic destructive reapers. The Server workflow uses exact preview-bound
+IDs and durable inverse receipts; see `docs/session-cleanup.md` for evidence,
+race/recovery boundaries and unsupported host adapters.
+
 Terminal and board-modal headers reserve a row for the title; put badges and secondary actions
 in the wrapping toolbar. Collapsed terminals keep the title row and close button within 40px.
 Automatic names follow the exact agent session and respect `titleAuto: false`. Codex can use a

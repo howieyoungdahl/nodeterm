@@ -49,6 +49,11 @@ export interface NormalizedAgentEvent {
   sessionTitle?: string
   // session lifecycle phase: 'start' resets to idle, 'end' resets + clears loop/fan-out
   sessionPhase?: 'start' | 'end'
+  /** Explicit startup only; cleanup additionally checks a current-boot OS process marker. */
+  freshSession?: boolean
+  /** Managed hook's pre-dispatch local Codex PID:birth stamp. Set by the hook server only;
+   * cleanup also requires verified identity and a matching live foreground generation. */
+  cleanupProcess?: string
   // subagent
   toolUseId?: string
   subagentType?: string
@@ -304,6 +309,7 @@ interface CodexPayload {
   hook_event_name?: string
   hookEventName?: string
   session_id?: string
+  source?: string
   prompt?: string
   tool_name?: string
   tool_input?: { prompt?: string; question?: string; questions?: { question?: string }[] }
@@ -370,7 +376,7 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
   // SessionStart keeps the Codex card's existing UI state, but also exposes the lifecycle
   // boundary to process-local consumers (operator session bindings must rotate even when
   // Codex reuses the same session_id after a process restart).
-  if (ev === 'SessionStart') return { ...base, kind: 'state', state: 'working', sessionPhase: 'start' }
+  if (ev === 'SessionStart') return { ...base, kind: 'state', state: 'working', sessionPhase: 'start', freshSession: p.source === 'startup' }
   // Tool events keep the node "working".
   if (ev === 'PreToolUse' || ev === 'PostToolUse') {
     return { ...base, kind: 'state', state: 'working' }

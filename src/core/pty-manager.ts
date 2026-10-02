@@ -981,18 +981,21 @@ export class PtyManager {
   /** The child-process seam for shadow clients. Undefined in production, where `ControlModeClient`
    *  uses `child_process` (see tmux-control-client.ts); tests inject a fake spawner. */
   private readonly controlSpawn: ControlSpawn | undefined
+  private readonly cleanupBootId: string | undefined
   private readonly confirmedProcessRun: ConfirmedProcessRun
   /** Injectable only so Windows-only routing stays behavior-testable on every CI host. */
   private readonly runtimePlatform: NodeJS.Platform
 
   constructor(
     deps: {
+      cleanupBootId?: string
       controlSpawn?: ControlSpawn
       confirmedProcessRun?: ConfirmedProcessRun
       runtimePlatform?: NodeJS.Platform
     } = {}
   ) {
     this.controlSpawn = deps.controlSpawn
+    this.cleanupBootId = deps.cleanupBootId
     this.confirmedProcessRun = deps.confirmedProcessRun ?? runAsync
     this.runtimePlatform = deps.runtimePlatform ?? os.platform()
   }
@@ -2774,6 +2777,8 @@ export class PtyManager {
     // advertise it — without this, zsh themes and TUIs quietly clamp to the 256 palette and
     // the canvas terminals never match the user's real terminal colors (issue #78).
     const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<string, string>
+    delete env.NODETERM_CLEANUP_BOOT
+    if (this.cleanupBootId) env.NODETERM_CLEANUP_BOOT = this.cleanupBootId
     // The Server Edition may receive a first-boot password through its own environment. That
     // bootstrap credential belongs to the server process, never to the interactive shells and
     // agent CLIs it launches; inheriting it here would expose it to every terminal node.
@@ -3139,7 +3144,8 @@ export class PtyManager {
       const langEnvArgs = env.LANG ? ['-e', `LANG=${env.LANG}`] : []
       // And for COLORTERM: panes read the SESSION env, not the client's, so the truecolor
       // handshake must ride `-e` to reach programs on a shared/stale server (issue #78).
-      const colortermEnvArgs = ['-e', 'COLORTERM=truecolor']
+      const colortermEnvArgs = ['-e', 'COLORTERM=truecolor',
+        ...(this.cleanupBootId ? ['-e', `NODETERM_CLEANUP_BOOT=${this.cleanupBootId}`] : [])]
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
       const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
