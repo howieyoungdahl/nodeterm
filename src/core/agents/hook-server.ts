@@ -7,6 +7,7 @@ import { platform } from '../platform'
 import { hookSockPath } from './hook-sock-path'
 import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
+import { validCleanupProcess } from '../session-cleanup-generation'
 import { classifyClaudeConfigDir, configDirFromTranscriptPath } from '../claude-accounts-core'
 import { claudeAccountsSnapshot } from '../claude-config-dir'
 import type { CodexIdentityEvent, ObservedClaudeAccount } from '../../shared/types'
@@ -772,8 +773,12 @@ class HookServer {
           // those agents have their own identity spine).
           const account = observedClaudeAccount(agentId, payload)
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
+          // A raw provider JSON field cannot manufacture sender evidence. Only the authenticated
+          // managed transport's bounded stamp is considered, and cleanup validates it against /proc.
+          const cleanupProcess = verified && agentId === 'codex' && clientRevision !== undefined && clientRevision >= 5 &&
+            validCleanupProcess(form.nodeterm_cleanup_process) ? form.nodeterm_cleanup_process : undefined
           if (normalized && this.listener)
-            this.listener({ ...normalized, verified, clientRevision, ...(account ? { account } : {}) })
+            this.listener({ ...normalized, verified, clientRevision, ...(cleanupProcess ? { cleanupProcess } : {}), ...(account ? { account } : {}) })
         }
         res.writeHead(204)
         res.end()

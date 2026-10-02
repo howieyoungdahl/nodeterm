@@ -71,12 +71,21 @@ provide that input proof; titles never supply it.
 
 Same-PID async children require continuous task-history coverage as well. Eligible
 Codex sessions need the private process marker injected by the current Server boot
-and an authenticated explicit `SessionStart` with `source: startup` and a matching
-session ID. Missing or unfamiliar lifecycle fields stay unknown. A restart,
+and an authenticated explicit `SessionStart` with `source: startup`, a matching
+session ID, and the managed hook revision 5 sender stamp. The hook captures its
+Codex ancestor PID and Linux process-birth tick before backgrounding the POST.
+The Server witnesses that exact foreground generation twice before enrolling it,
+and every preview compares the enrolled generation. A late startup POST cannot
+attest a replacement CLI in the same shell. Lifecycle epochs fence asynchronous
+enrollment; a repeated, resumed or previously unknown startup never re-enrolls
+the same session. Missing or unfamiliar fields stay unknown. A restart,
 reconnect, resume or compaction never converts missing child history into zero.
 Lifecycle events never clear unfinished child IDs or recurring work. Inherited
 pre-rollout/pre-restart sessions remain listed with `child-history-unproven` and
 cannot be automatically archived. No old session is resumed to manufacture proof.
+The installed provider's actual `source` values still require a fresh disposable
+startup/resume compatibility check before activation; synthetic fixtures do not
+certify its lifecycle schema. Missing support safely yields no eligible rows.
 
 Working, waiting, blocked, pending launch, unanswered input, child tasks and
 recurring activity veto eligibility. A done parent does not finish its children.

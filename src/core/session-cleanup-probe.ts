@@ -7,6 +7,7 @@ import { sessionName, TMUX_SOCKET } from './tmux-naming'
 import type { CanvasNodeState, Project } from '../shared/types'
 import type { NormalizedAgentEvent } from '../shared/agents/normalize'
 import type { MirrorEntry } from './agent-status-mirror'
+import { validCleanupProcess, type CleanupStartupWitness } from './session-cleanup-generation'
 
 const exec = promisify(execFile)
 const unknown = (reason: string): CleanupEvidence => ({ generation: '', activityAt: null,
@@ -15,16 +16,27 @@ const unknown = (reason: string): CleanupEvidence => ({ generation: '', activity
 /** Current-boot child/recurring evidence. A completed parent does not finish its children. */
 export class CleanupActivity {
   readonly bootId = randomUUID()
-  private readonly coveredSessions = new Map<string, string>()
+  private readonly coveredSessions = new Map<string, { sessionId: string; generation: string }>()
+  private readonly starts = new Map<string, Set<string>>()
+  private readonly lifecycle = new Map<string, number>()
   private revision = 0
   private readonly children = new Map<string, Set<string>>()
   private readonly recurring = new Set<string>()
-  observe(e: NormalizedAgentEvent): void {
+  constructor(private readonly witness?: CleanupStartupWitness) {}
+  async observe(e: NormalizedAgentEvent): Promise<void> {
     this.revision++
+    let enrollment: { sessionId: string; process: string; epoch: number } | undefined
     if (e.sessionPhase) {
       this.coveredSessions.delete(e.nodeId)
-      if (e.sessionPhase === 'start' && e.freshSession === true && e.verified === true && e.sessionId)
-        this.coveredSessions.set(e.nodeId, e.sessionId)
+      const epoch = (this.lifecycle.get(e.nodeId) ?? 0) + 1
+      this.lifecycle.set(e.nodeId, epoch)
+      const seen = this.starts.get(e.nodeId) ?? new Set<string>()
+      const first = !!e.sessionId && !seen.has(e.sessionId)
+      if (e.sessionId) { seen.add(e.sessionId); this.starts.set(e.nodeId, seen) }
+      if (e.sessionPhase === 'start' && e.freshSession === true && e.verified === true && e.sessionId &&
+        first && validCleanupProcess(e.cleanupProcess)) {
+        enrollment = { sessionId: e.sessionId, process: e.cleanupProcess, epoch }
+      }
       // A resume/reconnect/session boundary never finishes child IDs or recurring tasks.
     }
     if (e.kind === 'subagent-start') {
@@ -34,10 +46,21 @@ export class CleanupActivity {
     if (e.kind === 'subagent-end' && e.toolUseId) this.children.get(e.nodeId)?.delete(e.toolUseId)
     // A timer can wake after a quiet hour. No global recurring clear is inferred from Stop.
     if (e.kind === 'recurring' && !e.recurringEnd) this.recurring.add(e.nodeId)
+    if (enrollment && this.witness) {
+      try {
+        const found = await this.witness(e.nodeId, enrollment.process)
+        if (found?.process === enrollment.process && found.generation &&
+          this.lifecycle.get(e.nodeId) === enrollment.epoch) {
+          this.coveredSessions.set(e.nodeId, { sessionId: enrollment.sessionId, generation: found.generation })
+          this.revision++ // In-flight previews/publications also fence asynchronous enrollment.
+        }
+      } catch { /* An unreadable witness is unknown history, never an empty child inventory. */ }
+    }
   }
   pending(nodeId: string): number { return (this.children.get(nodeId)?.size ?? 0) + Number(this.recurring.has(nodeId)) }
-  covered(nodeId: string, sessionId: string | undefined): boolean {
-    return !!sessionId && this.coveredSessions.get(nodeId) === sessionId
+  covered(nodeId: string, sessionId: string | undefined, generation: string): boolean {
+    const covered = this.coveredSessions.get(nodeId)
+    return !!sessionId && covered?.sessionId === sessionId && covered.generation === generation
   }
   version(): number { return this.revision }
 }
@@ -117,7 +140,8 @@ export function createCleanupProbe(deps: { tmuxBin(): string | null; status(node
         // Updating tmux session env on attach cannot retrofit /proc/<pid>/environ of an old pane.
         const environment = await fs.readFile(`/proc/${foreground}/environ`, 'utf8')
         covered = environment.split('\0').includes(`NODETERM_CLEANUP_BOOT=${deps.activity.bootId}`) &&
-          deps.activity.covered(node.id, status?.sessionId ?? node.agentSessionId)
+          deps.activity.covered(node.id, status?.sessionId ?? node.agentSessionId,
+            `${TMUX_SOCKET}:${created}:${pane}:${pid}:${root.birth}:${foreground}:${foregroundBirth}`)
       }
       const workChildren = cleanupProcessWork(Number(pid), rows, codexDone)
       const pending = !covered || !!status?.awaitingInput || deps.activity.pending(node.id) > 0 || !!node.pendingLaunch
@@ -130,6 +154,13 @@ export function createCleanupProbe(deps: { tmuxBin(): string | null; status(node
         '#{session_created}\t#{session_activity}\t#{window_activity}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}'], { timeout: 4000, maxBuffer: 64_000 })
       const lastScreen = await exec(bin, ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-J', '-S', '-80', '-t', pane], { timeout: 4000, maxBuffer: 128_000 })
       if (check.stdout !== stdout || lastScreen.stdout !== screen) return unknown('activity-during-probe')
+      const latestStat = await fs.readFile(`/proc/${pid}/stat`, 'utf8')
+      const latestRoot = latestStat.slice(latestStat.lastIndexOf(')') + 2).split(' ')
+      if (latestRoot[19] !== root.birth || Number(latestRoot[5]) !== foreground) return unknown('generation-during-probe')
+      if (codexForeground) {
+        const latest = await fs.readFile(`/proc/${foreground}/stat`, 'utf8')
+        if (latest.slice(latest.lastIndexOf(')') + 2).split(' ')[19] !== foregroundBirth) return unknown('generation-during-probe')
+      }
       return { generation, activityAt: at, state: actualState, workChildren, pending,
         fingerprint: cleanupHash({ generation, at, attachedAt, screen, status, pending, workChildren,
           children: rows.filter(r => r.ppid === Number(pid)).map(r => [r.pid, r.command]) }),

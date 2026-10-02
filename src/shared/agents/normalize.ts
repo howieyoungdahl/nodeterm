@@ -73,6 +73,9 @@ export interface NormalizedAgentEvent {
   /** Explicit provider startup, never resume/reconnect/unknown. Cleanup also requires a fresh
    * current-host process marker; this lifecycle label alone cannot establish child coverage. */
   freshSession?: boolean
+  /** Managed hook's pre-dispatch local Codex PID:birth stamp. Set by the hook server only;
+   * cleanup also requires verified identity and a matching live foreground generation. */
+  cleanupProcess?: string
   // subagent
   toolUseId?: string
   subagentType?: string
