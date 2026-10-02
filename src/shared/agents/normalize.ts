@@ -376,7 +376,7 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
   // SessionStart keeps the Codex card's existing UI state, but also exposes the lifecycle
   // boundary to process-local consumers (operator session bindings must rotate even when
   // Codex reuses the same session_id after a process restart).
-  if (ev === 'SessionStart') return { ...base, kind: 'state', state: 'working', sessionPhase: 'start' }
+  if (ev === 'SessionStart') return { ...base, kind: 'state', state: 'working', sessionPhase: 'start', freshSession: p.source === 'startup' }
   // Tool events keep the node "working".
   if (ev === 'PreToolUse' || ev === 'PostToolUse') {
     return { ...base, kind: 'state', state: 'working' }
