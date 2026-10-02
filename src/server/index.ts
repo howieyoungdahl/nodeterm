@@ -4,6 +4,13 @@ import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sw
 import { startTriggerService } from '../core/trigger-service'
 import path from 'path'
 import http from 'http'
+import { SessionCleanup } from '../core/session-cleanup'
+import { createCleanupPersistence } from '../core/session-cleanup-persistence'
+import { FileCleanupReservations } from '../core/session-cleanup-reservations'
+import { cleanupReaperGuards } from '../core/session-cleanup-protection'
+import { CleanupActivity, createCleanupProbe } from '../core/session-cleanup-probe'
+import { createCleanupStartupWitness } from '../core/session-cleanup-generation'
+import { sessionName } from '../core/tmux-naming'
 
 import { ServerPlatform } from './platform-server'
 import { Auth } from './auth'
@@ -232,7 +239,9 @@ export async function startServer(
 
   // Core services — same construction + registration order as src/main/index.ts.
   const settingsStore = new SettingsStore()
-  const ptyManager = new PtyManager()
+  const cleanupActivity = new CleanupActivity((id, claim) =>
+    createCleanupStartupWitness(() => ptyManager.getTmuxBin(), cleanupActivity.bootId)(id, claim))
+  const ptyManager = new PtyManager({ cleanupBootId: cleanupActivity.bootId })
   // The local save rescue (WorkspaceStore.rescueOmittedLocalNodes). `workspace:save` is a whole-
   // workspace last-writer-wins write and local projects have no conflict machinery, so one browser
   // tab holding a stale node list can delete every card created since its snapshot — silently, and
@@ -554,8 +563,23 @@ export async function startServer(
     intervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
     sweep: (dryRun) => nodeOps.sweep(dryRun)
   })
+  const cleanupReservations = new FileCleanupReservations()
+  const cleanupPersistence = createCleanupPersistence(workspaceStore)
+  const sessionCleanup = new SessionCleanup({
+    dataDir: config.dataDir,
+    ...cleanupPersistence,
+    exclusive: work => workspaceMutationQueue.run(work),
+    probe: createCleanupProbe({ tmuxBin: () => ptyManager.getTmuxBin(), status: mirrorEntry,
+      lastActivity: nodeLastActivityAt, activity: cleanupActivity }),
+    activityVersion: () => cleanupActivity.version(),
+    reserveSessions: ids => cleanupReservations.reserve(ids.map(sessionName)),
+    publish: project => platform.broadcast(IPC.workspaceServerChange, project)
+  })
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
-    onEvent: (event) => canvasControl?.onAgentEvent(event)
+    onEvent: (event) => {
+      void cleanupActivity.observe(event)
+      canvasControl?.onAgentEvent(event)
+    }
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
@@ -856,6 +880,7 @@ export async function startServer(
   // for a Mac serving the browser UI, where available bytes are not the OS's pressure signal (see
   // hostMemReader). Kept identical to the desktop shell so the two cannot drift.
   const sessionReaper = createSessionReaper({
+    ...cleanupReaperGuards(config.dataDir, cleanupReservations, () => sessionCleanup.protectedNodeIds()),
     tmuxBin: () => ptyManager.getTmuxBin(),
     shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
   })
@@ -965,6 +990,7 @@ export async function startServer(
   }
 
   const opsApi = createOpsApiHandler({
+    cleanup: sessionCleanup,
     token: opsToken,
     nodes: () => nodeOps.list(),
     sweep: (dryRun) => nodeOps.sweep(dryRun),

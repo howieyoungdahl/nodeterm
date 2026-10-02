@@ -9,7 +9,7 @@ export const projectNodeViewKeys = new Set([
   'filePath', 'fileMissing', 'url', 'partition', 'diffStaged', 'commitOid', 'highScore', 'agentId',
   'agentModel', 'accountId', 'agentSessionId', 'pendingLaunch', 'ssh', 'sshRemoteTmux', 'sshFs',
   'worktree', 'trigger', 'premaxRect', 'controlSize', 'role', 'taskSummary', 'taskFrame',
-  'pinned', 'manualPlacement', 'compactRect', 'appearance'
+  'cleanupArchiveId', 'pinned', 'manualPlacement', 'compactRect', 'appearance'
 ])
 export function projectEntityView(document: ProjectDocument): ProjectDocument {
   const result = { ...document }

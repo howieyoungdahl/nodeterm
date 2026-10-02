@@ -520,6 +520,23 @@ Never turn a failed local edit into a new operation or a speculative host-map up
 The old boolean IPC route returns literal false; the typed route is distinct so stale clients
 cannot mistake a refusal object for success. Preserve unknown fields and retained target history;
 see `docs/project-reconciliation.md` for metadata read, retry and compatibility boundaries.
+Session cleanup is presentation-only: age never permits session termination or
+history deletion. Preserve archive markers through serializers and exclude them
+from automatic destructive reapers. The Server workflow uses exact preview-bound
+IDs and durable inverse receipts; see `docs/session-cleanup.md` for evidence,
+race/recovery boundaries and unsupported host adapters.
+
+Terminal and board-modal headers reserve a row for the title; put badges and secondary actions
+in the wrapping toolbar. Collapsed terminals keep the title row and close button within 40px.
+Automatic names follow the exact agent session and respect `titleAuto: false`. Codex can use a
+bounded task preview when no explicit or relayed name exists; this never sends input to the agent.
+Automatic worker organization is a native, machine-local option in the canvas menu, command palette,
+and Behavior settings. Topic-based grouping still needs an operator or supervising agent.
+
+**Reloading a saved canvas must preserve open cards.** Read the current React Flow snapshot when
+the user resolves a conflict, retain cards missing from disk with their ids and positions, and save
+the merged result. A conflict can pause autosave while more terminals are opened. The old disk
+snapshot cannot be used as a deletion list; closing a card is a separate explicit action.
 
 Project reconciliation must retain a committed raw common base independently of pending renderer
 edits. Unknown fields need a raw-base overlay before typed serialization; a conflict preview is not

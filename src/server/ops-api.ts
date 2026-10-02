@@ -1,4 +1,6 @@
 import http from 'node:http'
+import { CleanupError, type SessionCleanup } from '../core/session-cleanup'
+import path from 'node:path'
 
 import type {
   OpsAdoptResult,
@@ -22,6 +24,7 @@ export interface OpsHealth {
 }
 
 export interface OpsApiDeps {
+  cleanup?: SessionCleanup
   token: string
   nodes(): Promise<OpsNodeInventoryItem[]>
   sweep(dryRun: boolean): Promise<OpsSweepResult>
@@ -122,6 +125,32 @@ export function createOpsApiHandler(
         return
       }
 
+      if (pathname.startsWith('/opsapi/cleanup/')) {
+        if (!deps.cleanup) { sendJson(res, 501, { version: 1, error: 'cleanup_unavailable' }); return }
+        const action = pathname.slice('/opsapi/cleanup/'.length)
+        const receiptMatch = /^receipts\/([a-f0-9-]{36})$/.exec(action)
+        const expected = action === 'preview' || action === 'receipts' || receiptMatch ? 'GET' : 'POST'
+        if (method !== expected) { res.setHeader('Allow', expected); sendJson(res, 405, { version: 1, error: 'method_not_allowed' }); return }
+        try {
+          if (action === 'preview') { sendJson(res, 200, await deps.cleanup.preview()); return }
+          if (action === 'receipts') { sendJson(res, 200, await deps.cleanup.receipts()); return }
+          if (receiptMatch) { sendJson(res, 200, await deps.cleanup.receipt(receiptMatch[1])); return }
+          if (action !== 'archive' && action !== 'undo') { sendJson(res, 404, { version: 1, error: 'not_found' }); return }
+          if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+            sendJson(res, 415, { version: 1, error: 'application_json_required' }); return
+          }
+          const body = await readJson(req)
+          if (action === 'archive') { sendJson(res, 200, await deps.cleanup.archive(body)); return }
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).join() !== 'receiptId' ||
+            typeof (body as { receiptId?: unknown }).receiptId !== 'string') {
+            sendJson(res, 400, { version: 1, error: 'receipt_id_required' }); return
+          }
+          sendJson(res, 200, await deps.cleanup.undo((body as { receiptId: string }).receiptId)); return
+        } catch (e) {
+          const status = e instanceof CleanupError ? e.status : (e as NodeJS.ErrnoException)?.code === 'BODY_TOO_LARGE' ? 413 : e instanceof SyntaxError || (e as Error)?.message === 'invalid_json' ? 400 : 500
+          sendJson(res, status, { version: 1, error: e instanceof CleanupError ? e.code : status === 400 ? 'bad_json' : status === 413 ? 'body_too_large' : 'cleanup_failed' }); return
+        }
+      }
       if (pathname === '/opsapi/nodes') {
         if (method !== 'GET') {
           res.setHeader('Allow', 'GET')

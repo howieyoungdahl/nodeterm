@@ -870,6 +870,14 @@ scrollable history outside the browser renderer, while every mounted xterm pays 
 
 ## Terminal node lifecycle (gotchas)
 
+Operator session cleanup (`docs/session-cleanup.md`) uses an exact one-hour
+preview and a presentation archive marker, never session control. The original
+ID/backend/history remain; canvas, sidebar and kanban hide the archived card and
+undo clears only that marker. Both automatic destructive reapers exclude archived
+IDs. Receipts precede workspace saves, remain across restart and fail closed on
+unknown/partial state. The legacy writer still lacks filesystem CAS; do not claim
+host-queue and re-probe fencing replaces the revision-aware persistence contract.
+
 `src/renderer/nodes/TerminalNode.tsx` is the trickiest file:
 
 - The xterm instance + PTY session are created once in a `useEffect(…, [data.respawnNonce,

@@ -46,6 +46,8 @@ export interface ServerChangeInput {
 export interface ServerChangePlan {
   /** Nodes to adopt onto the live canvas — silently: the user's own agent asked for these. */
   added: CanvasNodeState[]
+  /** Server-owned presentation changes on existing nodes; never replace unsaved node edits. */
+  cleanupChanges: { id: string; cleanupArchiveId?: string }[]
   /** The merged rope set to install. */
   ropes: EdgeRef[]
   /** The merged bridge set to install. */
@@ -100,6 +102,9 @@ export function planServerChange(input: ServerChangeInput): ServerChangePlan {
   // our last-known disk state has its id. The base check is what stops a node the user deleted
   // locally (and has not saved yet) from being resurrected by the file that still lists it.
   const added = incoming.nodes.filter((n) => !live.has(n.id) && !baseNodeIds.has(n.id))
+  const baseline = new Map((base?.nodes ?? []).map(n => [n.id, n.cleanupArchiveId]))
+  const cleanupChanges = incoming.nodes.filter(n => live.has(n.id) &&
+    n.cleanupArchiveId !== baseline.get(n.id)).map(n => ({ id: n.id, cleanupArchiveId: n.cleanupArchiveId }))
 
   // Edges are pruned against the canvas as it will be AFTER the adoption, not as it is now —
   // otherwise the rope the server wrote with the node it just opened would be pruned as dangling
@@ -117,9 +122,27 @@ export function planServerChange(input: ServerChangeInput): ServerChangePlan {
 
   return {
     added,
+    cleanupChanges,
     ropes: ropes.edges,
     bridges: bridges.edges,
     ropesChanged: ropes.changed,
     bridgesChanged: bridges.changed
   }
+}
+
+/** Apply the operator's archive/undo to a mounted canvas without replacing local geometry,
+ * titles or terminal identity. Hidden cards cannot remain selected for a bulk UI delete. */
+export function applyCleanupChanges<N extends { id: string; hidden?: boolean; selected?: boolean; data: { cleanupArchiveId?: string } }>(
+  nodes: N[], changes: ServerChangePlan['cleanupChanges']
+): N[] {
+  const markers = new Map(changes.map(n => [n.id, n.cleanupArchiveId]))
+  let changed = false
+  const next = nodes.map(n => {
+    if (!markers.has(n.id) || n.data.cleanupArchiveId === markers.get(n.id)) return n
+    changed = true
+    const marker = markers.get(n.id)
+    return { ...n, hidden: !!marker, selected: marker ? false : n.selected,
+      data: { ...n.data, cleanupArchiveId: marker } }
+  })
+  return changed ? next : nodes
 }

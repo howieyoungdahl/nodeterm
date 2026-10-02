@@ -79,6 +79,7 @@ export const COLLAPSED_HEIGHT = 40
 
 /** User data carried in the React Flow node's data field. */
 export interface NodeData {
+  cleanupArchiveId?: string
   title: string
   /**
    * Agent nodes only: while true (the default for agent nodes), the title auto-tracks the
@@ -2170,6 +2171,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       id: n.id,
       // Default to 'terminal' for nodes saved before the kind field existed.
       type: n.kind ?? 'terminal',
+      hidden: !!n.cleanupArchiveId,
       ...((n.kind ?? 'terminal') === 'group' ? { dragHandle: '.group-node__label' } : {}),
       position: n.position,
       width: n.size.width,
@@ -2178,6 +2180,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       ...(n.parentId ? { parentId: n.parentId, extent: 'parent' as const } : {}),
       data: {
         title: n.title,
+        cleanupArchiveId: n.cleanupArchiveId,
         // Default true for older agent nodes saved before titleAuto existed, so they start
         // tracking the session name; non-agent nodes ignore it.
         titleAuto: n.titleAuto ?? true,
@@ -2268,6 +2271,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
             : n.measured?.height ?? n.height ?? sizeFor(kind).height
         },
         title: n.data.title,
+        cleanupArchiveId: n.data.cleanupArchiveId,
         titleAuto: n.data.titleAuto,
         color: n.data.color,
         group: n.data.group,

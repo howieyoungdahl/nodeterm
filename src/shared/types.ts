@@ -334,6 +334,8 @@ export interface PendingLaunch {
 }
 
 export interface CanvasNodeState {
+  /** Operator cleanup archives presentation only; the exact original ID/backend/history remain. */
+  cleanupArchiveId?: string
   id: string
   kind: NodeKind
   position: { x: number; y: number }

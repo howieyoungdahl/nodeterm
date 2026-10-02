@@ -158,7 +158,7 @@ import {
   decideExternalChange,
   mergeIncomingNodes
 } from '../lib/externalChange'
-import { planServerChange } from '../lib/serverChange'
+import { applyCleanupChanges, planServerChange } from '../lib/serverChange'
 import {
   CONTENT_ADD_ITEMS,
   contentAddItemsToMenuItems,
@@ -2240,6 +2240,7 @@ export function Canvas() {
               title: n.data.title ?? n.id,
               color: n.data.color ?? '#888',
               agentId: n.data.agentId,
+              cleanupArchiveId: n.data.cleanupArchiveId,
               // The node's creation-time account, for the sidebar row's account chip (the
               // serialized nodes of inactive projects carry it already).
               accountId: n.data.accountId,
@@ -2846,6 +2847,12 @@ export function Canvas() {
         }))
       })
       const adopted = adoptNodesSilently(plan.added)
+      const cleanupNodes = applyCleanupChanges(nodesRef.current, plan.cleanupChanges)
+      const cleanupChanged = cleanupNodes !== nodesRef.current
+      if (cleanupChanged) {
+        nodesRef.current = cleanupNodes
+        setNodes(cleanupNodes)
+      }
       // Only when the merge actually moved something: a fresh array of identical edges re-renders
       // every edge on the canvas (displayEdges recomputes colour and the waiting look per edge)
       // for no change at all, and these arrive in bursts.
@@ -2872,7 +2879,7 @@ export function Canvas() {
       // The merged canvas is not yet what is on disk (the server wrote its half, we hold the
       // union), so it has to be saved. Both sides converge on the same state — the same "two
       // clients saving one converged canvas is harmless" model the peer-mutation path relies on.
-      if (adopted || plan.ropesChanged || plan.bridgesChanged) bumpDirty()
+      if (adopted || cleanupChanged || plan.ropesChanged || plan.bridgesChanged) bumpDirty()
       // `node-created`, Server Edition side: an agent opened these through the headless factory.
       // Same trigger, same engine, same refusals — the only difference is which shell created the
       // card. Deferred for the same reason as the desktop path: the adopt is a `setNodes`.
@@ -2881,7 +2888,7 @@ export function Canvas() {
         queueMicrotask(() => void runLayoutTriggerRef.current?.('node-created', created))
       }
     })
-  }, [adoptNodesSilently, setControlEdges, setLinkEdges, bumpDirty])
+  }, [adoptNodesSilently, setNodes, setControlEdges, setLinkEdges, bumpDirty])
 
   // One-shot note after an on-disk migration (dismissible, non-blocking strip). Both kinds change
   // where the user's data lives, so neither may happen silently.
