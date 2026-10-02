@@ -9,6 +9,7 @@ import { createCleanupPersistence } from '../core/session-cleanup-persistence'
 import { FileCleanupReservations } from '../core/session-cleanup-reservations'
 import { cleanupReaperGuards } from '../core/session-cleanup-protection'
 import { CleanupActivity, createCleanupProbe } from '../core/session-cleanup-probe'
+import { createCleanupStartupWitness } from '../core/session-cleanup-generation'
 import { sessionName } from '../core/tmux-naming'
 import { createOperatorConversationApi } from './operator-conversation-api'
 
@@ -221,7 +222,8 @@ export async function startServer(
 
   // Core services — same construction + registration order as src/main/index.ts.
   const settingsStore = new SettingsStore()
-  const cleanupActivity = new CleanupActivity()
+  const cleanupActivity = new CleanupActivity((id, claim) =>
+    createCleanupStartupWitness(() => ptyManager.getTmuxBin(), cleanupActivity.bootId)(id, claim))
   const ptyManager = new PtyManager({ cleanupBootId: cleanupActivity.bootId })
   // The local save rescue (WorkspaceStore.rescueOmittedLocalNodes). `workspace:save` is a whole-
   // workspace last-writer-wins write and local projects have no conflict machinery, so one browser
@@ -556,7 +558,7 @@ export async function startServer(
     onRegistration: (agentId, nodeId, verified) =>
       canvasControl?.onHookRegistration(agentId, nodeId, verified),
     onEvent: (event) => {
-      cleanupActivity.observe(event)
+      void cleanupActivity.observe(event)
       canvasControl?.onAgentEvent(event)
     },
     onSessionHook: (agentId, nodeId, payload, verified, transcriptPath) =>

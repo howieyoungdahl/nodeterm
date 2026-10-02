@@ -51,6 +51,9 @@ export interface NormalizedAgentEvent {
   sessionPhase?: 'start' | 'end'
   /** Explicit startup only; cleanup additionally checks a current-boot OS process marker. */
   freshSession?: boolean
+  /** Managed hook's pre-dispatch local Codex PID:birth stamp. Set by the hook server only;
+   * cleanup also requires verified identity and a matching live foreground generation. */
+  cleanupProcess?: string
   // subagent
   toolUseId?: string
   subagentType?: string

@@ -7,6 +7,7 @@ import { platform } from '../platform'
 import { hookSockPath } from './hook-sock-path'
 import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
+import { validCleanupProcess } from '../session-cleanup-generation'
 import { classifyClaudeConfigDir, configDirFromTranscriptPath } from '../claude-accounts-core'
 import { claudeAccountsSnapshot } from '../claude-config-dir'
 import type { CodexIdentityEvent, ObservedClaudeAccount } from '../../shared/types'
@@ -766,12 +767,15 @@ class HookServer {
           // those agents have their own identity spine).
           const account = observedClaudeAccount(agentId, payload)
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
+          // Only the authenticated managed transport can supply a sender generation label.
+          const cleanupProcess = verified && agentId === 'codex' && clientRevision !== undefined && clientRevision >= 5 &&
+            validCleanupProcess(form.nodeterm_cleanup_process) ? form.nodeterm_cleanup_process : undefined
           const submittedPromptSha256 = verified && normalized?.newTurn === true &&
               typeof payload.prompt === 'string'
             ? createHash('sha256').update(submittedPromptForHash(agentId, payload.prompt).replace(/\r\n/g, '\n')).digest('hex')
             : undefined
           if (normalized && this.listener)
-            this.listener({ ...normalized, verified, clientRevision,
+            this.listener({ ...normalized, verified, clientRevision, ...(cleanupProcess ? { cleanupProcess } : {}),
               ...(submittedPromptSha256 ? { submittedPromptSha256 } : {}), ...(account ? { account } : {}) })
         }
         res.writeHead(204)

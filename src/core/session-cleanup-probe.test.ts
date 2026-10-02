@@ -3,21 +3,63 @@ import { CleanupActivity, cleanupProcessWork, completedCodexScreen, type Cleanup
 const screen = 'Review finished\n  Worked for 47m 50s • 23:08\n\n\n› Ask Codex to do anything\n\n GPT-6.1-Sol xhigh\n ? for shortcuts'
 const p = (pid: number, ppid: number, command: string): CleanupProcess => ({ pid, ppid, command, birth: '1234' })
 describe('cleanup completion and live work evidence', () => {
-  it('never treats missing or resumed child history as an empty inventory', () => {
-    const a=new CleanupActivity()
-    expect(a.covered('n','s')).toBe(false)
+  it('never treats missing or resumed child history as an empty inventory', async () => {
+    const a=new CleanupActivity(async (_, claim) => ({generation:'g',process:claim}))
+    expect(a.covered('n','s','g')).toBe(false)
     a.observe({nodeId:'n',agentId:'codex',kind:'state',state:'done',sessionId:'s',verified:true})
-    expect(a.covered('n','s')).toBe(false)
+    expect(a.covered('n','s','g')).toBe(false)
     a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:false,verified:true})
-    expect(a.covered('n','s')).toBe(false)
+    expect(a.covered('n','s','g')).toBe(false)
     a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:false})
-    expect(a.covered('n','s')).toBe(false)
+    expect(a.covered('n','s','g')).toBe(false)
     a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:true})
-    expect(a.covered('n','s')).toBe(true);expect(a.covered('n','other')).toBe(false)
+    expect(a.covered('n','s','g')).toBe(false) // Legacy hooks have no sender process stamp.
+    await a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:true,cleanupProcess:'10:1234'})
+    expect(a.covered('n','s','g')).toBe(false) // Unknown/resumed first observation cannot be repaired by a label.
+    await a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'fresh',sessionPhase:'start',freshSession:true,verified:true,cleanupProcess:'10:1234'})
+    expect(a.covered('n','fresh','g')).toBe(true);expect(a.covered('n','other','g')).toBe(false)
+    expect(a.covered('n','fresh','replacement')).toBe(false)
     a.observe({nodeId:'n',agentId:'codex',kind:'subagent-start',toolUseId:'child'})
     a.observe({nodeId:'n',agentId:'codex',kind:'session',sessionId:'s',sessionPhase:'end'})
-    expect(a.pending('n')).toBe(1);expect(a.covered('n','s')).toBe(false)
-    expect(new CleanupActivity().covered('n','s')).toBe(false)
+    expect(a.pending('n')).toBe(1);expect(a.covered('n','s','g')).toBe(false)
+    expect(new CleanupActivity().covered('n','s','g')).toBe(false)
+  })
+  it('does not enroll a delayed old startup against a replacement sender', async () => {
+    const a=new CleanupActivity(async () => ({generation:'new',process:'11:9999'}))
+    await a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'old',sessionPhase:'start',freshSession:true,verified:true,cleanupProcess:'10:1234'})
+    expect(a.covered('n','old','new')).toBe(false)
+  })
+  it('fences an asynchronous startup witness when another lifecycle arrives', async () => {
+    let finish!: (value:{generation:string;process:string})=>void
+    const a=new CleanupActivity(() => new Promise(resolve => {finish=resolve}))
+    const pending=a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:true,cleanupProcess:'10:1234'})
+    expect(a.covered('n','s','g')).toBe(false)
+    await a.observe({nodeId:'n',agentId:'codex',kind:'session',sessionId:'s',sessionPhase:'end'})
+    finish({generation:'g',process:'10:1234'});await pending
+    expect(a.covered('n','s','g')).toBe(false)
+  })
+  it('never reuses a repeated old startup and retains outstanding child IDs', async () => {
+    const a=new CleanupActivity(async (_,claim)=>({generation:'g',process:claim}))
+    const start={nodeId:'n',agentId:'codex' as const,kind:'state' as const,sessionId:'s',sessionPhase:'start' as const,freshSession:true,verified:true,cleanupProcess:'10:1234'}
+    await a.observe(start);expect(a.covered('n','s','g')).toBe(true)
+    await a.observe({nodeId:'n',agentId:'codex',kind:'subagent-start',toolUseId:'child'})
+    await a.observe(start)
+    expect(a.covered('n','s','g')).toBe(false);expect(a.pending('n')).toBe(1)
+  })
+  it.each(['', '0:1234', '10:bad', '10:1234\n', '10:1234:5678'])('refuses malformed process stamp %j', async cleanupProcess => {
+    const a=new CleanupActivity(async (_,claim)=>({generation:'g',process:claim}))
+    await a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:true,cleanupProcess})
+    expect(a.covered('n','s','g')).toBe(false)
+  })
+  it('an unreadable foreground witness stays unknown', async () => {
+    const a=new CleanupActivity(async ()=>{throw new Error('unreadable')})
+    await a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:true,cleanupProcess:'10:1234'})
+    expect(a.covered('n','s','g')).toBe(false)
+  })
+  it('requires authenticated identity even with a valid first sender stamp', async () => {
+    const a=new CleanupActivity(async (_,claim)=>({generation:'g',process:claim}))
+    await a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:false,cleanupProcess:'10:1234'})
+    expect(a.covered('n','s','g')).toBe(false)
   })
   it('recognizes the completed Codex review with a live idle shell and persistent helper', () => {
     expect(completedCodexScreen(screen)).toBe(true)
