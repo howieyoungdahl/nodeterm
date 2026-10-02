@@ -145,6 +145,7 @@ export function wireAgentStatus(
     } satisfies NormalizedAgentEvent
     pushForNode(IPC.agentStatus, nodeId, taskDoneEvent)
     recordAgentEvent(taskDoneEvent)
+    opts.onEvent?.(taskDoneEvent)
     subagentTail.finish(n.toolUseId)
     endSubagent(nodeId, n.toolUseId)
   }

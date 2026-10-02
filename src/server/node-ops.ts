@@ -244,7 +244,7 @@ export class ServerNodeOps {
       for (const project of workspace.projects) {
         if (project.ssh) continue
         for (const node of project.nodes) {
-          if (node.kind !== 'terminal') continue
+          if (node.kind !== 'terminal' || node.cleanupArchiveId) continue
           scanned += 1
           // Two definitive misses: the second is the mutation-boundary recheck. Any read failure
           // becomes `unknown`, never absence, and therefore cannot enter the deletion set.

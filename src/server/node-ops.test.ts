@@ -88,6 +88,12 @@ function harness(opts: {
 }
 
 describe('ServerNodeOps', () => {
+  it('never automatically removes an archived card or destroys its backend', async () => {
+    const h = harness({ nodes: [node('archive', 'terminal', { cleanupArchiveId: 'receipt' })], pane: { archive: false } })
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(h.workspace().projects[0].nodes).toHaveLength(1)
+    expect(h.destroyed).toEqual([])
+  })
   it(
     'inventories every card with pane liveness, normalized status, activity, group and owner',
     async () => {
