@@ -91,25 +91,17 @@ export function createCleanupProbe(deps: { tmuxBin(): string | null; status(node
       root.birth = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]
       if (!/^\d+$/.test(root.birth)) return unknown('process-generation-unavailable')
       const status = deps.status(node.id)
-      const shell = ['bash', 'zsh', 'sh', 'fish'].includes(command)
-      const emptyPrompt = /(?:^|\n)[^\n]*[$#%>]\s*$/.test(screen)
-      // A completed Codex review may have returned to its live shell. The exact completion
-      // footer supplies proof there too, even when a server restart lost current hook metadata.
-      const codexDone = completedCodexScreen(screen) &&
-        (command === 'codex' || node.agentId === 'codex' && shell && emptyPrompt)
+      // A shell's punctuation cannot establish an empty input buffer or distinguish a quiet
+      // read builtin. Require a live Codex foreground process, not a footer left in shell history.
+      const foreground = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[5])
+      const codexForeground = rows.some(r => r.pid === foreground &&
+        ['codex', 'nodeterm-codex'].includes(r.command))
+      const codexDone = codexForeground && completedCodexScreen(screen)
       const workChildren = cleanupProcessWork(Number(pid), rows, codexDone)
       const pending = !!status?.awaitingInput || deps.activity.pending(node.id) > 0 || !!node.pendingLaunch
-      const state = status?.state === 'waiting' ? 'waiting' : status?.state === 'blocked' ? 'blocked' :
+      const actualState = status?.state === 'waiting' ? 'waiting' : status?.state === 'blocked' ? 'blocked' :
         status?.state === 'working' ? 'active' : pending ? 'waiting' :
-        workChildren !== null && workChildren > 0 ? 'active' :
-        codexDone ? 'completed' :
-        'unknown'
-      // Shell prompt contents cannot reliably distinguish an unsent draft across shells.
-      // Accept an empty shell prompt line, never characters typed after its prompt delimiter.
-      const emptyShell = shell && workChildren === 0 && emptyPrompt && !node.pendingLaunch
-      const explicitDone = status?.state === 'done' && status.stateVerified && !status.restored && !status.idleInferred
-      const actualState = state === 'unknown' && !pending && emptyShell && (!node.agentId || explicitDone) &&
-        (!status?.state || explicitDone) ? (explicitDone ? 'completed' : 'idle-shell') : state
+        workChildren !== null && workChildren > 0 ? 'active' : codexDone ? 'completed' : 'unknown'
       const at = Math.max(Number(activity) * 1000, deps.lastActivity(node.id) ?? 0)
       const generation = `${TMUX_SOCKET}:${created}:${pane}:${pid}:${root.birth}`
       const check = await exec(bin, ['-L', TMUX_SOCKET, 'list-panes', '-s', '-t', target, '-F',
@@ -119,7 +111,8 @@ export function createCleanupProbe(deps: { tmuxBin(): string | null; status(node
       return { generation, activityAt: at, state: actualState, workChildren, pending,
         fingerprint: cleanupHash({ generation, at, attachedAt, screen, status, pending, workChildren,
           children: rows.filter(r => r.ppid === Number(pid)).map(r => [r.pid, r.command]) }),
-        reason: codexDone ? 'codex-completion-footer-and-empty-prompt' : `observed-${actualState}` }
+        reason: codexDone ? 'codex-completion-footer-and-empty-prompt' : actualState === 'unknown' &&
+          ['bash', 'zsh', 'sh', 'fish'].includes(command) ? 'shell-input-boundary-unproven' : `observed-${actualState}` }
     } catch { return unknown('probe-unavailable') }
   }
 }

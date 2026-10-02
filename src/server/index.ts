@@ -4,11 +4,12 @@ import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sw
 import { startTriggerService } from '../core/trigger-service'
 import path from 'path'
 import http from 'http'
-import { OperatorSessionBindings } from '../core/operator-session-bindings'
-import { CleanupReservations, SessionCleanup } from '../core/session-cleanup'
+import { SessionCleanup } from '../core/session-cleanup'
+import { createCleanupPersistence } from '../core/session-cleanup-persistence'
+import { FileCleanupReservations } from '../core/session-cleanup-reservations'
+import { cleanupReaperGuards } from '../core/session-cleanup-protection'
 import { CleanupActivity, createCleanupProbe } from '../core/session-cleanup-probe'
 import { sessionName } from '../core/tmux-naming'
-import { createOperatorConversationApi } from './operator-conversation-api'
 
 import { ServerPlatform } from './platform-server'
 import { Auth } from './auth'
@@ -559,13 +560,12 @@ export async function startServer(
     intervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
     sweep: (dryRun) => nodeOps.sweep(dryRun)
   })
-  const operatorBindings = new OperatorSessionBindings()
   const cleanupActivity = new CleanupActivity()
-  const cleanupReservations = new CleanupReservations()
+  const cleanupReservations = new FileCleanupReservations()
+  const cleanupPersistence = createCleanupPersistence(workspaceStore)
   const sessionCleanup = new SessionCleanup({
     dataDir: config.dataDir,
-    load: () => workspaceStore.load({ sideline: false }),
-    save: workspace => workspaceStore.save(workspace),
+    ...cleanupPersistence,
     exclusive: work => workspaceMutationQueue.run(work),
     probe: createCleanupProbe({ tmuxBin: () => ptyManager.getTmuxBin(), status: mirrorEntry,
       lastActivity: nodeLastActivityAt, activity: cleanupActivity }),
@@ -574,14 +574,10 @@ export async function startServer(
     publish: project => platform.broadcast(IPC.workspaceServerChange, project)
   })
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
-    onRegistration: (agentId, nodeId, verified) =>
-      canvasControl?.onHookRegistration(agentId, nodeId, verified),
     onEvent: (event) => {
       cleanupActivity.observe(event)
       canvasControl?.onAgentEvent(event)
-    },
-    onSessionHook: (agentId, nodeId, payload, verified, transcriptPath) =>
-      operatorBindings.observeHook(agentId, nodeId, payload, verified, transcriptPath)
+    }
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
@@ -882,12 +878,7 @@ export async function startServer(
   // for a Mac serving the browser UI, where available bytes are not the OS's pressure signal (see
   // hostMemReader). Kept identical to the desktop shell so the two cannot drift.
   const sessionReaper = createSessionReaper({
-    reserveKill: (_socket, name) => cleanupReservations.reserve([name]),
-    protectedSessions: async () => {
-      const receiptIds = await sessionCleanup.protectedNodeIds()
-      const workspace = await workspaceStore.load({ sideline: false })
-      return [...receiptIds.map(sessionName), ...workspace.projects.flatMap(p => p.nodes.filter(n => n.cleanupArchiveId).map(n => sessionName(n.id)))]
-    },
+    ...cleanupReaperGuards(config.dataDir, cleanupReservations, () => sessionCleanup.protectedNodeIds()),
     tmuxBin: () => ptyManager.getTmuxBin(),
     shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
   })
