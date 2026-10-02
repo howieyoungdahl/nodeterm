@@ -34,6 +34,20 @@ describe('safe session cleanup', () => {
     expect(r.dryRun).toBe(true); expect(r.plan.rows[0].eligible).toBe(true)
     expect(save).not.toHaveBeenCalled(); expect(await fs.readdir(dir)).toEqual([])
   })
+  it('refuses publication if its prepared inverse cannot be synced durably', async () => {
+    const open=fs.open.bind(fs)
+    const spy=vi.spyOn(fs,'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle=await open(...args)
+      if(String(args[0]).endsWith('.json') && args[1]==='r')
+        vi.spyOn(handle,'sync').mockRejectedValue(new Error('fixture-fsync-failure'))
+      return handle
+    })
+    try {
+      await expect(cleanup.archive(await request())).rejects.toThrow('fixture-fsync-failure')
+      expect(save).not.toHaveBeenCalled();expect(publish).not.toHaveBeenCalled()
+      expect(workspace.projects[0].nodes[0].cleanupArchiveId).toBeUndefined()
+    } finally { spy.mockRestore() }
+  })
   it.each(['active', 'waiting', 'blocked', 'unknown', 'dead'] as const)('preserves an old %s session', async state => {
     e.state = state; e.activityAt = now - 20 * CLEANUP_IDLE_MS
     expect((await cleanup.preview()).plan.rows.every(r => !r.eligible)).toBe(true)

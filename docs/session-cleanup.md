@@ -69,6 +69,15 @@ ineligible until a trusted shell input-boundary adapter exists. They are still
 listed for review. Restored, idle-inferred or explicit done metadata alone cannot
 provide that input proof; titles never supply it.
 
+Same-PID async children require continuous task-history coverage as well. Eligible
+Codex sessions need the private process marker injected by the current Server boot
+and an authenticated explicit `SessionStart` with `source: startup` and a matching
+session ID. Missing or unfamiliar lifecycle fields stay unknown. A restart,
+reconnect, resume or compaction never converts missing child history into zero.
+Lifecycle events never clear unfinished child IDs or recurring work. Inherited
+pre-rollout/pre-restart sessions remain listed with `child-history-unproven` and
+cannot be automatically archived. No old session is resumed to manufacture proof.
+
 Working, waiting, blocked, pending launch, unanswered input, child tasks and
 recurring activity veto eligibility. A done parent does not finish its children.
 Missing child-end or recurring evidence stays conservative. SSH, non-Linux,
@@ -85,7 +94,9 @@ Host writes share `WorkspaceMutationQueue`. Probes run outside that FIFO; sessio
 leases coordinate archive with the memory reaper without holding workspace writes
 over subprocess work. Cleanup operations also take an exclusive filesystem lock,
 never stolen automatically. Receipts in the private
-data directory precede project saves. A prepared or undo-prepared receipt is
+data directory precede project saves. Inverse receipt files and their Linux parent
+directories are synced before project publication; a sync failure refuses it.
+A prepared or undo-prepared receipt is
 retained after an uncertain/partial save and can be undone after restart. Invalid
 receipts or unknown targets refuse. Undo never recreates deleted IDs and never
 overrides a different archive marker. Later title/position edits survive.

@@ -3,6 +3,22 @@ import { CleanupActivity, cleanupProcessWork, completedCodexScreen, type Cleanup
 const screen = 'Review finished\n  Worked for 47m 50s • 23:08\n\n\n› Ask Codex to do anything\n\n GPT-6.1-Sol xhigh\n ? for shortcuts'
 const p = (pid: number, ppid: number, command: string): CleanupProcess => ({ pid, ppid, command, birth: '1234' })
 describe('cleanup completion and live work evidence', () => {
+  it('never treats missing or resumed child history as an empty inventory', () => {
+    const a=new CleanupActivity()
+    expect(a.covered('n','s')).toBe(false)
+    a.observe({nodeId:'n',agentId:'codex',kind:'state',state:'done',sessionId:'s',verified:true})
+    expect(a.covered('n','s')).toBe(false)
+    a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:false,verified:true})
+    expect(a.covered('n','s')).toBe(false)
+    a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:false})
+    expect(a.covered('n','s')).toBe(false)
+    a.observe({nodeId:'n',agentId:'codex',kind:'state',sessionId:'s',sessionPhase:'start',freshSession:true,verified:true})
+    expect(a.covered('n','s')).toBe(true);expect(a.covered('n','other')).toBe(false)
+    a.observe({nodeId:'n',agentId:'codex',kind:'subagent-start',toolUseId:'child'})
+    a.observe({nodeId:'n',agentId:'codex',kind:'session',sessionId:'s',sessionPhase:'end'})
+    expect(a.pending('n')).toBe(1);expect(a.covered('n','s')).toBe(false)
+    expect(new CleanupActivity().covered('n','s')).toBe(false)
+  })
   it('recognizes the completed Codex review with a live idle shell and persistent helper', () => {
     expect(completedCodexScreen(screen)).toBe(true)
     expect(cleanupProcessWork(10, [p(10, 1, 'bash'), p(11, 10, 'codex'), p(12, 11, 'codex-code-mode')], true)).toBe(0)

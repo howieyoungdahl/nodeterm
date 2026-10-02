@@ -23,8 +23,11 @@ describe.skipIf(process.platform !== 'linux' || !hasTmux)('actual disposable tmu
     const call = (...args: string[]) => exec('tmux', ['-L', TMUX_SOCKET, ...args], {timeout:4000})
     const disk = path.join(dir, 'workspace.json'), fixture = path.join(dir,'codex-fixture.cjs')
     const workspace: Workspace = { version:2, activeProjectId:'p', projects:[{id:'p',name:'P',color:'#888',viewport:{x:0,y:0,zoom:1},
-      nodes:[{id,kind:'terminal',agentId:'codex',title:'fixture',color:'#888',group:null,position:{x:0,y:0},size:{width:640,height:440}}]}] }
-    const probe = createCleanupProbe({tmuxBin:()=> 'tmux',status:()=>undefined,lastActivity:()=>undefined,activity:new CleanupActivity()})
+      nodes:[{id,kind:'terminal',agentId:'codex',agentSessionId:'fresh-fixture',title:'fixture',color:'#888',group:null,position:{x:0,y:0},size:{width:640,height:440}}]}] }
+    const originalActivity = new CleanupActivity()
+    originalActivity.observe({nodeId:id,agentId:'codex',kind:'state',state:'working',sessionId:'fresh-fixture',sessionPhase:'start',freshSession:true,verified:true})
+    const makeProbe = (activity: CleanupActivity) => createCleanupProbe({tmuxBin:()=> 'tmux',status:()=>undefined,lastActivity:()=>undefined,activity})
+    let probe = makeProbe(originalActivity)
     const observed = () => probe(workspace.projects[0],workspace.projects[0].nodes[0])
     const until = async (predicate: (e: Awaited<ReturnType<typeof observed>>) => boolean) => {
       const deadline = Date.now()+6000
@@ -34,16 +37,34 @@ describe.skipIf(process.platform !== 'linux' || !hasTmux)('actual disposable tmu
     try {
       // Synthetic CLI semantics, real foreground process / process tree / tmux screen. No provider call.
       await fs.writeFile(fixture, `process.title='codex'; console.log('cleanup-preserved-output\\nReview finished\\n  Worked for 47m 50s • 23:08\\n\\n› Ask Codex to do anything\\n'); process.stdin.resume(); process.stdin.on('data',()=>require('node:child_process').spawn('sleep',['60']));`)
-      await call('new-session','-d','-s',name,'-x','100','-y','30',process.execPath,fixture)
+      await call('new-session','-d','-s',name,'-x','100','-y','30','env',`NODETERM_CLEANUP_BOOT=${originalActivity.bootId}`,process.execPath,fixture)
       const initial = await until(e=>e.state==='completed' && e.workChildren===0)
       await fs.writeFile(disk,JSON.stringify(workspace))
       const cleanup = new SessionCleanup({dataDir:dir,now:()=>Date.now()+2*CLEANUP_IDLE_MS,
-        load:async()=>JSON.parse(await fs.readFile(disk,'utf8')),save:w=>writeFileAtomic(disk,JSON.stringify(w)),exclusive:w=>w(),probe})
+        load:async()=>JSON.parse(await fs.readFile(disk,'utf8')),save:w=>writeFileAtomic(disk,JSON.stringify(w)),exclusive:w=>w(),probe:(...args)=>probe(...args)})
       const preview = await cleanup.preview()
       expect(preview.plan.rows[0].eligible).toBe(true)
       const {receipt}=await cleanup.archive({planId:preview.plan.id,nodeIds:[id]})
       expect(JSON.parse(await fs.readFile(disk,'utf8')).projects[0].nodes[0].cleanupArchiveId).toBe(receipt.id)
       expect((await observed()).generation).toBe(initial.generation)
+      // Same-PID child work survives parent completion and cannot disappear after Server restart.
+      originalActivity.observe({nodeId:id,agentId:'codex',kind:'subagent-start',toolUseId:'internal-child',sessionId:'fresh-fixture'})
+      originalActivity.observe({nodeId:id,agentId:'codex',kind:'state',state:'done',sessionId:'fresh-fixture'})
+      expect((await cleanup.preview()).plan.rows[0].eligible).toBe(false)
+      const restarted = new CleanupActivity()
+      probe = makeProbe(restarted)
+      expect((await observed()).generation).toBe(initial.generation)
+      expect((await cleanup.preview()).plan.rows[0]).toMatchObject({eligible:false,evidence:{state:'unknown',pending:true,reason:'child-history-unproven'}})
+      restarted.observe({nodeId:id,agentId:'codex',kind:'state',state:'working',sessionId:'fresh-fixture',sessionPhase:'start',freshSession:false,verified:true})
+      expect((await cleanup.preview()).plan.rows[0].eligible).toBe(false)
+      // Even a spurious startup label cannot retrofit an inherited process's private boot marker.
+      restarted.observe({nodeId:id,agentId:'codex',kind:'state',state:'working',sessionId:'fresh-fixture',sessionPhase:'start',freshSession:true,verified:true})
+      await call('set-environment','-t',`=${name}`,'NODETERM_CLEANUP_BOOT',restarted.bootId)
+      expect((await cleanup.preview()).plan.rows[0].eligible).toBe(false)
+      probe = makeProbe(originalActivity)
+      originalActivity.observe({nodeId:id,agentId:'codex',kind:'state',sessionId:'fresh-fixture',sessionPhase:'start',freshSession:true,verified:true})
+      expect(originalActivity.pending(id)).toBe(1)
+      originalActivity.observe({nodeId:id,agentId:'codex',kind:'subagent-end',toolUseId:'internal-child',sessionId:'fresh-fixture'})
       expect((await call('capture-pane','-p','-t',target)).stdout).toContain('cleanup-preserved-output')
       await cleanup.undo(receipt.id)
       expect(JSON.parse(await fs.readFile(disk,'utf8'))).toEqual(workspace)

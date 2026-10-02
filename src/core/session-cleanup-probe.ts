@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import { promisify } from 'node:util'
+import { randomUUID } from 'node:crypto'
 import { cleanupHash, type CleanupEvidence } from './session-cleanup'
 import { sessionName, TMUX_SOCKET } from './tmux-naming'
 import type { CanvasNodeState, Project } from '../shared/types'
@@ -13,12 +14,19 @@ const unknown = (reason: string): CleanupEvidence => ({ generation: '', activity
 
 /** Current-boot child/recurring evidence. A completed parent does not finish its children. */
 export class CleanupActivity {
+  readonly bootId = randomUUID()
+  private readonly coveredSessions = new Map<string, string>()
   private revision = 0
   private readonly children = new Map<string, Set<string>>()
   private readonly recurring = new Set<string>()
   observe(e: NormalizedAgentEvent): void {
     this.revision++
-    if (e.kind === 'session' && e.sessionPhase) { this.children.delete(e.nodeId); this.recurring.delete(e.nodeId) }
+    if (e.sessionPhase) {
+      this.coveredSessions.delete(e.nodeId)
+      if (e.sessionPhase === 'start' && e.freshSession === true && e.verified === true && e.sessionId)
+        this.coveredSessions.set(e.nodeId, e.sessionId)
+      // A resume/reconnect/session boundary never finishes child IDs or recurring tasks.
+    }
     if (e.kind === 'subagent-start') {
       const set = this.children.get(e.nodeId) ?? new Set<string>()
       set.add(e.toolUseId ?? 'unknown-child'); this.children.set(e.nodeId, set)
@@ -28,6 +36,9 @@ export class CleanupActivity {
     if (e.kind === 'recurring' && !e.recurringEnd) this.recurring.add(e.nodeId)
   }
   pending(nodeId: string): number { return (this.children.get(nodeId)?.size ?? 0) + Number(this.recurring.has(nodeId)) }
+  covered(nodeId: string, sessionId: string | undefined): boolean {
+    return !!sessionId && this.coveredSessions.get(nodeId) === sessionId
+  }
   version(): number { return this.revision }
 }
 
@@ -97,13 +108,24 @@ export function createCleanupProbe(deps: { tmuxBin(): string | null; status(node
       const codexForeground = rows.some(r => r.pid === foreground &&
         ['codex', 'nodeterm-codex'].includes(r.command))
       const codexDone = codexForeground && completedCodexScreen(screen)
+      let covered = false, foregroundBirth = ''
+      if (codexForeground) {
+        const foregroundStat = await fs.readFile(`/proc/${foreground}/stat`, 'utf8')
+        foregroundBirth = foregroundStat.slice(foregroundStat.lastIndexOf(')') + 2).split(' ')[19]
+        if (!/^\d+$/.test(foregroundBirth)) return unknown('foreground-generation-unavailable')
+        // The private marker is injected into genuinely new OS processes by this Server boot.
+        // Updating tmux session env on attach cannot retrofit /proc/<pid>/environ of an old pane.
+        const environment = await fs.readFile(`/proc/${foreground}/environ`, 'utf8')
+        covered = environment.split('\0').includes(`NODETERM_CLEANUP_BOOT=${deps.activity.bootId}`) &&
+          deps.activity.covered(node.id, status?.sessionId ?? node.agentSessionId)
+      }
       const workChildren = cleanupProcessWork(Number(pid), rows, codexDone)
-      const pending = !!status?.awaitingInput || deps.activity.pending(node.id) > 0 || !!node.pendingLaunch
+      const pending = !covered || !!status?.awaitingInput || deps.activity.pending(node.id) > 0 || !!node.pendingLaunch
       const actualState = status?.state === 'waiting' ? 'waiting' : status?.state === 'blocked' ? 'blocked' :
-        status?.state === 'working' ? 'active' : pending ? 'waiting' :
-        workChildren !== null && workChildren > 0 ? 'active' : codexDone ? 'completed' : 'unknown'
+        status?.state === 'working' ? 'active' : workChildren !== null && workChildren > 0 ? 'active' :
+        !covered ? 'unknown' : pending ? 'waiting' : codexDone ? 'completed' : 'unknown'
       const at = Math.max(Number(activity) * 1000, deps.lastActivity(node.id) ?? 0)
-      const generation = `${TMUX_SOCKET}:${created}:${pane}:${pid}:${root.birth}`
+      const generation = `${TMUX_SOCKET}:${created}:${pane}:${pid}:${root.birth}:${foreground}:${foregroundBirth}`
       const check = await exec(bin, ['-L', TMUX_SOCKET, 'list-panes', '-s', '-t', target, '-F',
         '#{session_created}\t#{session_activity}\t#{window_activity}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}'], { timeout: 4000, maxBuffer: 64_000 })
       const lastScreen = await exec(bin, ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-J', '-S', '-80', '-t', pane], { timeout: 4000, maxBuffer: 128_000 })
@@ -111,7 +133,7 @@ export function createCleanupProbe(deps: { tmuxBin(): string | null; status(node
       return { generation, activityAt: at, state: actualState, workChildren, pending,
         fingerprint: cleanupHash({ generation, at, attachedAt, screen, status, pending, workChildren,
           children: rows.filter(r => r.ppid === Number(pid)).map(r => [r.pid, r.command]) }),
-        reason: codexDone ? 'codex-completion-footer-and-empty-prompt' : actualState === 'unknown' &&
+        reason: !covered && codexForeground ? 'child-history-unproven' : codexDone ? 'codex-completion-footer-and-empty-prompt' : actualState === 'unknown' &&
           ['bash', 'zsh', 'sh', 'fish'].includes(command) ? 'shell-input-boundary-unproven' : `observed-${actualState}` }
     } catch { return unknown('probe-unavailable') }
   }

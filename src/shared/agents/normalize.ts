@@ -49,6 +49,8 @@ export interface NormalizedAgentEvent {
   sessionTitle?: string
   // session lifecycle phase: 'start' resets to idle, 'end' resets + clears loop/fan-out
   sessionPhase?: 'start' | 'end'
+  /** Explicit startup only; cleanup additionally checks a current-boot OS process marker. */
+  freshSession?: boolean
   // subagent
   toolUseId?: string
   subagentType?: string
@@ -304,6 +306,7 @@ interface CodexPayload {
   hook_event_name?: string
   hookEventName?: string
   session_id?: string
+  source?: string
   prompt?: string
   tool_name?: string
   tool_input?: { prompt?: string; question?: string; questions?: { question?: string }[] }

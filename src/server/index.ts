@@ -221,7 +221,8 @@ export async function startServer(
 
   // Core services — same construction + registration order as src/main/index.ts.
   const settingsStore = new SettingsStore()
-  const ptyManager = new PtyManager()
+  const cleanupActivity = new CleanupActivity()
+  const ptyManager = new PtyManager({ cleanupBootId: cleanupActivity.bootId })
   // The local save rescue (WorkspaceStore.rescueOmittedLocalNodes). `workspace:save` is a whole-
   // workspace last-writer-wins write and local projects have no conflict machinery, so one browser
   // tab holding a stale node list can delete every card created since its snapshot — silently, and
@@ -539,7 +540,6 @@ export async function startServer(
     sweep: (dryRun) => nodeOps.sweep(dryRun)
   })
   const operatorBindings = new OperatorSessionBindings()
-  const cleanupActivity = new CleanupActivity()
   const cleanupReservations = new FileCleanupReservations()
   const cleanupPersistence = createCleanupPersistence(workspaceStore)
   const sessionCleanup = new SessionCleanup({

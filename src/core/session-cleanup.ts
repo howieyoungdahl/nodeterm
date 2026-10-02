@@ -114,7 +114,15 @@ export class SessionCleanup {
     return o as { planId: string; nodeIds: string[] }
   }
   private async write(receipt: CleanupReceipt): Promise<void> {
-    await writeFileAtomic(path.join(this.dir, `${receipt.id}.json`), JSON.stringify(receipt), { mode: 0o600 })
+    const file = path.join(this.dir, `${receipt.id}.json`)
+    await writeFileAtomic(file, JSON.stringify(receipt), { mode: 0o600 })
+    const handle = await fs.open(file, 'r')
+    try { await handle.sync() } finally { await handle.close() }
+    // Linux publication requires a durable inverse, including a newly created ledger directory.
+    if (process.platform !== 'win32') for (const dir of [this.dir, this.deps.dataDir]) {
+      const parent = await fs.open(dir, 'r')
+      try { await parent.sync() } finally { await parent.close() }
+    }
   }
   private async locked<T>(work: () => Promise<T>): Promise<T> {
     await fs.mkdir(this.dir, { recursive: true, mode: 0o700 })
