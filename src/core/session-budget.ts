@@ -413,6 +413,10 @@ export function hostMemReader(platform: NodeJS.Platform = process.platform): () 
 }
 
 export interface SessionReaperOpts {
+  /** Presentation archives retain their original backend. An unreadable ledger protects all. */
+  protectedSessions?: (socket: string) => Promise<Iterable<string>>
+  /** An archive and a reaper kill cannot hold the same session-scoped lease. */
+  reserveKill?: (socket: string, name: string) => (() => void) | null
   /** Lazy tmux binary resolver (PtyManager resolves after init; null = tmux unavailable → no-op). */
   tmuxBin: () => string | null
   /** tmux sockets to sweep. Default: the local socket + the SSH-remote socket — a host that serves
@@ -502,7 +506,9 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
 
   const listSocket = async (bin: string, socket: string): Promise<SessionInfo[] | null> => {
     try {
+      const protectedNames = new Set(await opts.protectedSessions?.(socket) ?? [])
       const listed = parseSessionList(await exec(bin, ['-L', socket, 'list-windows', '-a', '-F', LIST_FMT]))
+        .filter(s => !protectedNames.has(s.name))
       // Our own shadows are subtracted from tmux's client COUNT here, at the one place every
       // listing comes through, so the plan and the kill-time re-verify can never disagree about it
       // (a shadow attached between the two would otherwise resurrect the exemption). Re-read each
@@ -523,7 +529,7 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
     }
   }
 
-  const sweep = async (sweepOpts?: SweepOptions): Promise<number> => {
+  const sweepInternal = async (sweepOpts?: SweepOptions): Promise<number> => {
     if (cfg.disabled) return 0
     const bin = opts.tmuxBin()
     if (!bin) return 0
@@ -552,7 +558,11 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
       const stillDetached = new Set(fresh.filter((s) => s.clients === 0).map((s) => s.name))
       for (const name of names) {
         if (!stillDetached.has(name)) continue
+        const release = opts.reserveKill?.(socket, name)
+        if (release === null) continue
         try {
+          // Re-read protection while leased: an archive could have committed since `fresh`.
+          if (new Set(await opts.protectedSessions?.(socket) ?? []).has(name)) continue
           // `=` forces an exact target match — never tmux's prefix matching.
           await exec(bin, ['-L', socket, 'kill-session', '-t', `=${name}`])
           killed++
@@ -565,11 +575,12 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
           )
         } catch {
           // A vanished-in-between session or a kill failure changes nothing; next sweep re-plans.
-        }
+        } finally { release?.() }
       }
     }
     return killed
   }
+  const sweep = sweepInternal
 
   let timer: ReturnType<typeof setInterval> | null = null
   return {

@@ -408,6 +408,36 @@ describe('createSessionReaper (service)', () => {
     nowSec: () => NOW,
     log: () => {}
   }
+  it('protects archived backends under pressure and fails closed on unreadable protection', async () => {
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-archived', 0, OLD)] })
+    const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', sockets: [TMUX_SOCKET], exec: w.exec,
+      protectedSessions: async () => ['nt-archived'] })
+    expect(await reaper.sweep({ pressure: 'pty' })).toBe(0)
+    const unavailable = createSessionReaper({ ...base, tmuxBin: () => 'tmux', sockets: [TMUX_SOCKET], exec: w.exec,
+      protectedSessions: async () => { throw new Error('unreadable') } })
+    expect(await unavailable.sweep()).toBe(0)
+    expect(w.calls.filter(c => c.args.includes('kill-session'))).toEqual([])
+  })
+  it('rechecks archive protection at the kill boundary', async () => {
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-archived', 0, OLD)] })
+    let reads = 0
+    const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', sockets: [TMUX_SOCKET], exec: w.exec,
+      protectedSessions: async () => ++reads === 1 ? [] : ['nt-archived'] })
+    expect(await reaper.sweep()).toBe(0)
+    expect(reads).toBe(2)
+    expect(w.calls.filter(c => c.args.includes('kill-session'))).toEqual([])
+  })
+  it('refuses a cleanup lease and catches an archive after the fresh pane listing', async () => {
+    const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-archived',0,OLD)] })
+    const leased = createSessionReaper({ ...base,tmuxBin:()=> 'tmux',sockets:[TMUX_SOCKET],exec:w.exec,reserveKill:()=>null })
+    expect(await leased.sweep()).toBe(0)
+    let reads = 0, releases = 0
+    const late = createSessionReaper({ ...base,tmuxBin:()=> 'tmux',sockets:[TMUX_SOCKET],exec:w.exec,
+      reserveKill:()=>()=>{releases++}, protectedSessions:async()=>++reads===3?['nt-archived']:[] })
+    expect(await late.sweep()).toBe(0)
+    expect(reads).toBe(3); expect(releases).toBe(1)
+    expect(w.calls.filter(c=>c.args.includes('kill-session'))).toEqual([])
+  })
 
   it('sweeps every socket, kills planned sessions on the right socket with exact-match targets', async () => {
     const w = fakeWorld({
