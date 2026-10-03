@@ -80,7 +80,8 @@ describe('local save rescue', () => {
     initPlatform(fake)
     const store = new WorkspaceStore()
     store.registerIpc()
-    const save = (workspace: Workspace) => fake.handlers['workspace:save'](7, workspace)
+    const save = async (workspace: Workspace) => fake.handlers['workspace:save'](7,
+      { ...workspace, revision: (await store.load()).revision })
     await save(ws([project({ cwd: projRoot })]))
     const target = path.join(projRoot, '.nodeterm/project.json')
     const write = atomic.writeFileAtomic
@@ -174,8 +175,8 @@ describe('local save rescue', () => {
     store.registerIpc()
     // handleWithSender puts the sender id first — that is the whole point of the registration
     // change: with N browser tabs on one Server, the log has to name WHICH one truncated the list.
-    await fake.handlers['workspace:save'](3, ws([project({ cwd: projRoot })]))
-    await fake.handlers['workspace:save'](3, ws([project({ cwd: projRoot, nodes: [node('term-1')] })]))
+    await fake.handlers['workspace:save'](3, { ...ws([project({ cwd: projRoot })]), revision: (await store.load()).revision })
+    await fake.handlers['workspace:save'](3, { ...ws([project({ cwd: projRoot, nodes: [node('term-1')] })]), revision: (await store.load()).revision })
     expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toContain('(client ui:3)')
   })
 

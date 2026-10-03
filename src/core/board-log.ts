@@ -142,6 +142,22 @@ export class BoardLogStore {
     }
   }
 
+  /** Local outbox publication. Reading and appending are synchronous in one event-loop turn;
+   * stable receipt IDs make a crash after append but before acknowledgment safe to retry. */
+  async appendOnce(cwd: string, entry: BoardLogEntry): Promise<boolean> {
+    if (this.remote) return false
+    for (const file of [this.localPath(cwd), `${this.localPath(cwd)}.1`]) {
+      try {
+        const stat = fs.statSync(file)
+        if (stat.size > MAX_BOARD_LOG_BYTES * 2) return false
+        if (parseLines(fs.readFileSync(file, 'utf8'), { all: true }).some((e) => e.id === entry.id)) return true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false
+      }
+    }
+    return this.append(cwd, entry)
+  }
+
   /**
    * Move the log aside when this append would take it past `MAX_BOARD_LOG_BYTES`.
    *

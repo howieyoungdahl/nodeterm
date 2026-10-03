@@ -43,6 +43,7 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
     title: (n.data.title as string) ?? '',
     color: (n.data.color as string) ?? NODE_COLORS[0],
     kind: 'terminal',
+    organization: n.data.organization,
     agentId: n.data.agentId as string | undefined,
     // What the card modal's co-attach terminal needs to join THIS node's session the same way the
     // canvas TerminalNode does.

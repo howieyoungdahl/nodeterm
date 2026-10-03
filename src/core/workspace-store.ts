@@ -1,15 +1,15 @@
 import { promises as fs } from 'fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'path'
 import { renameAtomic, writeFileAtomic } from './fs-atomic'
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import {
   DEFAULT_PROJECT_ID, EMPTY_WORKSPACE,
-  type BridgeLink, type CanvasNodeState, type Project, type Workspace, type WorkspaceV1
+  type BridgeLink, type CanvasNodeState, type Project, type Workspace, type WorkspaceV1, type WorkspaceSaveAck
 } from '../shared/types'
 import {
-  PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, resolveNodes, sameProjectContent,
+  PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, projectFileRevision, resolveNodes, sameProjectContent,
   sanitizeLayoutRulesBlock, sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
@@ -25,6 +25,7 @@ import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 import { collisionSeed, derivedProjectId, freshProjectId } from '../shared/project-id'
 import { appendProjectNode, removeProjectNode, type RemoteNodeInput } from './project-node-append'
+import { parseOrganizationPolicy, sanitizeOrganizationNodes } from '../shared/kanban-organization'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
  *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
@@ -184,6 +185,8 @@ export class WorkspaceStore {
   private index: WorkspaceIndexV3 | null = null
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
   onPersist?: () => void
+  /** Server browser writes share the same admission FIFO as operator/agent transactions. */
+  clientMutationRunner?: <T>(work: () => Promise<T>) => Promise<T>
 
   constructor(
     private remoteIO?: RemoteWorkspaceIO,
@@ -201,8 +204,10 @@ export class WorkspaceStore {
     // handleWithSender, not handle: the save rescue's log line has to name WHICH client published
     // the truncated node list. With N browser tabs on one Server there is otherwise no way to tell
     // a stale tab from the one the user is looking at, and that was the whole diagnosis problem.
-    platform().handleWithSender(IPC.workspaceSave, (senderId: number, workspace: Workspace) =>
-      this.save(workspace, { client: `ui:${senderId}` }))
+    platform().handleWithSender(IPC.workspaceSave, (senderId: number, workspace: Workspace) => {
+      const work = () => this.save(workspace, { client: `ui:${senderId}`, requireRevision: true })
+      return this.clientMutationRunner ? this.clientMutationRunner(work) : work()
+    })
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
     platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
       typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
@@ -222,9 +227,50 @@ export class WorkspaceStore {
    * a phone can trigger mid git-merge) pass false so a conflict-marked file is left hand-resolvable.
    */
   async load(opts?: { sideline?: boolean }): Promise<Workspace> {
-    const result = await this.loadInner(opts?.sideline ?? true)
-    this.onPersist?.()
-    return result
+    const run = this.saveChain.then(async () => {
+      const sideline = opts?.sideline ?? true
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let before: string | undefined
+        try { before = await this.storageRevision() }
+        catch (error) {
+          // A default load may safely sideline a corrupt index. Other failures remain failures.
+          if (!(error instanceof SyntaxError)) throw error
+          if (!sideline) throw new Error('workspace_unreadable', { cause: error })
+        }
+        const result = await this.loadInner(sideline)
+        const revision = await this.storageRevision()
+        if (before !== revision) continue
+        this.onPersist?.()
+        return { ...result, revision }
+      }
+      throw new Error('workspace_conflict: storage changed during load; reload before saving')
+    })
+    this.saveChain = run.catch(() => {})
+    return run
+  }
+
+  /** Read failures reject. Only ENOENT is definite absence. The digest includes background files. */
+  private async storageRevision(expected?: { index: string; files: Map<string, string> }): Promise<string> {
+    const read = async (file: string): Promise<string | null> => {
+      try { return await fs.readFile(file, 'utf8') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+    }
+    const raw = await read(this.indexPath)
+    if (expected && raw !== expected.index) throw new Error('workspace_conflict: index changed during save')
+    const digest = createHash('sha256').update(JSON.stringify(raw))
+    if (raw !== null) {
+      const parsed = JSON.parse(raw) as WorkspaceIndexV3
+      if (parsed.version === 3) {
+        if (!Array.isArray(parsed.entries)) throw new Error('workspace_unreadable')
+        for (const cwd of [...new Set(parsed.entries.filter((e) => e.cwd).map((e) => e.cwd!))].sort()) {
+          const file = projectFilePath(cwd)
+          const content = await read(file)
+          if (expected?.files.has(file) && content !== expected.files.get(file)) throw new Error('workspace_conflict: project changed during save')
+          digest.update(JSON.stringify([cwd, content]))
+        }
+      }
+    }
+    return digest.digest('hex')
   }
 
   private async loadInner(sideline: boolean): Promise<Workspace> {
@@ -234,7 +280,8 @@ export class WorkspaceStore {
     let raw: string
     try {
       raw = await fs.readFile(this.indexPath, 'utf-8')
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       // No index. Usually a first run — but it is also what a crash BETWEEN the sideline rename
       // below and the next index write leaves behind, and that case owes the user the note. Only
       // this branch pays for the readdir, and only for a load that may touch disk anyway.
@@ -245,6 +292,7 @@ export class WorkspaceStore {
     try {
       parsed = JSON.parse(raw)
     } catch {
+      if (!sideline) throw new Error('workspace_unreadable')
       // Same rule as a corrupt project.json: sideline the only copy so the boot flow's
       // unconditional save cannot replace it with an empty index. Read-only callers must not
       // mutate the disk (sideline: false).
@@ -298,7 +346,7 @@ export class WorkspaceStore {
         // same kanban shape guard here — a v1/hand-edited board would otherwise crash the render —
         // and the same trigger shape rule (workspace.json is hand-editable input too).
         const { kanban, ...rest } = e.project
-        const base = validKanban(kanban) ? e.project : rest
+        const base: Project = validKanban(kanban) ? e.project : rest
         // …and the same rule for the shared layout-rule block, which reaches the layout engine and
         // therefore must not arrive unvalidated on the one load path that skips fileToProject.
         const layoutRules = sanitizeLayoutRulesBlock(base.layoutRules)
@@ -308,7 +356,9 @@ export class WorkspaceStore {
           project: {
             ...withoutRules,
             ...(layoutRules ? { layoutRules } : {}),
-            nodes: sanitizeNodeTriggers(base.nodes)
+            nodes: sanitizeOrganizationNodes(sanitizeNodeTriggers(base.nodes), base.kanban),
+            ...(parseOrganizationPolicy(base.kanbanOrganization) ? { kanbanOrganization: parseOrganizationPolicy(base.kanbanOrganization) } : { kanbanOrganization: undefined }),
+            revision: createHash('sha256').update(JSON.stringify(e.project)).digest('hex')
           }
         })
       } else if (e.cwd) {
@@ -880,14 +930,33 @@ export class WorkspaceStore {
    *  projects went blank after tab switching" wipe. */
   private saveChain: Promise<unknown> = Promise.resolve()
 
-  save(workspace: Workspace, opts?: { client?: string }): Promise<void> {
+  save(workspace: Workspace, opts?: { client?: string; requireRevision?: boolean }): Promise<WorkspaceSaveAck> {
     // Stamped BEFORE the chain hop, so the receipt can report how long this save waited behind
     // the saves already queued ahead of it — the "card minted, receipt 55 s later" field reports
     // never said whether the lag was queueing or the write itself.
     const enqueuedAt = Date.now()
-    const run = this.saveChain.then(() =>
-      this.saveNow(workspace, opts?.client ?? 'internal', enqueuedAt)
-    )
+    const run = this.saveChain.then(async () => {
+      if (opts?.requireRevision && !workspace.revision) throw new Error('workspace_conflict: loaded revision required')
+      if (workspace.revision && workspace.revision !== await this.storageRevision()) throw new Error('workspace_conflict: storage changed; reload before saving')
+      await this.saveNow(workspace, opts?.client ?? 'internal', enqueuedAt)
+      const written = new Map<string, string>()
+      for (const p of workspace.projects) {
+        if (p.unavailable || p.remote || p.ssh || !p.cwd) continue
+        const file = projectFilePath(p.cwd)
+        const content = this.lastWritten.get(file)
+        if (content !== undefined) written.set(file, content)
+      }
+      const revision = await this.storageRevision(this.index ? { index: JSON.stringify(this.index), files: written } : undefined)
+      const projectRevisions: Record<string, string> = {}
+      for (const p of workspace.projects) {
+        const e = this.index?.entries.find((entry) => entry.id === p.id)
+        const file = e?.cwd ? this.lastWritten.get(projectFilePath(e.cwd)) : undefined
+        const rev = file ? projectFileRevision(JSON.parse(file)) : e?.cache ? projectFileRevision(e.cache) :
+          e?.project ? createHash('sha256').update(JSON.stringify(e.project)).digest('hex') : undefined
+        if (rev) { p.revision = rev; projectRevisions[p.id] = rev }
+      }
+      return { revision, projectRevisions }
+    })
     this.saveChain = run.catch(() => {})
     return run
   }
@@ -1079,7 +1148,12 @@ export class WorkspaceStore {
     // No `localExec`: this folder is being ADOPTED (its project.json may have been cloned from
     // anywhere), so its nodes come up with no custom shell and no extra ssh args — the safe
     // defaults. Only values this machine typed itself are ever restored (@shared/node-exec).
-    return read ? fileToProject(read.file, { id: freshProjectId(), cwd: folder }) : null
+    if (!read) return null
+    const project = fileToProject(read.file, { id: freshProjectId(), cwd: folder })
+    // A cloned/imported file supplies content, never another project's management receipts.
+    project.nodes = project.nodes.map(({ organization: _origin, ...node }) => node)
+    delete project.kanbanOrganization
+    return project
   }
 
   /**

@@ -252,7 +252,9 @@ describe('HeadlessNodeFactory', () => {
     // The card is genuinely lost, not merely unsaved: no UI client holds this pane, so nobody
     // else is going to write it back. That is the only shape recovery may act on.
     expect(pty.hasAttachedClient(nodeId)).toBe(false)
-    await store.save(staleBrowserSnapshot)
+    await expect(store.save(staleBrowserSnapshot)).rejects.toThrow('workspace_conflict')
+    // Legacy/external writers have no revision envelope. Recovery remains required for them.
+    await store.save({ ...staleBrowserSnapshot, revision: undefined })
     expect((await store.load({ sideline: false })).projects[0].nodes
       .some((node) => node.id === nodeId)).toBe(false)
 
@@ -284,7 +286,8 @@ describe('HeadlessNodeFactory', () => {
     const staleBrowserSnapshot = await store.load({ sideline: false })
     const opened = await factory.openTerminal('term-source', {}, true)
     const nodeId = (opened.result as { id: string }).id
-    await store.save(staleBrowserSnapshot)
+    await expect(store.save(staleBrowserSnapshot)).rejects.toThrow('workspace_conflict')
+    await store.save({ ...staleBrowserSnapshot, revision: undefined })
     const before = (await store.load({ sideline: false })).projects[0].nodes
     expect(before.some((node) => node.id === nodeId)).toBe(false)
 

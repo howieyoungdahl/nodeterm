@@ -54,6 +54,7 @@ export function appendBoardLogVia(
  *  performs, sharing the one `localStore`. */
 export interface BoardLogHandlers {
   append(projectId: string, entry: BoardLogEntry): Promise<boolean>
+  appendOnce?(projectId: string, entry: BoardLogEntry): Promise<boolean>
 }
 
 export function registerBoardLogHandlers(platform: CorePlatform, router: BoardLogRouter): BoardLogHandlers {
@@ -131,6 +132,10 @@ export function registerBoardLogHandlers(platform: CorePlatform, router: BoardLo
   // The in-process append: shares this registration's router + localStore, so a main-side writer and
   // the IPC handler can never route a project's log differently.
   return {
+    appendOnce: (projectId, entry) => {
+      const route = router.route(projectId)
+      return route.kind === 'local' ? localStore.appendOnce(route.cwd, entry) : Promise.resolve(false)
+    },
     append: (projectId: string, entry: BoardLogEntry): Promise<boolean> =>
       appendBoardLogVia(router, projectId, entry, localStore)
   }

@@ -133,6 +133,8 @@ export interface HeadlessNodeFactoryDeps {
 export interface HeadlessNodeOwner {
   sourceNodeId: string
   projectId: string
+  /** Server-observed explicit opt-in at NEW creation. Never read from project content. */
+  assistantCreationId?: string
 }
 
 export interface HeadlessNodeOwnership {

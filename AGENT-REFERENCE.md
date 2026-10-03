@@ -150,8 +150,11 @@ hooks from replacing a resumed rollout. Recognized authenticated parent hooks ca
   whole-file, snapshot, item, cache and concurrent-read caps still apply. The disposable hook HTTP
   regression must read after the first hook, without a later `Stop` concealing path loss.
   `SpawnHandlerState` synchronously observes both serialized preparation and parallel external
-  launches, so health remains readable while its oldest operation is wedged. No operator verb
-  creates, sends, or renames, and the surface is Server-only (Desktop/Mobile N/A).
+  launches, so health remains readable while its oldest operation is wedged. Management node
+  creation and rename/resize have separate strict `/opsapi/nodes` routes. Assistant organization
+  is an explicit creation opt-in, attested by the private creator ledger and durable journal;
+  descriptive metadata never grants creator or conversation authority. Management HTTP is
+  Server-only; shared metadata, board intent and revision handling also run on Desktop.
 - **`src/preload/`** — the only bridge. `index.ts` uses `contextBridge` to expose a
   narrow API on `window.nodeTerminal` (typed in `index.d.ts`). `contextIsolation` is on,
   `nodeIntegration` off.
@@ -241,6 +244,20 @@ Persistence has two layers:
   `core/workspace-watcher.ts` → silent reload, or a Reload/Keep-mine conflict bar when dirty; they
   ride `workspace:external-change`, and so do the phone's `appendRemoteNode` and the SSH
   reconcile, which really are "another device".
+  **Whole-workspace revision fencing:** loads include a digest of the exact index and every local
+  referenced project file; management CAS additionally uses each project's content digest.
+  Browser/Electron `workspace:save` requires that loaded/acknowledged evidence. The check runs
+  inside `WorkspaceStore.saveChain`, before any fan-out write, and Server browser saves enter the
+  same `WorkspaceMutationQueue` as operator/agent transactions. Missing evidence, stale tabs,
+  same-counter external edits and background-project changes reject with `workspace_conflict`.
+  A failed read is never an empty workspace or an acknowledgment. Renderer saves queue snapshots
+  after the previous acknowledgment. Conflicts suspend autosave/creation flush, retain edits and
+  expose explicit Reload/Keep local edits across all projects. The runtime board baseline allows
+  independent manual choices to merge; repeated choices carry distinct manual versions. Ordered
+  organization broadcasts merge only the affected saved content and advance evidence through a
+  before/after digest chain. Missed/out-of-order broadcasts cannot advance it and force reload.
+  Runtime revision/baseline/publication fields never enter project/index content. SSH's remote
+  reconciliation protocol remains separate; the digest fences its local cache/index only.
   **A write this core made ITSELF rides `workspace:server-change` instead** — today that is Server
   Edition headless canvas control (`server/canvas-control.ts`) — and the renderer three-way merges
   it against the store baseline (`renderer/lib/serverChange.ts`: incoming nodes adopted silently,
@@ -278,6 +295,10 @@ Persistence has two layers:
   the canvas name) for one release, because a pre-change build sidelines an id-less file to
   `.corrupt-<ts>` inside the user's repo; it is ignored on read. Residual: node ids are still
   shared, so two worktrees still attach the same tmux sessions.
+  Organization blocks may contain an opaque `projectId` as an exact routing constraint. It never
+  selects/reconstructs the index identity, and a foreign project's policy is inert. Folder probes
+  discard these management markers/policy; duplicates discard node organization/receipts. The
+  Server's private creator evidence, not shared content, remains the authority boundary.
   **SSH mirror safety** (the ".nodeterm reset itself" bug — 12 fresh project ids and 45 orphaned
   tmux sessions in one field report): remote writes are atomic (`cat > f.tmp && mv`, `sshWriteArgs`);
   a mirror is never blind-written before the entry has read-compared the server file once
@@ -1517,13 +1538,10 @@ else, and its context links must keep classifying across restarts).
   AND a pane cwd inside a project); a pane whose cwd matches no project is logged once and left
   alone, and an SSH project is never a target (local tmux says nothing about another host). This
   exists because the card can be lost while the pane is fine — see the local save rescue below.
-  **Local save rescue (2026-09-01 incident):** `workspace:save` is a WHOLE-workspace,
-  last-writer-wins write and local projects have NO conflict machinery (the ssh path's
-  `rescuableNodes`/`clearedNodes` pair is the only one that exists). One client republishing a stale
-  node list therefore deletes every card created since its snapshot, silently, for every other
-  client — measured: eight cards (four Claude sessions, four shells) fell out of `project.json` over
-  four hours while all eleven tmux sessions kept running, and the next restart rendered two
-  terminals. `WorkspaceStore` now keeps a node an incoming LOCAL save omitted when
+  **Local save rescue (2026-09-01 incident):** before revision fencing, one client republishing a
+  stale whole-workspace node list silently deleted cards while their panes survived. Browser
+  writes now reject that snapshot before writing. Rescue remains defense in depth for older or
+  internal unversioned writers: `WorkspaceStore` keeps a node an incoming LOCAL save omitted when
   `hasLiveBackend(id)` is true AND `wasDeleted(id)` is false, logging one line per save with the ids
   and the calling UI (`workspace:save` moved to `handleWithSender` for exactly that attribution).
   Both predicates are injected (`WorkspaceBackendGuards`) and DEFAULT TO NO RESCUE, so core keeps no
@@ -2601,6 +2619,28 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   pure `lib/kanban.ts` transforms) plus each GitHub issue's own labels, both filterable. The canvas stays MOUNTED under the opaque overlay (agent-status
   listeners live in Canvas.tsx; `display:none` would 0×0-resize every terminal into a tmux
   SIGWINCH), and canvas-only shortcuts (undo, ⌘T/⌘⇧C, Delete) early-return via `isKanbanOpen`.
+  **Assistant organization:** `node.organization` holds descriptive owner, exact project,
+  workstream/functional role and automatic/manual placement. It is separate from `role` and
+  `parentId`/`group`. Exact `project.kanbanOrganization` role/override mappings reference existing
+  column IDs; missing policy/board/column falls back to Ungrouped. Only new explicit management
+  opt-in plus private creator/journal attestation is eligible. Never adopt from saved content,
+  titles/models or a shared operator label. Manual assignment/Ungrouped/order actions (including
+  column deletion) write `manualAssignments` tombstones and distinct `manualAssignmentVersions`.
+  Updates preserve pins, hand placement, primary cards, unknown provenance, drift and all process
+  fields. Duplicates/imports drop management markers. Private `kanban-organization.json` reserves
+  durable creation keys/fingerprints, claims launch before external work, and retains at most 20
+  minimal receipts per node. Ownership flush waits for completed atomic publication, including
+  an in-flight debounce, and rejects write failures. Same-column metadata updates retain exact
+  placement. Separate bounded private placement evidence advances only by committed automatic
+  deltas, so sibling index shifts do not rewrite historical receipts or mark cards manual.
+  Unexplained drift and existing dangling/duplicate column assignments conservatively refuse
+  further automation. Browser merge applies placement
+  deltas against the loaded board baseline, retaining untouched card order and local manual edits.
+  Organization/ledger regressions also run in Windows CI. Uncertain launch is never replayed. Preview is an explicit read-only
+  allowlist, with no bulk apply route; backfill needs separate concrete approval. Undo rechecks
+  ownership/revision/placement and restores only one assignment/order, then records manual intent.
+  Board-log events use stable receipt IDs after durable state. See `docs/kanban-organization.md`
+  for limits, partial-write recovery, client use and native mobile follow-up.
   Board data is `project.kanban` ({columns, assignments: [{nodeId, columnId}]}, order = array
   order) in `.nodeterm/project.json` — git-shared, rides rev/mirror/watcher; absent until the
   first edit (`defaultKanban` seeds To Do / In Progress / Done). The virtual **Ungrouped**

@@ -15,6 +15,8 @@ import {
 } from './node-ops'
 import { opsBearerMatches } from './ops-token'
 import type { SpawnHandlerSnapshot } from './spawn-handler-state'
+import { organizationId, organizationKey, parseOrganizationMetadata, parseOrganizationPolicy } from '../shared/kanban-organization'
+import type { OrganizationMetadata } from '../shared/kanban-organization'
 
 const OPS_BODY_MAX_BYTES = 10 * 1024
 const OPS_CREATE_TITLE_MAX = 200
@@ -47,6 +49,12 @@ export interface OpsHealth {
 }
 
 export interface OpsApiDeps {
+  creationReceipt?(key: string): Promise<unknown>
+  boards?(): Promise<unknown>
+  previewOrganization?(projectId: string, entries: Array<{ nodeId: string; metadata: OrganizationMetadata }>): Promise<unknown>
+  organizationAudit?(nodeId: string): Promise<unknown>
+  undoOrganization?(nodeId: string, receiptId: string, expectedRevision: string): Promise<OpsUpdateResult>
+  retryOrganizationEvents?(): Promise<unknown>
   token: string
   /** A separate principal authenticates versioned conversation routes. No management-token fallback. */
   conversations?: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
@@ -60,6 +68,23 @@ export interface OpsApiDeps {
   /** Rename and/or resize one node. `force` mirrors `remove`'s gate for a non-operator-created node. */
   updateNode(nodeId: string, input: OpsUpdateInput, force: boolean): Promise<OpsUpdateResult>
   health(): OpsHealth | Promise<OpsHealth>
+}
+
+function organizationFields(raw: Record<string, unknown>, input: OpsCreateInput | OpsUpdateInput, invalid: string[]): void {
+  if (raw.organization !== undefined) {
+    const value = parseOrganizationMetadata(raw.organization)
+    if (value) input.organization = value
+    else invalid.push('organization')
+  }
+  if (raw.organizationPolicy !== undefined) {
+    const value = parseOrganizationPolicy(raw.organizationPolicy)
+    if (value) input.organizationPolicy = value
+    else invalid.push('organizationPolicy')
+  }
+  if (raw.expectedRevision !== undefined) {
+    if (typeof raw.expectedRevision === 'string' && /^[a-f0-9]{64}$/.test(raw.expectedRevision)) input.expectedRevision = raw.expectedRevision
+    else invalid.push('expectedRevision')
+  }
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -158,6 +183,68 @@ export function createOpsApiHandler(
         return
       }
 
+      if (pathname === '/opsapi/boards' && method === 'GET') {
+        sendJson(res, deps.boards ? 200 : 501, deps.boards ? await deps.boards() : { error: 'unsupported' })
+        return
+      }
+      const creationMatch = /^\/opsapi\/creation-receipts\/([^/]+)$/.exec(pathname)
+      if (creationMatch && method === 'GET') {
+        if (!organizationKey(creationMatch[1])) { sendJson(res, 400, { error: 'invalid_idempotency_key' }); return }
+        sendJson(res, deps.creationReceipt ? 200 : 501,
+          deps.creationReceipt ? await deps.creationReceipt(creationMatch[1]) : { error: 'unsupported' })
+        return
+      }
+      const auditMatch = /^\/opsapi\/nodes\/([^/]+)\/organization-audit$/.exec(pathname)
+      if (auditMatch && method === 'GET') {
+        const id = auditMatch[1]
+        if (!organizationId(id)) { sendJson(res, 400, { error: 'invalid_node_id' }); return }
+        sendJson(res, deps.organizationAudit ? 200 : 501, deps.organizationAudit ? await deps.organizationAudit(id) : { error: 'unsupported' })
+        return
+      }
+      const undoMatch = /^\/opsapi\/nodes\/([^/]+)\/organization-undo$/.exec(pathname)
+      if (pathname === '/opsapi/organization/preview' || undoMatch) {
+        if (method !== 'POST') { sendJson(res, 405, { error: 'method_not_allowed' }); return }
+        if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+          sendJson(res, 415, { error: 'application_json_required' }); return
+        }
+        let body: unknown
+        try { body = await readJson(req) } catch { sendJson(res, 400, { error: 'bad_json_or_body_too_large' }); return }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJson(res, 400, { error: 'invalid_body' }); return }
+        const raw = body as Record<string, unknown>
+        if (undoMatch) {
+          if (Object.keys(raw).some((k) => !['receiptId', 'expectedRevision'].includes(k)) ||
+            !organizationId(undoMatch[1]) || !organizationId(raw.receiptId) ||
+            typeof raw.expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(raw.expectedRevision)) {
+            sendJson(res, 400, { error: 'invalid_undo' }); return
+          }
+          const result = await deps.undoOrganization?.(undoMatch[1], raw.receiptId, raw.expectedRevision)
+          sendJson(res, result ? result.ok ? 200 : result.status : 501, result ?? { error: 'unsupported' })
+          if (result?.ok) await deps.retryOrganizationEvents?.()
+          return
+        }
+        if (Object.keys(raw).some((k) => !['projectId', 'entries'].includes(k)) || !organizationId(raw.projectId) ||
+          !Array.isArray(raw.entries) || raw.entries.length < 1 || raw.entries.length > 100) {
+          sendJson(res, 400, { error: 'invalid_preview' }); return
+        }
+        const entries: Array<{ nodeId: string; metadata: OrganizationMetadata }> = []
+        for (const row of raw.entries) {
+          const metadata = row && parseOrganizationMetadata(row.metadata)
+          if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).some((k) => !['nodeId', 'metadata'].includes(k)) ||
+            !organizationId(row.nodeId) || !metadata || metadata.projectId !== raw.projectId || entries.some((e) => e.nodeId === row.nodeId)) {
+            sendJson(res, 400, { error: 'invalid_preview_entry' }); return
+          }
+          entries.push({ nodeId: row.nodeId, metadata })
+        }
+        sendJson(res, deps.previewOrganization ? 200 : 501,
+          deps.previewOrganization ? await deps.previewOrganization(raw.projectId, entries) : { error: 'unsupported' })
+        return
+      }
+      if (pathname === '/opsapi/organization/retry-events' && method === 'POST') {
+        sendJson(res, deps.retryOrganizationEvents ? 200 : 501,
+          deps.retryOrganizationEvents ? await deps.retryOrganizationEvents() : { error: 'unsupported' })
+        return
+      }
+
       if (pathname === '/opsapi/nodes') {
         if (method === 'GET') {
           sendJson(res, 200, { nodes: await deps.nodes() })
@@ -182,7 +269,7 @@ export function createOpsApiHandler(
             return
           }
           const raw = body as Record<string, unknown>
-          const allowed = new Set(['projectId', 'cmd', 'cwd', 'title', 'width', 'height'])
+          const allowed = new Set(['projectId', 'cmd', 'cwd', 'title', 'width', 'height', 'organization', 'organizationPolicy', 'expectedRevision', 'idempotencyKey'])
           const unknownKey = Object.keys(raw).find((key) => !allowed.has(key))
           if (unknownKey) {
             sendJson(res, 400, { error: `unknown_field: ${unknownKey}` })
@@ -190,6 +277,11 @@ export function createOpsApiHandler(
           }
           const invalid: string[] = []
           const input: OpsCreateInput = {}
+          organizationFields(raw, input, invalid)
+          if (raw.idempotencyKey !== undefined) {
+            if (organizationKey(raw.idempotencyKey)) input.idempotencyKey = raw.idempotencyKey
+            else invalid.push('idempotencyKey')
+          }
           if (raw.projectId !== undefined) {
             if (validString(raw.projectId, OPS_CREATE_STRING_MAX)) input.projectId = raw.projectId
             else invalid.push('projectId')
@@ -224,7 +316,9 @@ export function createOpsApiHandler(
             sendJson(res, result.status, {
               error: result.error,
               ...(result.id ? { id: result.id } : {}),
-              ...(result.tmuxSession ? { tmuxSession: result.tmuxSession } : {})
+              ...(result.tmuxSession ? { tmuxSession: result.tmuxSession } : {}),
+              ...(result.idempotencyKey ? { idempotencyKey: result.idempotencyKey } : {}),
+              ...(result.replayed ? { replayed: true } : {})
             })
             return
           }
@@ -232,7 +326,10 @@ export function createOpsApiHandler(
             id: result.id,
             projectId: result.projectId,
             title: result.title,
-            tmuxSession: result.tmuxSession
+            tmuxSession: result.tmuxSession,
+            ...(result.idempotencyKey ? { idempotencyKey: result.idempotencyKey } : {}),
+            ...(result.organization ? { organization: result.organization } : {}),
+            ...(result.replayed ? { replayed: true } : {})
           })
           return
         }
@@ -345,18 +442,21 @@ export function createOpsApiHandler(
             return
           }
           const raw = body as Record<string, unknown>
-          const allowed = new Set(['title', 'width', 'height'])
+          const allowed = new Set(['title', 'width', 'height', 'organization', 'organizationPolicy', 'expectedRevision'])
           const unknownKey = Object.keys(raw).find((key) => !allowed.has(key))
           if (unknownKey) {
             sendJson(res, 400, { error: `unknown_field: ${unknownKey}` })
             return
           }
-          if (raw.title === undefined && raw.width === undefined && raw.height === undefined) {
+          if (raw.title === undefined && raw.width === undefined && raw.height === undefined && raw.organization === undefined) {
             sendJson(res, 400, { error: 'body_must_set_title_width_or_height' })
             return
           }
           const invalid: string[] = []
           const input: OpsUpdateInput = {}
+          organizationFields(raw, input, invalid)
+          if ((input.organization || input.organizationPolicy) &&
+            (raw.title !== undefined || raw.width !== undefined || raw.height !== undefined)) invalid.push('organization_cannot_change_geometry_or_title')
           if (raw.title !== undefined) {
             if (validString(raw.title, OPS_CREATE_TITLE_MAX)) input.title = raw.title
             else invalid.push('title')
@@ -375,10 +475,11 @@ export function createOpsApiHandler(
           }
           const result = await deps.updateNode(nodeId, input, url.searchParams.get('force') === '1')
           if (!result.ok) {
-            sendJson(res, result.status, { error: result.error })
+            sendJson(res, result.status, { error: result.error, ...(result.id ? { id: result.id } : {}) })
             return
           }
           sendJson(res, 200, result)
+          if (input.organization) await deps.retryOrganizationEvents?.()
           return
         }
         res.setHeader('Allow', 'DELETE, PATCH')

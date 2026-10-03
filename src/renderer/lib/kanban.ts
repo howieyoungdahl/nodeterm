@@ -1,5 +1,6 @@
 import type { BoardLogAuthor, CanvasNodeState, KanbanAssignment, KanbanCardMeta, KanbanColumn, KanbanLabel, KanbanLabelColor, KanbanPriority, Project, ProjectKanban } from '@shared/types'
 import { NODE_COLORS } from '../state/workspace'
+import { withManualAssignment } from '@shared/kanban-organization'
 
 // Pure kanban board transforms — the ONLY place board structure changes. The UI computes
 // the next board here and hands it whole to setProjectKanban (no second live source).
@@ -73,6 +74,7 @@ export function moveColumn(k: ProjectKanban, columnId: string, beforeId: string 
  *  last-column rule (the virtual Ungrouped column always remains). */
 export function deleteColumn(k: ProjectKanban, columnId: string): ProjectKanban {
   if (!k.columns.some((c) => c.id === columnId)) return k
+  for (const assignment of k.assignments.filter((a) => a.columnId === columnId)) k = withManualAssignment(k, assignment.nodeId)
   const github = (() => {
     if (!k.github) return undefined
     const { completionColumnId, ...rest } = k.github
@@ -134,8 +136,7 @@ export function assignNode(
 ): ProjectKanban {
   if (nodeId === beforeNodeId) return k
   if (columnId === null) {
-    if (!k.assignments.some((a) => a.nodeId === nodeId)) return k
-    return { ...k, assignments: k.assignments.filter((a) => a.nodeId !== nodeId) }
+    return withManualAssignment({ ...k, assignments: k.assignments.filter((a) => a.nodeId !== nodeId) }, nodeId)
   }
   if (!k.columns.some((c) => c.id === columnId)) return k
   const moved: KanbanAssignment = { nodeId, columnId }
@@ -145,7 +146,7 @@ export function assignNode(
     : undefined
   const idx = before ? without.indexOf(before) : -1
   const at = idx === -1 ? without.length : idx
-  return { ...k, assignments: [...without.slice(0, at), moved, ...without.slice(at)] }
+  return withManualAssignment({ ...k, assignments: [...without.slice(0, at), moved, ...without.slice(at)] }, nodeId)
 }
 
 /** Drops assignments of nodes that no longer exist. Returns the SAME object when nothing

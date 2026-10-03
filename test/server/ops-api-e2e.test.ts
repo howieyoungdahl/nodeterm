@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { sessionName, TMUX_SOCKET } from '../../src/core/tmux-naming'
 import { privateTmuxSocketReason } from '../../src/core/tmux-test-socket'
@@ -186,6 +186,8 @@ describe.skipIf(!canDriveTmux)('operator node creation (POST/PATCH/DELETE /opsap
         {
           id: 'op-project',
           name: 'Operator create e2e',
+          kanban: { columns: [{ id: 'fixture-ops', title: 'Fixture ops', color: '#fff' }], assignments: [] },
+          kanbanOrganization: { version: 1, projectId: 'op-project', roles: { ops: 'fixture-ops' } },
           color: '#0a84ff',
           cwd: projectDir,
           viewport: { x: 0, y: 0, zoom: 1 },
@@ -342,6 +344,46 @@ describe.skipIf(!canDriveTmux)('operator node creation (POST/PATCH/DELETE /opsap
     })
     expect(res.status).toBe(404)
   })
+
+  it('places a keyed assistant card and retries without replacing its real private tmux pane', async () => {
+    const input = { projectId: 'op-project', title: 'Disposable organization fixture', idempotencyKey: 'org-real-tmux-0001',
+      organization: { owner: 'E2E fixture', projectId: 'op-project', workstream: 'test', functionalRole: 'ops' } }
+    const post = () => fetch(`${base}/opsapi/nodes`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(input) })
+    const first = await post()
+    expect(first.status).toBe(201)
+    const node = await first.json() as { id: string; organization: { columnId: string } }
+    expect(node.organization.columnId).toBe('fixture-ops')
+    expect(backendExists(node.id)).toBe(true)
+    const panes = () => execFileSync('tmux', ['-L', TMUX_SOCKET, 'list-panes', '-t', sessionName(node.id), '-F', '#{pane_id}:#{pane_pid}'], { encoding: 'utf8' })
+    const original = panes()
+    const replay = await post()
+    expect(replay.status).toBe(201)
+    expect(await replay.json()).toMatchObject({ id: node.id, replayed: true })
+    expect(panes()).toBe(original)
+    const boards = await fetch(`${base}/opsapi/boards`, { headers: auth })
+    const inventory = await boards.json() as { boards: Array<{ projectId: string; revision: string; assignments: unknown[] }> }
+    expect(inventory.boards[0].assignments).toContainEqual({ nodeId: node.id, columnId: 'fixture-ops' })
+    const updated = await fetch(`${base}/opsapi/nodes/${node.id}`, { method: 'PATCH',
+      headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({
+        organization: { ...input.organization, owner: 'Updated E2E fixture', workstream: 'updated-test' },
+        expectedRevision: inventory.boards.find((b) => b.projectId === 'op-project')!.revision }) })
+    expect(updated.status).toBe(200)
+    const updateResult = await updated.json() as { receiptId: string }
+    expect(updateResult).toMatchObject({ id: node.id, organization: { columnId: 'fixture-ops',
+      metadata: { owner: 'Updated E2E fixture', workstream: 'updated-test' } } })
+    expect(panes()).toBe(original)
+    // The API publishes its outbox after replying; wait for durable acknowledgment before
+    // removing this disposable server's directories.
+    await vi.waitFor(async () => {
+      const audit = await fetch(`${base}/opsapi/nodes/${node.id}/organization-audit`, { headers: auth })
+      expect(audit.status).toBe(200)
+      const history = await audit.json() as { receipts: Array<{ id: string; published: boolean }> }
+      expect(history.receipts.find((r) => r.id === updateResult.receiptId)?.published).toBe(true)
+    }, { timeout: 3000 })
+    expect(panes()).toBe(original)
+    const deleted = await fetch(`${base}/opsapi/nodes/${node.id}`, { method: 'DELETE', headers: auth })
+    expect(deleted.status).toBe(200)
+  }, 20_000)
 })
 
 /**

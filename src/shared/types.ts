@@ -335,6 +335,8 @@ export interface PendingLaunch {
 }
 
 export interface CanvasNodeState {
+  /** Descriptive organization content. Authority and undo history live only in the server ledger. */
+  organization?: import('./kanban-organization').NodeOrganization
   id: string
   kind: NodeKind
   position: { x: number; y: number }
@@ -587,6 +589,10 @@ export interface KanbanLabel {
 }
 
 export interface ProjectKanban {
+  /** Durable manual intent, including an explicit Ungrouped or order-only drag. */
+  manualAssignments?: Record<string, true>
+  /** Distinguishes repeated explicit Ungrouped/order choices from an unchanged loaded board. */
+  manualAssignmentVersions?: Record<string, string>
   columns: KanbanColumn[]
   assignments: KanbanAssignment[]
   /** Optional card metadata; tolerated as absent/malformed by every reader (lib normalizes). */
@@ -713,6 +719,14 @@ export interface NavStop {
 
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
+  /** Renderer-only acknowledged board baseline for preserving independent manual edits. */
+  loadedKanban?: ProjectKanban | null
+  /** Runtime-only revision chain for a single-project organization publication. */
+  organizationChange?: { before: string; after: string }
+  /** Loaded content revision used by management CAS. Never creator authority. */
+  revision?: string
+  /** Exact existing column IDs, scoped to this machine's exact project ID. */
+  kanbanOrganization?: import('./kanban-organization').OrganizationPolicy
   id: string
   name: string
   color: string
@@ -806,6 +820,8 @@ export interface Project {
 
 /** The full workspace written to / read from disk. */
 export interface Workspace {
+  /** Authoritative loaded/acknowledged storage revision. A stale whole-workspace save rejects. */
+  revision?: string
   version: 2
   activeProjectId: string
   projects: Project[]
@@ -961,7 +977,8 @@ export type WorkspaceMigrationKind = 'v2' | 'exec'
 
 export interface WorkspaceApi {
   load(): Promise<Workspace>
-  save(workspace: Workspace): Promise<void>
+  /** Older hosts may return void; the renderer refuses that missing acknowledgment. */
+  save(workspace: Workspace): Promise<WorkspaceSaveAck | void>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
   probeFolder(folder: string): Promise<Project | null>
   /** Whether <folder>/.nodeterm/project.json is `present`, definitely `absent`, or `unreadable`
@@ -980,6 +997,11 @@ export interface WorkspaceApi {
   /** Fired when THIS core wrote the project itself (Server Edition headless canvas control: an agent
    *  opened, renamed, moved, closed…). Not an outside edit — the renderer merges it, never asks. */
   onServerChange(cb: (project: Project) => void): () => void
+}
+
+export interface WorkspaceSaveAck {
+  revision: string
+  projectRevisions: Record<string, string>
 }
 
 export interface ProjectSettingsApi {

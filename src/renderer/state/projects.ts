@@ -17,8 +17,12 @@ import type { ProjectLayoutRules } from '@shared/appearance'
 import { recordCapabilityAck, type CapabilityAnswer } from '@shared/project-capability-consent'
 import { applyCanvasMutation, createProject, reorderGroupWithinParent } from './workspace'
 import { markWorkspaceDirty } from './workspaceDirty'
+import type { WorkspaceSaveAck } from '@shared/types'
 
 interface ProjectsState {
+  revision?: string
+  acknowledgeSave(ack: WorkspaceSaveAck, saved?: Workspace): void
+  acknowledgeOrganizationChange(project: Project): void
   projects: Project[]
   activeProjectId: string
   /**
@@ -275,7 +279,19 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   reloadNonce: 0,
 
   hydrate(ws) {
-    set({ projects: withUniqueIds(ws.projects), activeProjectId: ws.activeProjectId })
+    set({ projects: withUniqueIds(ws.projects).map((p) => ({ ...p, loadedKanban: p.kanban ?? null })), activeProjectId: ws.activeProjectId, revision: ws.revision })
+  },
+
+  acknowledgeSave(ack, saved) {
+    set((s) => ({ revision: ack.revision, projects: s.projects.map((p) =>
+      ack.projectRevisions[p.id] ? { ...p, revision: ack.projectRevisions[p.id],
+        ...(saved ? { loadedKanban: saved.projects.find((held) => held.id === p.id)?.kanban ?? null } : {}) } : p) }))
+  },
+
+  acknowledgeOrganizationChange(project) {
+    const change = project.organizationChange
+    // Out-of-order or missed publications cannot advance evidence. The next save conflicts.
+    if (change && get().revision === change.before && /^[a-f0-9]{64}$/.test(change.after)) set({ revision: change.after })
   },
 
   requestReload() {
@@ -505,6 +521,7 @@ export const useProjects = create<ProjectsState>((set, get) => ({
         if (!src) return nodes
         const copy: CanvasNodeState = {
           ...src,
+          organization: undefined,
           id: `${src.kind}-${Math.random().toString(36).slice(2, 10)}`,
           title: `${src.title} copy`,
           position: { x: src.position.x + 24, y: src.position.y + 24 }
@@ -660,10 +677,10 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   },
 
   toWorkspace() {
-    const { projects, activeProjectId } = get()
+    const { projects, activeProjectId, revision } = get()
     // A relay tab (`remote`) is a live connection to another machine's project, never a
     // workspace on this disk — exclude it so it can't be written into this client's
     // workspace.json (the disk writer skips it too; see core/workspace-files.ts).
-    return { version: 2, activeProjectId, projects: projects.filter((p) => !p.remote) }
+    return { version: 2, activeProjectId, projects: projects.filter((p) => !p.remote), ...(revision ? { revision } : {}) }
   }
 }))

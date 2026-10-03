@@ -142,6 +142,7 @@ import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
 import { useAutosave, useCreateFlush, useSavePersistence } from '../lib/useSavePersistence'
+import { mergeOrganizationProject, resolveWorkspaceConflict, saveWorkspace } from '../lib/workspacePersistence'
 import { SaveFailureBar } from '../components/SaveFailureBar'
 import {
   adoptedNodesNotice,
@@ -883,7 +884,7 @@ export function Canvas() {
   // state. It is a dep of the autosave effect BECAUSE a refusal must re-arm the debounce: `dirty`
   // never goes false on a failed save, so nothing else in that dep list can change and the timer
   // would never be scheduled again (the 2026-09-02 silent freeze).
-  const { delivery: saveDelivery, attemptSave, retrySave } = useSavePersistence()
+  const { delivery: saveDelivery, attemptSave, retrySave, revisionConflict } = useSavePersistence()
   // The active project's .nodeterm file changed on disk while we have unsaved local edits AND it
   // changed something we also hold (the user must pick a side for that half). `added` counts the
   // nodes that arrived with it and were already adopted onto the canvas — they are never part of
@@ -2080,7 +2081,7 @@ export function Canvas() {
       // Upgrade the on-disk format (e.g. v1 -> v2 migration) right away. Reported like every
       // other save: a `void` here used to make the very first write of the session the one write
       // that could fail with no signal at all — including the format migration.
-      void attemptSave(() => api.workspace.save(useProjects.getState().toWorkspace()))
+      void attemptSave(() => saveWorkspace(api.workspace))
     })
     return () => {
       cancelled = true
@@ -2394,7 +2395,7 @@ export function Canvas() {
     // takes seconds — and clearing `dirty` unconditionally afterwards marked edits made DURING the
     // await as saved, which let the watcher's not-dirty branch clobber them (field bug 2026-08-10).
     const gen = dirtyGenRef.current
-    const saved = await attemptSave(() => api.workspace.save(useProjects.getState().toWorkspace()))
+    const saved = await attemptSave(() => saveWorkspace(api.workspace))
     if (!saved) return
     if (canClearDirty(gen, dirtyGenRef.current)) {
       setDirty(false)
@@ -2410,6 +2411,26 @@ export function Canvas() {
     commitActiveToStore()
     await writeDisk()
   }, [commitActiveToStore, writeDisk])
+
+  const resolveSaveConflict = useCallback(async (keep: boolean) => {
+    commitActiveToStore()
+    // Read at the user's decision, not when the warning first appeared. Failed reads leave
+    // the warning and unsaved canvas in place. The next write is fenced against this read too.
+    try {
+      const incoming = await api.workspace.load()
+      const next = resolveWorkspaceConflict(useProjects.getState().toWorkspace(), incoming, keep)
+      useProjects.getState().hydrate(next)
+      preserveViewportRef.current = true
+      useProjects.getState().requestReload()
+      retrySave()
+      setConflict(null)
+      bumpDirty()
+      await writeDisk()
+    } catch (error) {
+      console.warn('[canvas] conflict reload failed', error)
+      setNotice({ kind: 'info', text: 'Could not reload the workspace. Your edits remain unsaved.' })
+    }
+  }, [commitActiveToStore, api.workspace, retrySave, bumpDirty, writeDisk])
 
   // Mirror `dirty` into a ref so the external-change listener (mounted once) reads the
   // live value without re-subscribing on every edit.
@@ -2543,7 +2564,9 @@ export function Canvas() {
         // Purely additive: the store's baseline can safely move to the disk version (it differs
         // from our last save only by the nodes we just adopted). No bar — there is nothing to
         // choose between.
-        useProjects.getState().replaceProject(project)
+        const local = useProjects.getState().getProject(project.id)
+        useProjects.getState().replaceProject(local ? mergeOrganizationProject(local, project) : project)
+        if (project.organizationChange) useProjects.getState().acknowledgeOrganizationChange(project)
       }
       // 'ignore': a self-write echo / a change we already hold. Nothing to do, and above all no bar.
     })
@@ -2559,7 +2582,9 @@ export function Canvas() {
       if (project.id !== current) {
         // Background project: the store copy IS that project until it is switched to, and it
         // reloads into React Flow whole on the next switch.
-        useProjects.getState().replaceProject(project)
+        const local = useProjects.getState().getProject(project.id)
+        useProjects.getState().replaceProject(project.organizationChange && local ? mergeOrganizationProject(local, project) : project)
+        if (project.organizationChange) useProjects.getState().acknowledgeOrganizationChange(project)
         return
       }
       const plan = planServerChange({
@@ -2600,7 +2625,19 @@ export function Canvas() {
         setLinkEdges(plan.bridges.map((b) => ({ id: b.id, source: b.source, target: b.target })))
       // The store copy is our disk baseline, and the server has already written this file — so it
       // moves to the incoming version exactly as the 'merge' branch above does.
-      useProjects.getState().replaceProject(project)
+      const local = useProjects.getState().getProject(project.id)
+      const merged = project.organizationChange && local ? mergeOrganizationProject(local, project) : project
+      useProjects.getState().replaceProject(merged)
+      // Organization is saved content, not a process identity. Update this field alone in
+      // React Flow so the next serialization cannot resurrect an older automatic marker.
+      const organizations = new Map(merged.nodes.filter((n) => n.organization).map((n) => [n.id, n.organization]))
+      if (organizations.size) {
+        const updated = nodesRef.current.map((n) => organizations.has(n.id)
+          ? { ...n, data: { ...n.data, organization: organizations.get(n.id) } } : n)
+        nodesRef.current = updated
+        setNodes(updated)
+      }
+      if (project.organizationChange) useProjects.getState().acknowledgeOrganizationChange(project)
       // The merged canvas is not yet what is on disk (the server wrote its half, we hold the
       // union), so it has to be saved. Both sides converge on the same state — the same "two
       // clients saving one converged canvas is harmless" model the peer-mutation path relies on.
@@ -2677,14 +2714,14 @@ export function Canvas() {
   // appears WHILE dirty, so without this gate the 800ms timer would fire and silently "keep mine"
   // (overwrite the external disk version) before the user can choose. `conflict` is a dep so
   // resolving it (either button clears it) re-arms the save.
-  useAutosave(dirty, !!conflict, persist, resaveTick, saveDelivery)
+  useAutosave(dirty, !!conflict || revisionConflict, persist, resaveTick, saveDelivery)
 
   // Creating a terminal-backed card ALSO flushes the save immediately, on top of the debounce
   // above: a brand-new card was otherwise not on disk for at least 800ms (4.5s to 55s in the
   // field), and every server-side decision that reads the file — agent-hook recovery,
   // canvas-control source resolution — raced it. Same conflict gate as the debounce, so the
   // flush can never bypass the bar's "keep mine or reload" choice.
-  const flushSave = useCreateFlush(persist, !conflict)
+  const flushSave = useCreateFlush(persist, !conflict && !revisionConflict)
   /** Ask for that flush. A no-op during a programmatic load, mirroring `markDirty`. */
   const requestSaveFlush = useCallback(() => {
     if (!loadingRef.current) flushSave()
@@ -12115,14 +12152,18 @@ export function Canvas() {
             }}
           />
         )}
-        {conflict && (
+        {revisionConflict && (
+          <ConflictBar
+            message="The workspace changed in another client. Your edits are unsaved. Reload or keep your edits while preserving server organization and manual board choices."
+            onReload={() => void resolveSaveConflict(false)}
+            onKeepMine={() => void resolveSaveConflict(true)}
+          />
+        )}
+        {conflict && !revisionConflict && (
           <ConflictBar
             addedCount={conflict.added}
-            onReload={() => reloadDiskProject(conflict.project)}
-            onKeepMine={() => {
-              setConflict(null)
-              void persist() // our in-memory canvas wins; the save overwrites the disk file
-            }}
+            onReload={() => void resolveSaveConflict(false)}
+            onKeepMine={() => void resolveSaveConflict(true)}
           />
         )}
         {activeSshServer &&

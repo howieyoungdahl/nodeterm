@@ -295,10 +295,10 @@ printf 'FAKE_AGENT_REGISTERED_%s\\n' "$nt_code"
     )
     expect(refused).toMatch(/ownership/i)
 
-    await rpc(IPC.workspaceSave, [staleBeforeSource])
+    await expect(rpc(IPC.workspaceSave, [staleBeforeSource])).rejects.toThrow()
     expect((await loadWorkspace()).projects[0].nodes.some((node) => node.id === SOURCE_ID)).toBe(true)
     // Exercise recovery after a real external store write, without disabling the Server's rescue.
-    await new WorkspaceStore().save(staleBeforeSource)
+    await new WorkspaceStore().save({ ...staleBeforeSource, revision: undefined })
     await until(async () => {
       const workspace = await loadWorkspace()
       return !workspace.projects[0].nodes.some((node) => node.id === SOURCE_ID)

@@ -12,14 +12,15 @@ function Harness({ write, conflict = false, initial = false }: {
   write: () => Promise<void>; conflict?: boolean; initial?: boolean
 }) {
   const [dirty, setDirty] = useState(!initial)
-  const { delivery, attemptSave, retrySave } = useSavePersistence()
+  const { delivery, attemptSave, retrySave, revisionConflict } = useSavePersistence()
   const persist = useCallback(async () => {
     if (await attemptSave(write)) setDirty(false)
   }, [attemptSave, write])
   useEffect(() => { if (initial) void persist() }, [initial, persist])
-  useAutosave(dirty, conflict, persist, 0, delivery)
+  useAutosave(dirty, conflict || revisionConflict, persist, 0, delivery)
   return <>
     <span>{dirty ? 'unsaved' : 'clean'}</span>
+    {revisionConflict && <span>Reload or keep local edits</span>}
     {delivery && <SaveFailureBar delivery={delivery} onRetry={() => {
       setDirty(true)
       retrySave()
@@ -87,6 +88,15 @@ describe('save flush on card creation', () => {
 })
 
 describe('workspace persistence in a mounted canvas', () => {
+  it('keeps edits unsaved and stops retries after an authoritative revision conflict', async () => {
+    const write = vi.fn<() => Promise<void>>().mockRejectedValue(new Error('workspace_conflict: storage changed'))
+    await act(async () => root.render(<Harness write={write} />))
+    await advance(800)
+    expect(container.textContent).toContain('unsaved')
+    expect(container.textContent).toContain('Reload or keep local edits')
+    await advance(60_000)
+    expect(write).toHaveBeenCalledTimes(1)
+  })
   it('retries a disconnected save without another edit and clears the warning only after success', async () => {
     let finish!: () => void
     const write = vi.fn<() => Promise<void>>()

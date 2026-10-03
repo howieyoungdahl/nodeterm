@@ -332,6 +332,24 @@ API and receipts stay v1; old servers deny the whole v2 policy. **Surfaces:** Se
 Edition: conversation API and CLI; Desktop: N/A; Mobile companion: N/A. Shipping code does not
 activate a live service or provision credentials.
 
+### Assistant Kanban organization
+
+`POST /opsapi/nodes` supports explicit descriptive organization metadata, exact per-project
+column-ID policy and durable idempotency. The private creator ledger attests new assistant opt-in;
+old operator cards and hand-edited metadata are not adopted. Missing policy/columns stay Ungrouped.
+Managed `PATCH` uses expected project revisions and preserves manual choices, order, pins, geometry
+and session identity. Browser workspace saves carry loaded/acknowledged revision evidence and
+reject stale active/background snapshots before any write. The UI retains unsaved edits for
+explicit Reload/Keep local edits.
+
+Read-only `GET /opsapi/boards`, keyed creation receipts, explicit allowlist preview and bounded
+per-node audit expose exact evidence. Guarded undo restores only the affected assignment and
+records manual intent. There is no automatic migration or bulk backfill apply route. Minimal
+private receipts never contain arbitrary workspace/command/transcript content. The repository
+client `scripts/nodeterm-organization.mjs` uses the existing private management bearer without
+provisioning credentials or retrying creates. See [Assistant Kanban organization](kanban-organization.md)
+for strict schemas, partial outcomes, approval scope, examples and platform behavior.
+
 ### Reverse-proxy SSO (header trust)
 
 Deployments that front the server with an SSO reverse proxy (Cloudflare Access,
@@ -746,11 +764,11 @@ adoption adds a CARD for a backend it has just proved exists and creates, attach
 nothing, and each adopted id then goes through the same boot classification, so the browser reaches
 the pane on mount through the attach-only path and a session that dies in between yields a dead card
 rather than a fresh shell. A pane whose directory matches no project is logged once and left alone.
-The repair exists because the card can be lost while the pane is fine: `workspace:save` is a
-whole-workspace, last-writer-wins write with no conflict machinery for local projects, so a client
-holding a stale node list silently deletes every card created since its snapshot. The store now
-refuses that — a node an incoming local save omits is kept when its backend is still live and it was
-not deleted here — and logs one line per save naming the ids and the browser that dropped them.
+The repair covers older releases and internal unversioned writers: cards can be lost while their
+panes survive. Current browser `workspace:save` requires loaded revision evidence and rejects stale
+snapshots before writing. Backend rescue remains defense in depth: a node an incoming local save
+omits is kept when its backend is still live and it was not deleted here, with a log naming the ids
+and calling client.
 
 Dead-card cleanup is not an agent creator-ownership exception. The separately authenticated
 operator endpoint `POST /opsapi/sweep` and the 30-minute periodic pass call the same
