@@ -53,6 +53,7 @@ import { serverEditionControlHandler } from './control-unsupported'
 import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
 import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
 import { ServerNodeOps, type OpsAdoptedNode } from './node-ops'
+import { OrganizationJournal } from './organization-journal'
 import { ServerDeadCardReaper } from './dead-card-reaper'
 import { createOpsApiHandler } from './ops-api'
 import { loadOrCreateOpsToken, OPS_TOKEN_FILE } from './ops-token'
@@ -216,12 +217,9 @@ export async function startServer(
   // Core services — same construction + registration order as src/main/index.ts.
   const settingsStore = new SettingsStore()
   const ptyManager = new PtyManager()
-  // The local save rescue (WorkspaceStore.rescueOmittedLocalNodes). `workspace:save` is a whole-
-  // workspace last-writer-wins write and local projects have no conflict machinery, so one browser
-  // tab holding a stale node list can delete every card created since its snapshot — silently, and
-  // for every other tab. On 2026-09-01 that cost eight cards over four hours while all eleven tmux
-  // sessions kept running. These two predicates are what makes the store able to refuse: keep a
-  // node the save dropped when its backend is still there and nobody deleted it here.
+  // Revision fencing rejects stale browser snapshots before writing. Backend rescue remains
+  // defense in depth for older/internal unversioned writers: keep a dropped card when its
+  // backend is still there and nobody deleted it here.
   const workspaceStore = new WorkspaceStore(undefined, {
     // `sessionExists` is the warm-attach probe: it answers this process's own live sessions first
     // and falls back to `tmux has-session nt-<id>` / the session host, and it deliberately answers
@@ -246,6 +244,7 @@ export async function startServer(
   )
   const spawnHandlerState = new SpawnHandlerState()
   const workspaceMutationQueue = new WorkspaceMutationQueue()
+  workspaceStore.clientMutationRunner = (work) => workspaceMutationQueue.run(work)
 
   settingsStore.init()
   // The linked-account resolver's one source of truth on this shell (design D4). Registered as
@@ -493,6 +492,9 @@ export async function startServer(
     },
     ownerOf: (nodeId) => nodeOwnership.ownerOf(nodeId),
     recordOwnership: (nodeId, owner) => nodeOwnership.record(nodeId, owner),
+    flushOwnership: () => nodeOwnership.flush(),
+    organizationJournal: new OrganizationJournal(path.join(config.dataDir, 'kanban-organization.json')),
+    appendBoardLog: (projectId, entry) => boardLog.appendOnce!(projectId, entry),
     // Same PtyManager call the verified-node control plane's `attach()` makes
     // (headless-node-factory.ts): one real tmux session on this Server's normal socket, keyed by
     // the node id like every other card.
@@ -951,6 +953,12 @@ export async function startServer(
     adoptOrphans: () => nodeOps.adoptOrphans(),
     createNode: (input) => nodeOps.create(input),
     updateNode: (nodeId, input, force) => nodeOps.update(nodeId, input, force),
+    boards: () => nodeOps.boards(),
+    creationReceipt: (key) => nodeOps.creationReceipt(key),
+    previewOrganization: (projectId, entries) => nodeOps.preview(projectId, entries),
+    organizationAudit: (nodeId) => nodeOps.audit(nodeId),
+    undoOrganization: (nodeId, receiptId, revision) => nodeOps.undoOrganization(nodeId, receiptId, revision),
+    retryOrganizationEvents: () => nodeOps.retryOrganizationEvents(),
     health: () => ({
       startedAt,
       uptimeMs: Math.max(0, Date.now() - startedAt),

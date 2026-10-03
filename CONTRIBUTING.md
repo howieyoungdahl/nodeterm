@@ -155,11 +155,12 @@ probes preserve it. The same engine runs that rule BACKWARDS at boot and on `POS
 /opsapi/adopt-orphans`: a live `nt-<id>` session no project still lists gets a card again, in the
 project whose folder is its pane's nearest ancestor. That is not an inert-boot exception — it adds a
 card for a backend it just proved exists, creates and attaches and types nothing, and puts the
-adopted id through the very same boot classification, so it stays attach-only. It exists because
-`workspace:save` is a whole-workspace last-writer-wins write with NO conflict machinery for local
-projects: a client holding a stale node list deletes every card created since its snapshot, for
-everyone, with all the panes still running. `WorkspaceStore` now keeps an omitted node whose backend
-is live and that was not deleted here, and names the client that dropped it. Validate Server upgrades against a disposable data directory and port.
+adopted id through the very same boot classification, so it stays attach-only. Browser workspace
+saves now require loaded/acknowledged revision evidence and reject a stale snapshot before any
+project write. The renderer retains unsaved edits and offers Reload/Keep local edits; background
+projects participate too. Backend rescue remains defense in depth for legacy/internal writers:
+`WorkspaceStore` keeps an omitted node whose backend is live and that was not deleted here, and
+names the client that dropped it. Validate Server upgrades against a disposable data directory and port.
 Restarting a shared live service is an explicit operator action, never a test or an automatic
 repair step.
 
@@ -173,6 +174,24 @@ load/save queues can overwrite each other with stale snapshots. `/opsapi/health`
 spawn-handler state without awaiting the preparation or parallel external launches it diagnoses;
 timed-out non-cancellable launches remain visible until they actually settle. Credentials still
 never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
+
+**Assistant Kanban placement requires explicit creation attestation.** Owner/workstream/functional
+role labels are descriptive content, separate from primary/worker and canvas groups. Never infer
+authority from a title, model, saved marker or the shared operator label. New opt-in creation uses
+exact per-project column IDs and durable request fingerprints; old nodes remain ineligible. Missing
+policy/columns stay Ungrouped. Preserve manual assignments, order-only moves, intentional Ungrouped,
+pins and hand placement. Manual board actions write tombstones even when the visible placement is
+unchanged. Duplicates/imports cannot inherit management receipts. Keep server provenance outside
+shared project files, audit records bounded, and PTY/subprocess work outside the workspace FIFO.
+Ownership flush must await atomic publication, including timer-started writes, and reject failed
+publication. Same-column metadata edits preserve exact placement; existing assignments with deleted
+or duplicate column IDs refuse automation. Advance private current placement
+evidence only by committed automatic deltas; never rewrite historical sibling receipts or adopt
+unexplained order drift. Browser broadcasts merge changed placements against the loaded baseline,
+preserving manual choices and the relative order of untouched cards. Run the organization and ledger
+suites in both Linux and Windows CI; terminal integration tests use private disposable sockets.
+No automatic column creation, backfill or background reshuffling. See
+[Assistant Kanban organization](docs/kanban-organization.md) for the API, client and surface limits.
 The conversation principal is separate from management and has a small external CLI;
 see `docs/operator-conversations.md` for credential handling, policy provisioning boundaries,
 receipt meaning, and WSL use. Policy v1 keeps exact grants. Policy v2 also accepts the explicit

@@ -77,3 +77,17 @@ Force-pushing the deployment branch behind the installed commit is refused.
 
 Desktop Electron and the mobile app are not deployed by this updater. The existing headless-host
 installer has its own daily timer and is not changed by this browser-server workflow.
+
+## Workspace revision compatibility
+
+Browser workspace saves require loaded/acknowledged storage revision evidence. A cached older
+client without that field is refused before any project write; reload the current renderer and
+retain any unsaved edits for explicit conflict resolution. A stale tab sees Reload/Keep local
+edits, including conflicts in background projects. Missing/unreadable files are not successful
+loads or acknowledgments. This changes persistence validation, not updater activation policy.
+
+Assistant organization additionally maintains private `kanban-organization.json`, its
+`.initialized` marker and `node-ownership.json` in the Server data directory. Retain them together
+across release switches and normal data backups. Their absence/corruption after initialization
+refuses deduplication/automatic placement; never clear them to retry a launch. Deploying this code
+does not configure a project mapping, adopt old cards, move a board or change any terminal.

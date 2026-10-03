@@ -1,4 +1,5 @@
 import { promises as fsPromises } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 
 import {
   planOrphanAdoption,
@@ -8,7 +9,11 @@ import {
 import { sessionName } from '../core/tmux-naming'
 import type { AgentState } from '../shared/agents/normalize'
 import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
-import type { CanvasNodeState, Project, Workspace } from '../shared/types'
+import type { BoardLogEntry, CanvasNodeState, Project, Workspace, WorkspaceSaveAck } from '../shared/types'
+import { nodePlacement, placeNode, planOrganization, type OrganizationPlan } from '../core/kanban-organization'
+import { organizationKey, parseOrganizationMetadata, parseOrganizationPolicy, withManualAssignment } from '../shared/kanban-organization'
+import type { NodeOrganization, OrganizationMetadata, OrganizationPolicy } from '../shared/kanban-organization'
+import { OrganizationJournal, type CreationReservation, type OrganizationJournalState, type OrganizationReceipt } from './organization-journal'
 import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 /**
@@ -103,6 +108,10 @@ export type OpsPaneState = 'alive' | 'dead' | 'unknown' | 'none'
 export type OpsAgentStatus = 'working' | 'idle' | 'blocked' | null
 
 export interface OpsNodeInventoryItem {
+  organization?: NodeOrganization
+  assistantCreated?: boolean
+  columnId?: string | null
+  revision?: string
   id: string
   kind: CanvasNodeState['kind']
   title: string
@@ -121,7 +130,7 @@ export interface OpsNodeInventoryItem {
 
 export interface NodeOpsWorkspace {
   load(opts?: { sideline?: boolean }): Promise<Workspace>
-  save(workspace: Workspace): Promise<void>
+  save(workspace: Workspace): Promise<unknown>
 }
 
 export interface ServerNodeOpsDeps {
@@ -129,10 +138,13 @@ export interface ServerNodeOpsDeps {
   sessionPresence(nodeId: string): Promise<Exclude<OpsPaneState, 'none'>>
   destroySession(nodeId: string): Promise<void>
   statusOf(nodeId: string): { state?: AgentState; updatedAt: number } | undefined
-  ownerOf(nodeId: string): { sourceNodeId: string } | undefined
+  ownerOf(nodeId: string): { sourceNodeId: string; projectId?: string; assistantCreationId?: string } | undefined
   /** Stamp the durable ownership ledger for a node `create()` just persisted. Absent = ownership is
    *  never recorded and the node reads back as not operator-created (fails closed). */
-  recordOwnership?(nodeId: string, owner: { sourceNodeId: string; projectId: string }): void
+  recordOwnership?(nodeId: string, owner: { sourceNodeId: string; projectId: string; assistantCreationId?: string }): void
+  flushOwnership?(): Promise<void>
+  organizationJournal?: OrganizationJournal
+  appendBoardLog?(projectId: string, entry: BoardLogEntry): Promise<boolean>
   /**
    * Spawn the real terminal backend for an operator-created node (the same `PtyManager.createHeadless`
    * the verified-node control plane uses). Absent = `create()` refuses with 501 rather than persist
@@ -275,6 +287,10 @@ export type OpsRemoveResult =
   | { ok: false; status: number; error: string; paneState?: OpsPaneState }
 
 export interface OpsCreateInput {
+  idempotencyKey?: string
+  organization?: OrganizationMetadata
+  organizationPolicy?: OrganizationPolicy
+  expectedRevision?: string
   projectId?: string
   cmd?: string
   cwd?: string
@@ -284,7 +300,7 @@ export interface OpsCreateInput {
 }
 
 export type OpsCreateResult =
-  | { ok: true; id: string; projectId: string; title: string; tmuxSession: string }
+  | { ok: true; id: string; projectId: string; title: string; tmuxSession: string; idempotencyKey?: string; replayed?: boolean; organization?: NodeOrganization }
   | {
       ok: false
       status: number
@@ -294,17 +310,22 @@ export type OpsCreateResult =
        *  string. */
       id?: string
       tmuxSession?: string
+      idempotencyKey?: string
+      replayed?: boolean
     }
 
 export interface OpsUpdateInput {
+  organization?: OrganizationMetadata
+  organizationPolicy?: OrganizationPolicy
+  expectedRevision?: string
   title?: string
   width?: number
   height?: number
 }
 
 export type OpsUpdateResult =
-  | { ok: true; id: string; title: string; size: { width: number; height: number } }
-  | { ok: false; status: number; error: string }
+  | { ok: true; id: string; title: string; size: { width: number; height: number }; revision?: string; organization?: NodeOrganization; placement?: OrganizationPlan; receiptId?: string }
+  | { ok: false; status: number; error: string; id?: string; receiptId?: string }
 
 const TIMESTAMPED_ID_PREFIXES = new Set([
   'term', 'ssh', 'sticky', 'group', 'editor', 'diff', 'video', 'web', 'browser', 'dino', 'trigger'
@@ -428,11 +449,15 @@ export class ServerNodeOps {
 
   async list(): Promise<OpsNodeInventoryItem[]> {
     const workspace = await this.deps.workspaceStore.load({ sideline: false })
+    const journal = await this.deps.organizationJournal?.read()
+    const origins = new Map(Object.values(journal?.creations ?? {}).filter((r) => r.assistant).map((r) => [r.id, r]))
     const pending: Array<Promise<OpsNodeInventoryItem>> = []
     for (const project of workspace.projects) {
       for (const node of project.nodes) {
         pending.push((async () => {
           const status = this.deps.statusOf(node.id)
+          const owner = this.deps.ownerOf(node.id)
+          const origin = owner?.assistantCreationId ? origins.get(owner.assistantCreationId) : undefined
           return {
             id: node.id,
             kind: node.kind,
@@ -444,7 +469,12 @@ export class ServerNodeOps {
             agentStatus: normalizedAgentStatus(status),
             lastActivityAt: status?.updatedAt ?? null,
             ownerSession: this.deps.ownerOf(node.id)?.sourceNodeId ?? null,
-            operatorCreated: this.deps.ownerOf(node.id)?.sourceNodeId === OPS_OPERATOR_SOURCE_ID
+            operatorCreated: this.deps.ownerOf(node.id)?.sourceNodeId === OPS_OPERATOR_SOURCE_ID,
+            organization: node.organization,
+            assistantCreated: owner?.sourceNodeId === OPS_OPERATOR_SOURCE_ID && owner.projectId === project.id &&
+              origin?.nodeId === node.id && origin.projectId === project.id,
+            columnId: nodePlacement(project.kanban, node.id).columnId,
+            revision: project.revision
           }
         })())
       }
@@ -644,6 +674,10 @@ export class ServerNodeOps {
    * spawn failure is reported honestly rather than rolled back into an unknown state.
    */
   async create(input: OpsCreateInput): Promise<OpsCreateResult> {
+    if (this.deps.organizationJournal) return this.createDurable(input)
+    if (input.organization || input.organizationPolicy || input.idempotencyKey) {
+      return { ok: false, status: 503, error: 'organization_persistence_unavailable' }
+    }
     if (input.cwd !== undefined) {
       let stat: Awaited<ReturnType<typeof fsPromises.stat>>
       try {
@@ -791,6 +825,10 @@ export class ServerNodeOps {
       if (matches.length !== 1) return { ok: false, status: 409, error: 'ambiguous_node_id' }
 
       const { project, node } = matches[0]
+      if (input.organization || input.organizationPolicy) {
+        try { return await this.updateOrganization(workspace, project, node, input) }
+        catch { return { ok: false, id: nodeId, status: 503, error: 'organization_write_uncertain_inspect_audit_before_retry' } }
+      }
       const operatorCreated = this.deps.ownerOf(nodeId)?.sourceNodeId === OPS_OPERATOR_SOURCE_ID
       if (!operatorCreated && !force) {
         return {
@@ -820,5 +858,353 @@ export class ServerNodeOps {
       this.deps.publishNode?.(project.id, updated)
       return { ok: true, id: nodeId, title: updated.title, size: updated.size }
     })
+  }
+
+  /** Exact IDs only. This read does not inspect panes, create columns or mutate project data. */
+  async boards(): Promise<unknown> {
+    const workspace = await this.deps.workspaceStore.load({ sideline: false })
+    return { boards: workspace.projects.map((p) => ({ projectId: p.id, revision: p.revision,
+      available: !p.unavailable, columns: p.kanban?.columns ?? [], assignments: p.kanban?.assignments ?? [],
+      policy: p.kanbanOrganization ?? null })) }
+  }
+
+  private attested(project: Project, nodeId: string, state: OrganizationJournalState): boolean {
+    const owner = this.deps.ownerOf(nodeId)
+    if (!owner?.assistantCreationId || owner.sourceNodeId !== OPS_OPERATOR_SOURCE_ID || owner.projectId !== project.id) return false
+    return Object.values(state.creations).some((r) => r.id === owner.assistantCreationId &&
+      r.nodeId === nodeId && r.projectId === project.id && r.assistant)
+  }
+
+  private managed(state: OrganizationJournalState, nodeId: string): NodeOrganization | undefined {
+    return state.receipts[nodeId]?.filter((r) => r.committed).at(-1)?.organization
+  }
+
+  private unchangedPlacement(project: Project, node: CanvasNodeState, state: OrganizationJournalState): boolean {
+    const receipt = state.receipts[node.id]?.at(-1)
+    const expected = state.placements?.[node.id]
+    const current = nodePlacement(project.kanban, node.id)
+    const ids = project.kanban?.assignments.map((a) => a.nodeId) ?? []
+    // Pending writes may have reached the workspace but not acknowledged their sibling shifts.
+    // Historical receipts stay unchanged; only server-explained shifts advance current evidence.
+    return !!receipt?.committed && expected?.receiptId === receipt.id && expected.projectId === project.id &&
+      expected.columnId === current.columnId && expected.index === current.index &&
+      (current.columnId === null || project.kanban?.columns.filter((c) => c.id === current.columnId).length === 1) &&
+      new Set(ids).size === ids.length && !Object.values(state.receipts).some((rows) =>
+        rows.at(-1)?.projectId === project.id && !rows.at(-1)?.committed)
+  }
+
+  /** Reconcile a previously interrupted write from exact persisted content, never by reassigning. */
+  private async recoverOrganizationWrite(project: Project, node: CanvasNodeState, state: OrganizationJournalState,
+    kind: 'update' | 'undo', metadata?: OrganizationMetadata): Promise<OrganizationReceipt | 'blocked' | undefined> {
+    const rows = state.receipts[node.id] ?? []
+    const pending = rows.at(-1)
+    if (!pending || pending.committed) return undefined
+    if (!this.attested(project, node.id, state) || pending.kind !== kind ||
+      (metadata && JSON.stringify(metadata) !== JSON.stringify(pending.organization.metadata))) return 'blocked'
+    const current = nodePlacement(project.kanban, node.id)
+    const matches = (placement: typeof current) => placement.columnId === current.columnId && placement.index === current.index
+    if (JSON.stringify(node.organization) === JSON.stringify(pending.organization) && matches(pending.after)) {
+      this.deps.organizationJournal!.commitReceipt(state, pending)
+      if (kind === 'undo' && rows.at(-2)) rows.at(-2)!.undone = true
+      await this.deps.organizationJournal!.write(state)
+      return pending
+    }
+    const previous = rows.at(-2)
+    if (previous?.committed && JSON.stringify(node.organization) === JSON.stringify(previous.organization) && matches(pending.before)) {
+      rows.pop()
+      await this.deps.organizationJournal!.write(state)
+      return undefined
+    }
+    return 'blocked'
+  }
+
+  private async saveOrganization(workspace: Workspace, project: Project): Promise<void> {
+    const ack = await this.deps.workspaceStore.save(workspace) as WorkspaceSaveAck | undefined
+    if (workspace.revision && ack?.revision) project.organizationChange = { before: workspace.revision, after: ack.revision }
+  }
+
+  async preview(projectId: string, entries: Array<{ nodeId: string; metadata: OrganizationMetadata }>): Promise<unknown> {
+    return this.runExclusive(async () => {
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const project = workspace.projects.find((p) => p.id === projectId)
+      if (!project) return { error: 'project_not_found' }
+      const state = await this.deps.organizationJournal?.read()
+      return { dryRun: true, projectId, revision: project.revision, plans: entries.map((entry) => {
+        const matches = workspace.projects.flatMap((p) => p.nodes.filter((n) => n.id === entry.nodeId).map((node) => ({ project: p, node })))
+        return { nodeId: entry.nodeId, ...(matches.length === 1 && matches[0].project.id === project.id && state ?
+          planOrganization(project, matches[0].node, entry.metadata, {
+            attested: this.attested(project, entry.nodeId, state) && this.unchangedPlacement(project, matches[0].node, state), managed: this.managed(state, entry.nodeId)
+          }) : { action: 'skip', reason: 'missing_or_unknown_origin' }) }
+      }) }
+    })
+  }
+
+  async audit(nodeId: string): Promise<unknown> {
+    const state = await this.deps.organizationJournal?.read()
+    return { nodeId, receipts: state?.receipts[nodeId] ?? [] }
+  }
+
+  async creationReceipt(key: string): Promise<unknown> {
+    const state = await this.deps.organizationJournal?.read()
+    const receipt = state?.creations[key]
+    return receipt ? { idempotencyKey: key, id: receipt.nodeId, projectId: receipt.projectId,
+      stage: receipt.stage, outcome: receipt.outcome ?? null } : { error: 'creation_receipt_not_found' }
+  }
+
+  private async publishReceipt(receipt: OrganizationReceipt): Promise<void> {
+    if (!this.deps.appendBoardLog || receipt.published || !receipt.committed) return
+    const entry: BoardLogEntry = { id: receipt.id, ts: receipt.at, kind: 'event', nodeId: receipt.nodeId,
+      author: { name: 'NodeTerm organization', color: '#5b8def' },
+      event: { type: 'card-moved', from: receipt.before.columnId ?? 'Ungrouped', to: receipt.after.columnId ?? 'Ungrouped' } }
+    if (!await this.deps.appendBoardLog(receipt.projectId, entry)) return
+    await this.runExclusive(async () => {
+      const journal = this.deps.organizationJournal!
+      const state = await journal.read()
+      const row = state.receipts[receipt.nodeId]?.find((r) => r.id === receipt.id)
+      if (row) { row.published = true; await journal.write(state) }
+    })
+  }
+
+  /** Explicit bounded publication retry; no card placement or external session action. */
+  async retryOrganizationEvents(): Promise<{ pending: number }> {
+    const state = await this.deps.organizationJournal?.read()
+    const rows = Object.values(state?.receipts ?? {}).flat().filter((r) => r.committed && !r.published)
+    for (const row of rows.slice(0, 100)) {
+      try { await this.publishReceipt(row) }
+      catch (error) { console.warn('[organization] board event remains pending', error instanceof Error ? error.message : 'publication_failed') }
+    }
+    const current = await this.deps.organizationJournal?.read()
+    return { pending: Object.values(current?.receipts ?? {}).flat().filter((r) => r.committed && !r.published).length }
+  }
+
+  private async createDurable(input: OpsCreateInput): Promise<OpsCreateResult> {
+    const journal = this.deps.organizationJournal!
+    if (!this.deps.createSession) return { ok: false, status: 501, error: 'create_not_supported' }
+    if (input.organization && (!parseOrganizationMetadata(input.organization) || !input.projectId ||
+      input.organization.projectId !== input.projectId || !organizationKey(input.idempotencyKey))) {
+      return { ok: false, status: 400, error: 'organization_requires_exact_project_and_idempotency_key' }
+    }
+    if (input.organizationPolicy && (!parseOrganizationPolicy(input.organizationPolicy) ||
+      !input.organization || input.organizationPolicy.projectId !== input.projectId || !input.expectedRevision)) {
+      return { ok: false, status: 400, error: 'policy_requires_organization_and_revision' }
+    }
+    const key = input.idempotencyKey ?? randomUUID()
+    if (!organizationKey(key)) return { ok: false, status: 400, error: 'invalid_idempotency_key' }
+    // Fixed field order; private command/title/cwd bytes never enter the journal or audit.
+    const fingerprint = createHash('sha256').update(JSON.stringify({ projectId: input.projectId,
+      cmd: input.cmd, cwd: input.cwd, title: input.title, width: input.width, height: input.height,
+      organization: input.organization && parseOrganizationMetadata(input.organization),
+      organizationPolicy: input.organizationPolicy && parseOrganizationPolicy(input.organizationPolicy),
+      expectedRevision: input.expectedRevision }, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value)).digest('hex')
+    let reservation: CreationReservation | undefined
+    let receipt: OrganizationReceipt | undefined
+    const partial = (error: string): OpsCreateResult => ({ ok: false, status: 503, error,
+      ...(reservation ? { id: reservation.nodeId, tmuxSession: sessionName(reservation.nodeId) } : {}), idempotencyKey: key })
+    try {
+      const prepared = await this.runExclusive(async () => {
+        const state = await journal.read()
+        reservation = state.creations[key]
+        if (reservation && reservation.fingerprint !== fingerprint) return { ok: false as const, status: 409, error: 'idempotency_key_reused' }
+        if (reservation?.stage === 'launch_claimed') return { ok: false as const, status: 409, error: 'launch_outcome_uncertain_do_not_repeat',
+          id: reservation.nodeId, tmuxSession: sessionName(reservation.nodeId), idempotencyKey: key, replayed: true }
+        if (reservation?.stage === 'finished') {
+          if (reservation.outcome !== 'success') return { ok: false as const, status: 502, error: `${reservation.outcome}_do_not_repeat`,
+            id: reservation.nodeId, tmuxSession: sessionName(reservation.nodeId), idempotencyKey: key, replayed: true }
+          return { ok: true as const, replayed: true, id: reservation.nodeId, projectId: reservation.projectId,
+            title: input.title ?? `Operator ${reservation.nodeId}`, tmuxSession: sessionName(reservation.nodeId), idempotencyKey: key }
+        }
+        const workspace = await this.deps.workspaceStore.load({ sideline: false })
+        const project = workspace.projects.find((p) => p.id === (reservation?.projectId ?? input.projectId ?? workspace.activeProjectId))
+        if (!project) return { ok: false as const, status: 400, error: `unknown_project_id: ${input.projectId ?? '(no active project)'}` }
+        if (project.ssh || project.unavailable) return { ok: false as const, status: 400, error: 'project_target_unavailable_or_ssh' }
+        // A prior move can be on disk while its position evidence is still unacknowledged.
+        // Appending against that mixed state would wrongly advance untouched sibling evidence.
+        if (input.organization && Object.values(state.receipts).some((rows) => {
+          const pending = rows.at(-1)
+          return pending?.projectId === project.id && !pending.committed && pending.nodeId !== reservation?.nodeId
+        })) return partial('organization_write_pending_inspect_audit')
+        if (!reservation && input.expectedRevision && input.expectedRevision !== project.revision) return { ok: false as const, status: 409, error: 'revision_conflict' }
+        if (input.cwd !== undefined) {
+          try { if (!(await fsPromises.stat(input.cwd)).isDirectory()) return { ok: false as const, status: 400, error: 'cwd_not_a_directory' } }
+          catch { return { ok: false as const, status: 400, error: 'cwd_unreadable' } }
+        }
+        if (!reservation) {
+          reservation = { id: randomUUID(), nodeId: nextOperatorNodeId(), projectId: project.id,
+            fingerprint, assistant: !!input.organization, stage: 'reserved' }
+          state.creations[key] = reservation
+          await journal.write(state)
+        }
+        const matches = workspace.projects.flatMap((p) => p.nodes.filter((n) => n.id === reservation!.nodeId).map((node) => ({ project: p, node })))
+        if (matches.length > 1 || (matches.length === 1 && matches[0].project.id !== project.id)) return partial('reserved_node_conflict')
+        let node = matches[0]?.node
+        if (!node) {
+          // A reserved retry may follow a completely failed save. It cannot use an old policy
+          // revision to replace a newer operator/browser configuration.
+          if (input.organizationPolicy && input.expectedRevision !== project.revision) return {
+            ok: false as const, status: 409, error: 'revision_conflict', id: reservation.nodeId, idempotencyKey: key }
+          const size = { width: input.width ?? OPERATOR_DEFAULT_NODE_SIZE.width, height: input.height ?? OPERATOR_DEFAULT_NODE_SIZE.height }
+          node = { id: reservation.nodeId, kind: 'terminal', position: placeFromOrigin(project, size), size,
+            title: input.title ?? `Operator ${reservation.nodeId}`, titleAuto: false, role: 'worker',
+            color: OPERATOR_NODE_COLOR, group: null, tags: [], ...(input.cwd !== undefined ? { cwd: input.cwd } : {}) }
+          if (input.organizationPolicy) project.kanbanOrganization = input.organizationPolicy
+          if (input.organization) {
+            const plan = planOrganization(project, node, input.organization, { attested: true, creating: true })
+            if (!plan.organization) return partial(plan.reason)
+            const id = randomUUID()
+            node.organization = { ...plan.organization, receiptId: id }
+            project.kanban = placeNode(project.kanban, node.id, { columnId: plan.to, index: -1, previous: null, next: null })
+            receipt = { id, nodeId: node.id, projectId: project.id, kind: 'create', at: this.now(),
+              before: plan.from, after: nodePlacement(project.kanban, node.id), organization: node.organization,
+              committed: false, published: false }
+            // Recover the same pending receipt when a previous workspace write failed completely.
+            state.receipts[node.id] = [receipt]
+            await journal.write(state)
+          }
+          this.deps.recordOwnership?.(node.id, { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: project.id,
+            ...(input.organization ? { assistantCreationId: reservation.id } : {}) })
+          if (!this.deps.recordOwnership || !this.deps.flushOwnership) return partial('ownership_persistence_unavailable')
+          await this.deps.flushOwnership()
+          project.nodes.push(node)
+          await this.saveOrganization(workspace, project)
+        } else {
+          // A partial save can already have published the project file. Retain its original ID.
+          if (input.organization && !this.attested(project, node.id, state)) return partial('assistant_origin_unknown')
+          if (!this.deps.flushOwnership) return partial('ownership_persistence_unavailable')
+          await this.deps.flushOwnership()
+          receipt = state.receipts[node.id]?.at(-1)
+          if (receipt && (node.organization?.receiptId !== receipt.id ||
+            JSON.stringify(nodePlacement(project.kanban, node.id)) !== JSON.stringify(receipt.after))) return partial('partial_placement_changed')
+          // Repair a partially saved index without overwriting newer project content.
+          await this.saveOrganization(workspace, project)
+        }
+        if (receipt) journal.commitReceipt(state, receipt)
+        reservation.stage = 'launch_claimed'
+        await journal.write(state)
+        return { ok: true as const, project, node }
+      })
+      if (!prepared.ok || !('project' in prepared)) return prepared
+      const { project, node } = prepared
+      // No workspace FIFO is held across PTY, command delivery, publication or board log I/O.
+      this.deps.publishProject?.(project)
+      this.deps.publishNode?.(project.id, node)
+      let outcome: CreationReservation['outcome'] = 'uncertain'
+      let expired = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const work = (async (): Promise<CreationReservation['outcome']> => {
+          const spawned = await this.deps.createSession!({ cwd: node.cwd || project.cwd, cols: OPERATOR_TERMINAL_COLS,
+            rows: OPERATOR_TERMINAL_ROWS, persistKey: node.id, ownerProjectId: project.id })
+          if (expired) return 'uncertain'
+          if (!spawned.sessionId) return 'spawn_failed'
+          if (input.cmd === undefined) return 'success'
+          // A rejected delivery may have reached the pane. Report that uncertainty truthfully.
+          outcome = 'uncertain'
+          return !await this.deps.sendText?.(node.id, input.cmd) ? 'command_failed' : 'success'
+        })()
+        outcome = await Promise.race([work, new Promise<'uncertain'>((resolve) => {
+          timer = setTimeout(() => { expired = true; resolve('uncertain') }, 30_000)
+        })])
+      } catch { /* The claimed launch is never replayed, even if the backend finished late. */ }
+      finally { if (timer) clearTimeout(timer) }
+      await this.runExclusive(async () => {
+        const state = await journal.read()
+        const row = state.creations[key]
+        if (!row || row.id !== reservation!.id) throw new Error('creation_reservation_changed')
+        row.stage = 'finished'; row.outcome = outcome
+        await journal.write(state)
+      })
+      if (receipt) await this.publishReceipt(receipt).catch((error) => {
+        console.warn('[organization] durable board event remains pending', error instanceof Error ? error.message : 'publication_failed')
+      })
+      return outcome === 'success' ? { ok: true, id: node.id, projectId: project.id, title: node.title,
+        tmuxSession: sessionName(node.id), idempotencyKey: key, organization: node.organization } :
+        { ok: false, status: 502, error: outcome === 'uncertain' ? 'launch_outcome_uncertain_do_not_repeat' :
+          `pty_${outcome}_do_not_repeat`, id: node.id, tmuxSession: sessionName(node.id), idempotencyKey: key }
+    } catch (error) {
+      return partial(error instanceof Error ? error.message : 'creation_outcome_uncertain')
+    }
+  }
+
+  private async updateOrganization(workspace: Workspace, project: Project, node: CanvasNodeState, input: OpsUpdateInput): Promise<OpsUpdateResult> {
+    const journal = this.deps.organizationJournal
+    if (!journal) return { ok: false, status: 503, error: 'organization_persistence_unavailable' }
+    if (!input.expectedRevision || input.expectedRevision !== project.revision) return { ok: false, status: 409, error: 'revision_conflict' }
+    if (!input.organization || !parseOrganizationMetadata(input.organization) ||
+      (input.organizationPolicy && (!parseOrganizationPolicy(input.organizationPolicy) || input.organizationPolicy.projectId !== project.id))) {
+      return { ok: false, status: 400, error: 'invalid_organization' }
+    }
+    const state = await journal.read()
+    const recovered = await this.recoverOrganizationWrite(project, node, state, 'update', input.organization)
+    if (recovered === 'blocked') return { ok: false, status: 409, error: 'placement_drift_or_pending_write' }
+    if (recovered) return { ok: true, id: node.id, title: node.title, size: node.size, revision: project.revision,
+      organization: node.organization, receiptId: recovered.id }
+    if (!this.unchangedPlacement(project, node, state)) return { ok: false, status: 409, error: 'placement_drift_or_pending_write' }
+    if (input.organizationPolicy) project.kanbanOrganization = input.organizationPolicy
+    const plan = planOrganization(project, node, input.organization, { attested: this.attested(project, node.id, state), managed: this.managed(state, node.id) })
+    if (plan.action !== 'apply' || !plan.organization) return { ok: false, status: 409, error: plan.reason }
+    const id = randomUUID()
+    const updated = { ...node, organization: { ...plan.organization, receiptId: id } }
+    // Organization updates deliberately address no geometry, title or process fields.
+    project.nodes = project.nodes.map((n) => n.id === node.id ? updated : n)
+    if (plan.from.columnId !== plan.to) {
+      project.kanban = placeNode(project.kanban, node.id, { columnId: plan.to, index: -1, previous: null, next: null })
+    }
+    const receipt: OrganizationReceipt = { id, nodeId: node.id, projectId: project.id, kind: 'update', at: this.now(),
+      before: plan.from, after: nodePlacement(project.kanban, node.id), organization: updated.organization, committed: false, published: false }
+    journal.addReceipt(state, receipt)
+    await journal.write(state)
+    await this.saveOrganization(workspace, project)
+    journal.commitReceipt(state, receipt)
+    await journal.write(state)
+    this.deps.publishProject?.(project)
+    this.deps.publishNode?.(project.id, updated)
+    // Publication is retried by an explicit API call after the durable transaction releases.
+    return { ok: true, id: node.id, title: node.title, size: node.size, revision: project.revision,
+      organization: updated.organization, placement: plan, receiptId: id }
+  }
+
+  async undoOrganization(nodeId: string, receiptId: string, expectedRevision: string): Promise<OpsUpdateResult> {
+    try { return await this.runExclusive(async () => {
+      const journal = this.deps.organizationJournal
+      if (!journal) return { ok: false, status: 503, error: 'organization_persistence_unavailable' }
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const matches = workspace.projects.flatMap((project) => project.nodes.filter((n) => n.id === nodeId).map((node) => ({ project, node })))
+      if (matches.length !== 1) return { ok: false, status: 404, error: 'node_not_found_or_ambiguous' }
+      const { project, node } = matches[0]
+      const state = await journal.read()
+      const receipts = state.receipts[nodeId] ?? []
+      if (!this.attested(project, nodeId, state)) return { ok: false, status: 403, error: 'assistant_origin_unknown' }
+      if (project.revision !== expectedRevision) return { ok: false, status: 409, error: 'revision_conflict' }
+      if (receipts.at(-1)?.kind === 'undo' && !receipts.at(-1)?.committed && receipts.at(-2)?.id !== receiptId) {
+        return { ok: false, status: 409, error: 'placement_changed' }
+      }
+      const recovered = await this.recoverOrganizationWrite(project, node, state, 'undo')
+      if (recovered === 'blocked') return { ok: false, status: 409, error: 'placement_changed' }
+      if (recovered) return { ok: true, id: nodeId, title: node.title, size: node.size, revision: project.revision,
+        organization: node.organization, receiptId: recovered.id }
+      const receipt = receipts.at(-1)
+      if (!receipt || receipt.id !== receiptId || !receipt.committed || receipt.undone || receipt.kind === 'undo' ||
+        JSON.stringify(node.organization) !== JSON.stringify(receipt.organization) || node.organization?.mode !== 'auto' ||
+        project.kanban?.manualAssignments?.[nodeId] || node.pinned || node.manualPlacement || node.role !== 'worker' ||
+        !this.unchangedPlacement(project, node, state)) return { ok: false, status: 409, error: 'placement_changed' }
+      if (receipt.before.columnId && !project.kanban?.columns.some((c) => c.id === receipt.before.columnId)) return { ok: false, status: 409, error: 'undo_column_missing' }
+      const beforeUndo = nodePlacement(project.kanban, nodeId)
+      project.kanban = placeNode(project.kanban, nodeId, receipt.before)
+      if (project.kanban) project.kanban = withManualAssignment(project.kanban, nodeId)
+      const id = randomUUID()
+      const organization: NodeOrganization = { ...receipt.organization, mode: 'manual', sequence: receipt.organization.sequence + 1,
+        columnId: receipt.before.columnId, receiptId: id }
+      project.nodes = project.nodes.map((n) => n.id === nodeId ? { ...n, organization } : n)
+      const undo: OrganizationReceipt = { id, nodeId, projectId: project.id, at: this.now(), kind: 'undo', before: beforeUndo,
+        after: nodePlacement(project.kanban, nodeId), organization, committed: false, published: false }
+      journal.addReceipt(state, undo)
+      await journal.write(state)
+      await this.saveOrganization(workspace, project)
+      receipt.undone = true; journal.commitReceipt(state, undo)
+      await journal.write(state)
+      this.deps.publishProject?.(project)
+      return { ok: true, id: nodeId, title: node.title, size: node.size, revision: project.revision, organization, receiptId: id }
+    }) } catch { return { ok: false, id: nodeId, status: 503, error: 'organization_write_uncertain_inspect_audit_before_retry' } }
   }
 }

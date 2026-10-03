@@ -75,6 +75,7 @@ export const COLLAPSED_HEIGHT = 40
 
 /** User data carried in the React Flow node's data field. */
 export interface NodeData {
+  organization?: import('@shared/kanban-organization').NodeOrganization
   title: string
   /**
    * Agent nodes only: while true (the default for agent nodes), the title auto-tracks the
@@ -1641,7 +1642,7 @@ export function duplicateNode(node: CanvasNode, offset = 28): CanvasNode {
     selected: true,
     parentId: undefined,
     extent: undefined,
-    data: { ...node.data, initialCommand: undefined }
+    data: { ...node.data, initialCommand: undefined, organization: undefined }
   }
 }
 
@@ -1915,6 +1916,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         controlSize: n.controlSize,
         role: n.role,
         taskSummary: n.taskSummary,
+        organization: n.organization,
         taskFrame: n.taskFrame,
         pinned: n.pinned,
         manualPlacement: n.manualPlacement,
@@ -1999,6 +2001,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         controlSize: n.data.controlSize,
         role: n.data.role,
         taskSummary: n.data.taskSummary,
+        organization: n.data.organization,
         taskFrame: n.data.taskFrame,
         pinned: n.data.pinned,
         manualPlacement: n.data.manualPlacement,

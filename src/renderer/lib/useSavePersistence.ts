@@ -4,19 +4,25 @@ import { autosaveDelay, nextSaveDelivery, type SaveDelivery } from './savePersis
 /** Every workspace write, including hydration, reports rejection to the same retry loop. */
 export function useSavePersistence() {
   const [delivery, setDelivery] = useState<SaveDelivery | undefined>()
+  const [revisionConflict, setRevisionConflict] = useState(false)
   const attemptSave = useCallback(async (write: () => Promise<void>): Promise<boolean> => {
     try {
       await write()
       setDelivery(undefined)
+      setRevisionConflict(false)
       return true
     } catch (error) {
       console.warn('[canvas] workspace save failed', error)
+      if (error instanceof Error && error.message.includes('workspace_conflict:')) {
+        setRevisionConflict(true)
+        return false
+      }
       setDelivery((previous) => nextSaveDelivery(previous, Date.now()))
       return false
     }
   }, [])
-  const retrySave = useCallback(() => setDelivery(undefined), [])
-  return { delivery, attemptSave, retrySave }
+  const retrySave = useCallback(() => { setDelivery(undefined); setRevisionConflict(false) }, [])
+  return { delivery, attemptSave, retrySave, revisionConflict }
 }
 
 /** Saves the workspace ONCE, right after the React commit that created a terminal-backed card.

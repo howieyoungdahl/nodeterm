@@ -162,7 +162,8 @@ describe('ServerNodeOps', () => {
         agentStatus: 'blocked',
         lastActivityAt: 1234,
         ownerSession: 'director-card',
-        operatorCreated: false
+        operatorCreated: false,
+        assistantCreated: false, columnId: null, organization: undefined, revision: undefined
       },
       {
         id: 'sticky-a',
@@ -175,7 +176,8 @@ describe('ServerNodeOps', () => {
         agentStatus: null,
         lastActivityAt: null,
         ownerSession: null,
-        operatorCreated: false
+        operatorCreated: false,
+        assistantCreated: false, columnId: null, organization: undefined, revision: undefined
       }
     ])
     }

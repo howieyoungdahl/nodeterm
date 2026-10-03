@@ -11,16 +11,18 @@ import { conflictBarMessage } from '../lib/externalChange'
  *  a choice against something that is no longer at stake. */
 export function ConflictBar({
   addedCount = 0,
+  message,
   onReload,
   onKeepMine
 }: {
   addedCount?: number
+  message?: string
   onReload(): void
   onKeepMine(): void
 }): JSX.Element {
   return (
     <div className="conflict-bar">
-      <span>{conflictBarMessage(addedCount)}</span>
+      <span>{message ?? conflictBarMessage(addedCount)}</span>
       <button onClick={onReload}>Reload from disk</button>
       <button onClick={onKeepMine}>Keep my version</button>
     </div>

@@ -1,4 +1,6 @@
 import path from 'path'
+import { createHash } from 'node:crypto'
+import { organizationId, parseOrganizationPolicy, sanitizeOrganizationNodes } from '../shared/kanban-organization'
 import type { AgentPermissionMode } from '../shared/agents/config'
 import { collisionSeed, derivedProjectId, legacyFileId } from '../shared/project-id'
 import {
@@ -157,6 +159,7 @@ export const PROJECT_FILE = 'project.json'
  * Node cwds inside the root are stored relative ("./sub").
  */
 export interface ProjectFileV1 {
+  kanbanOrganization?: import('../shared/kanban-organization').OrganizationPolicy
   version: 1
   /** Monotonic save counter; picks a winner when an offline cache and the file diverge (SSH). */
   rev: number
@@ -368,7 +371,8 @@ export function projectToFile(
     name: p.name,
     color: p.color,
     viewport: framingViewport(nodes),
-    nodes,
+    nodes: sanitizeOrganizationNodes(nodes, p.kanban),
+    ...(parseOrganizationPolicy(p.kanbanOrganization) ? { kanbanOrganization: parseOrganizationPolicy(p.kanbanOrganization) } : {}),
     ...(icon ? { icon } : {}),
     ...(p.bridges ? { bridges: p.bridges } : {}),
     ...(p.ropes ? { ropes: p.ropes } : {}),
@@ -394,7 +398,13 @@ export function validKanban(k: unknown): k is ProjectKanban {
   return (
     !!k &&
     Array.isArray((k as ProjectKanban).columns) &&
-    Array.isArray((k as ProjectKanban).assignments)
+    Array.isArray((k as ProjectKanban).assignments) &&
+    (k as ProjectKanban).columns.every((c) => c && organizationId(c.id) && typeof c.title === 'string') &&
+    (k as ProjectKanban).assignments.every((a) => a && organizationId(a.nodeId) && organizationId(a.columnId)) &&
+    [(k as ProjectKanban).manualAssignments, (k as ProjectKanban).manualAssignmentVersions].every((v) =>
+      v === undefined || (!!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).every(organizationId))) &&
+    Object.values((k as ProjectKanban).manualAssignments ?? {}).every((v) => v === true) &&
+    Object.values((k as ProjectKanban).manualAssignmentVersions ?? {}).every(organizationId)
   )
 }
 
@@ -434,6 +444,8 @@ export function fileToProject(
   const layoutRules = sanitizeLayoutRulesBlock(f.layoutRules)
   return {
     id: base.id,
+    revision: projectFileRevision(f),
+    ...(parseOrganizationPolicy(f.kanbanOrganization) ? { kanbanOrganization: parseOrganizationPolicy(f.kanbanOrganization) } : {}),
     name: f.name,
     color: f.color,
     ...(icon ? { icon } : {}),
@@ -444,14 +456,14 @@ export function fileToProject(
     // `partition` survives only when it is exactly the one THIS project (base.id, machine-local)
     // would mint — a foreign/cloned/unsafe one drops to un-owned default session. See
     // loadedAgentBrowserPartition; without it a cloned project.json forges another project's jar.
-    nodes: sanitizeNodeAppearances(
+    nodes: sanitizeOrganizationNodes(sanitizeNodeAppearances(
       sanitizeNodeTriggers(
         sanitizeBrowserPartitions(
           applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
           base.id
         )
       )
-    ),
+    ), validKanban(f.kanban) ? f.kanban : undefined),
     ...(f.bridges ? { bridges: f.bridges } : {}),
     ...(f.ropes ? { ropes: f.ropes } : {}),
     ...(defaultAccountId ? { defaultAccountId } : {}),
@@ -477,6 +489,11 @@ export function fileToProject(
     // attempt (the shared file cannot carry this machine's navigation history) and is never read.
     ...(base.breadcrumbs?.length ? { breadcrumbs: base.breadcrumbs } : {})
   }
+}
+
+/** Includes content as well as rev: a git edit need not increment a save counter. */
+export function projectFileRevision(file: ProjectFileV1): string {
+  return createHash('sha256').update(JSON.stringify(file)).digest('hex')
 }
 
 /**
@@ -551,7 +568,8 @@ export function splitWorkspace(
       ? derivedProjectId(incoming.id, collisionSeed(incoming), (candidate) => seenIds.has(candidate))
       : incoming.id
     seenIds.add(id)
-    const p = id === incoming.id ? incoming : { ...incoming, id }
+    const { revision: _evidence, organizationChange: _publication, loadedKanban: _baseline, ...content } = incoming
+    const p = { ...content, id, nodes: sanitizeOrganizationNodes(content.nodes, content.kanban) }
     const header = { id: p.id, name: p.name, color: p.color, ...(p.closed ? { closed: true } : {}) }
     // The machine-local half of a REF'd project (a folder or an ssh endpoint), which used to ride
     // the shared file: this user's camera and this machine's default managed account. Deliberately

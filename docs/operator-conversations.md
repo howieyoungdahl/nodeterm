@@ -2,6 +2,12 @@
 
 This CLI is for an operator on the same machine as the Nodeterm Server. It calls only the loopback-only `/opsapi/v1/*` conversation API. It does not create a canvas node, assign `NODETERM_NODE_ID`, or use the management `ops-token`. The separate operator credential is supplied through a protected file and never appears in the command line.
 
+Creating/organizing assistant cards uses the separate repository management client
+`scripts/nodeterm-organization.mjs` and management `ops-token`; see
+[Assistant Kanban organization](kanban-organization.md). Descriptive organization owner labels and
+creation receipts never authorize transcript reads or message delivery. Extending an external
+helper can call that client without editing its conversation credential, grants or policy.
+
 ## Commands
 
 ```sh

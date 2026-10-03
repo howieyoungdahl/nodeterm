@@ -271,6 +271,62 @@ describe('persistent headless node ownership — how it reaches disk', () => {
     expect(existsSync(file)).toBe(false)
   })
 
+  it('flush waits for a timer-started in-flight atomic publication', async () => {
+    const store = createPersistentHeadlessNodeOwnership(file)
+    const rename = fsp.rename.bind(fsp)
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    const publish = vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+      await blocked
+      await rename(from, to)
+    })
+    store.record('n-child', owner)
+    await vi.waitFor(() => expect(publish).toHaveBeenCalled(), { timeout: 3000 })
+    let acknowledged = false
+    const flushing = store.flush().then(() => { acknowledged = true })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(acknowledged).toBe(false)
+    expect(existsSync(file)).toBe(false)
+    release()
+    await flushing
+    expect(onDisk().owners['n-child']).toMatchObject(owner)
+    expect(publish).toHaveBeenCalledTimes(1)
+  })
+
+  it('flush rejects an in-flight background failure and retries failed publication without another mutation', async () => {
+    const store = createPersistentHeadlessNodeOwnership(file)
+    let reject!: (error: Error) => void
+    const blocked = new Promise<void>((_resolve, fail) => { reject = fail })
+    const publish = vi.spyOn(fsp, 'rename').mockImplementation(async () => { await blocked })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    store.record('n-child', owner)
+    await vi.waitFor(() => expect(publish).toHaveBeenCalled(), { timeout: 3000 })
+    const rejected = expect(store.flush()).rejects.toThrow('fixture_ledger_full')
+    reject(Object.assign(new Error('fixture_ledger_full'), { code: 'ENOSPC' }))
+    await rejected
+    expect(warn).toHaveBeenCalled()
+    expect(existsSync(file)).toBe(false)
+    // A settled background failure is not a durable acknowledgment either.
+    await expect(store.flush()).rejects.toThrow('fixture_ledger_full')
+    expect(existsSync(file)).toBe(false)
+    publish.mockRestore()
+    await store.flush()
+    expect(createPersistentHeadlessNodeOwnership(file).ownerOf('n-child')).toMatchObject(owner)
+  })
+
+  it('a settled debounce failure cannot be acknowledged by a later flush', async () => {
+    const store = createPersistentHeadlessNodeOwnership(file)
+    const publish = vi.spyOn(fsp, 'rename').mockRejectedValue(Object.assign(new Error('fixture_disk_full'), { code: 'ENOSPC' }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    store.record('n-child', owner)
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled(), { timeout: 3000 })
+    await expect(store.flush()).rejects.toThrow('fixture_disk_full')
+    expect(existsSync(file)).toBe(false)
+    publish.mockRestore()
+    await store.flush()
+    expect(onDisk().owners['n-child']).toMatchObject(owner)
+  })
+
   it('overlapping publishes serialize, and the last snapshot wins', async () => {
     const store = createPersistentHeadlessNodeOwnership(file)
     store.record('n-1', owner)

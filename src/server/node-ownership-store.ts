@@ -99,7 +99,9 @@ function validRecord(value: unknown): OwnerRecord | null {
   const recordedAt = r.recordedAt
   if (typeof recordedAt !== 'number' || !Number.isSafeInteger(recordedAt) || recordedAt <= 0)
     return null
-  return { sourceNodeId: r.sourceNodeId, projectId: r.projectId, recordedAt }
+  if (r.assistantCreationId !== undefined && !validId(r.assistantCreationId)) return null
+  return { sourceNodeId: r.sourceNodeId, projectId: r.projectId, recordedAt,
+    ...(r.assistantCreationId ? { assistantCreationId: r.assistantCreationId } : {}) }
 }
 
 /**
@@ -119,30 +121,36 @@ export function createPersistentHeadlessNodeOwnership(
   let pendingPrune = opts.prune
 
   let timer: ReturnType<typeof setTimeout> | null = null
-  let dirty = false
+  let version = 0
+  let durableVersion = 0
+  let latest: { version: number; promise: Promise<void>; settled: boolean } | undefined
   // Serialize publishes: two overlapping renames onto one destination is the exact Windows EPERM
   // race `fs-atomic.ts` documents, and the later snapshot must win regardless.
   let queue: Promise<void> = Promise.resolve()
 
   function persist(): Promise<void> {
-    // Snapshot and clear the flag together, synchronously: a mutation that lands during the await
-    // must re-dirty the store rather than be swallowed by this write's completion.
+    // Only a completed atomic publication acknowledges this snapshot. Starting a debounce write
+    // must not let flush acknowledge an in-flight or failed ownership grant.
     const snapshot = JSON.stringify(toFile(owners))
-    dirty = false
+    const snapshotVersion = version
     const run = queue.then(async () => {
       await fs.mkdir(path.dirname(filePath), { recursive: true })
       // 0600: this file decides who may message, mutate and KILL another agent's nodes. Another
       // local account must not be able to read it, and `writeFileAtomic` publishes by rename, so
       // the mode rides the temp inode and survives every later rewrite.
       await writeFileAtomic(filePath, snapshot, { mode: 0o600 })
+      durableVersion = snapshotVersion
     })
+    const write = { version: snapshotVersion, promise: run, settled: false }
+    latest = write
+    void run.then(() => { write.settled = true }, () => { write.settled = true })
     // A failed write must not wedge the queue for every later write (trigger-arm-store's rule).
     queue = run.catch(() => {})
     return run
   }
 
   function scheduleWrite(): void {
-    dirty = true
+    version++
     if (timer) return
     timer = setTimeout(() => {
       timer = null
@@ -184,6 +192,7 @@ export function createPersistentHeadlessNodeOwnership(
       owners.set(nodeId, {
         sourceNodeId: owner.sourceNodeId,
         projectId: owner.projectId,
+        ...(validId(owner.assistantCreationId) ? { assistantCreationId: owner.assistantCreationId } : {}),
         recordedAt: now()
       })
       scheduleWrite()
@@ -205,8 +214,11 @@ export function createPersistentHeadlessNodeOwnership(
         clearTimeout(timer)
         timer = null
       }
-      if (!dirty) return
-      await persist()
+      if (durableVersion >= version) return
+      // Keep the rejecting promise separate from the recovered serialization tail. A settled
+      // failure is retried on the next flush; a successful retry must really reach disk.
+      if (latest && !latest.settled && latest.version >= version) await latest.promise
+      else await persist()
     }
   }
 }

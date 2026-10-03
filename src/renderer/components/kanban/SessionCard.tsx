@@ -8,6 +8,7 @@ import type { KanbanSession } from './KanbanView'
 import type { AgentId } from '@shared/agents/config'
 import { NodeStatusBadge } from '../../nodes/NodeStatusBadge'
 import { showsStatus } from '../../lib/nodeStatusView'
+import { OrganizationBadge } from '../OrganizationBadge'
 
 const PRIO_COLOR: Record<KanbanPriority, string> = {
   low: '#8e8e93',
@@ -130,6 +131,7 @@ export const SessionCard = memo(function SessionCard({
         )}
         {status?.unread && <span className="kanban-card__unread" />}
       </div>
+      {session.organization && <div className="kanban-card__metarow"><OrganizationBadge organization={session.organization} nodeId={session.id} /></div>}
       {(labels.length > 0 || assignees.length > 0 || due !== undefined || priority !== undefined) && (
         <div className="kanban-card__metarow">
           {/* Labels share the priority/due/avatars row (left); the meta chips hug the right. */}

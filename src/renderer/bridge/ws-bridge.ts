@@ -51,6 +51,7 @@ import {
   type TranscriptLine,
   type Workspace,
   type WorkspaceApi,
+  type WorkspaceSaveAck,
   AgentStatusSnapshot,
   type PaneEvidence
 } from '@shared/types'
@@ -281,7 +282,7 @@ export function buildRealApi(
 
   const workspace: WorkspaceApi = {
     load: () => client.request(IPC.workspaceLoad) as Promise<Workspace>,
-    save: (ws: Workspace) => client.request(IPC.workspaceSave, ws) as Promise<void>,
+    save: (ws: Workspace) => client.request(IPC.workspaceSave, ws) as Promise<WorkspaceSaveAck>,
     // REAL: WorkspaceStore (core) registers IPC.workspaceProbeFolder, so the server serves it.
     // Stubbing it to `null` meant "Open folder…" on a repo that already carries a committed
     // .nodeterm/project.json concluded there was no project there, created an EMPTY one, and the

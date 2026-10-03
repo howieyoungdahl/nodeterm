@@ -350,7 +350,7 @@ describe('unavailable projects never overwrite real data on save', () => {
     // Disk comes back with the real file (remounted / restored checkout) before the next save
     await fs.mkdir(path.join(projRoot, '.nodeterm'), { recursive: true })
     await fs.writeFile(p, original, 'utf-8')
-    await store2.save(loaded)
+    await expect(store2.save(loaded)).rejects.toThrow('workspace_conflict')
     expect(await fs.readFile(p, 'utf-8')).toBe(original) // untouched — no nodes:[] overwrite
     const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
     expect(index.entries[0].cwd).toBe(projRoot) // entry still refs the cwd
@@ -1146,7 +1146,7 @@ describe('save corruption hardening', () => {
 
   it('a read-only load (sideline: false) leaves an unparsable workspace.json in place', async () => {
     await fs.writeFile(path.join(userData, 'workspace.json'), 'not json')
-    await new WorkspaceStore().load({ sideline: false })
+    await expect(new WorkspaceStore().load({ sideline: false })).rejects.toThrow('workspace_unreadable')
     expect(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8')).toBe('not json')
   })
 
@@ -1167,7 +1167,7 @@ describe('save corruption hardening', () => {
 
   it('a read-only load (sideline: false) never broadcasts the recovery note', async () => {
     await fs.writeFile(path.join(userData, 'workspace.json'), 'not json')
-    await new WorkspaceStore().load({ sideline: false })
+    await expect(new WorkspaceStore().load({ sideline: false })).rejects.toThrow('workspace_unreadable')
     expect(fake.sent.some((m) => m.channel === 'workspace:corrupt-recovered')).toBe(false)
   })
 
