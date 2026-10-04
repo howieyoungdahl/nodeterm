@@ -529,7 +529,7 @@ describe('HeadlessNodeFactory', () => {
     expect(pty.creates).toHaveLength(2)
   })
 
-  it('kills a backend that appears after its in-flight card was closed', async () => {
+  it('kills a backend that appears after its in-flight card was closed without sending its initial command', async () => {
     let releaseCreate!: (result: PtyCreateResult) => void
     let markCreateEntered!: () => void
     const createEntered = new Promise<void>((resolve) => (markCreateEntered = resolve))
@@ -539,15 +539,16 @@ describe('HeadlessNodeFactory', () => {
       return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
     })
 
-    const opening = factory.openTerminal('term-source', {}, true)
+    const opening = factory.openTerminal('term-source', { cmd: 'printf synthetic-initial-command' }, true)
     await createEntered
     const nodeId = pty.creates[0].persistKey as string
     await expect(factory.close('term-source', { node: nodeId }, true)).resolves.toMatchObject({
       ok: true
     })
+    expect(pty.sends).toEqual([])
 
     // The non-cancellable create resolves AFTER close's first absent-backend destroy. The launch
-    // guard must issue an exact second destroy instead of leaving this late backend orphaned.
+    // guard must suppress its command and issue an exact second destroy to reap the late backend.
     pty.live.add(nodeId)
     releaseCreate({ sessionId: `pty-${nodeId}`, fresh: true, persistent: true })
     await expect(opening).resolves.toMatchObject({
@@ -572,7 +573,7 @@ describe('HeadlessNodeFactory', () => {
       return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
     })
 
-    const opening = factory.openTerminal('term-source', {}, true)
+    const opening = factory.openTerminal('term-source', { cmd: 'printf synthetic-initial-command' }, true)
     await createEntered
     const nodeId = pty.creates[0].persistKey as string
     // ServerNodeOps force removal kills first, persists the card removal, then calls forgetNodes.
@@ -585,9 +586,43 @@ describe('HeadlessNodeFactory', () => {
       ok: false,
       error: expect.stringContaining('launch-failed')
     })
+    expect(pty.sends).toEqual([])
     expect(pty.live.has(nodeId)).toBe(false)
     expect(pty.destroys.filter((entry) => entry.nodeId === nodeId)).toHaveLength(2)
     expect(pty.destroys.at(-1)).toMatchObject({ nodeId, wasLive: true })
+  })
+
+  it('kills a backend that appears after stop during agent attach without sending its initial command', async () => {
+    let releaseCreate!: (result: PtyCreateResult) => void
+    let markCreateEntered!: () => void
+    const createEntered = new Promise<void>((resolve) => (markCreateEntered = resolve))
+    vi.spyOn(pty, 'createHeadless').mockImplementationOnce((options) => {
+      pty.creates.push(options)
+      markCreateEntered()
+      return new Promise<PtyCreateResult>((resolve) => (releaseCreate = resolve))
+    })
+
+    // FakePty records the command; no provider process is started by this fixture.
+    const opening = factory.openAgent('term-source', { agent: 'codex', prompt: 'synthetic stopped launch' }, true)
+    await createEntered
+    const nodeId = pty.creates[0].persistKey as string
+    factory.stop()
+    expect(pty.sends).toEqual([])
+
+    pty.live.add(nodeId)
+    releaseCreate({ sessionId: `pty-${nodeId}`, fresh: true, persistent: true })
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('launch-failed'),
+      result: { failed: [nodeId] }
+    })
+    expect(pty.sends).toEqual([])
+    expect(pty.live.has(nodeId)).toBe(false)
+    expect(pty.destroys).toEqual([{ clientId: null, nodeId, everySocket: true, wasLive: true }])
+    // Shutdown cancels the launch, but leaves its durable card and creator grant for inspection.
+    const workspace = await store.load({ sideline: false })
+    expect(workspace.projects[0].nodes.some((node) => node.id === nodeId)).toBe(true)
+    expect(ownership.ownerOf(nodeId)?.sourceNodeId).toBe('term-source')
   })
 
   it('bounds a hung launch with a named timeout and leaves later creations available', async () => {

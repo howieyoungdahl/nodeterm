@@ -285,7 +285,9 @@ finish late, and tell the caller not to repeat. Any capability promise used on t
 own bounded fail-safe; an edition-specific `false` answer must not be replaced with a getter whose
 initializer that edition never runs. When close can race the unlocked external phase, retain a
 per-node cancellation until the late operation settles and destroy its exact backend again; the
-first destroy may have run before anything existed.
+first destroy may have run before anything existed. Recheck cancellation after an awaited attach
+before registering a fresh agent or sending its initial command. Final destruction cannot undo
+effects of a command already sent.
 
 **A new keyboard chord has to survive the shells, not just the renderer.** The application menu is
 ours (`buildAppMenu` in `main/index.ts`), but its command-style accelerators — ⌘Q, ⌘M, ⌘W, ⌘0, ⌘⇧B,

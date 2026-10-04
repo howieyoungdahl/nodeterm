@@ -2372,6 +2372,13 @@ export class HeadlessNodeFactory {
           // answers, keep the attached index honest but never type a command after reporting an
           // unknown launch outcome to the caller.
           if (expired) break
+          // Close/stop may have won while attach was pending. Final cleanup is too late to
+          // prevent a command's effects, so suppress both agent registration and command send.
+          if (this.cancelledLaunches.has(node.id)) {
+            failed.add(node.id)
+            completed.add(node.id)
+            continue
+          }
           if (!result.sessionId) {
             failed.add(node.id)
             completed.add(node.id)
