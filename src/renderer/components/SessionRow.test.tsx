@@ -37,4 +37,25 @@ describe('SessionRow status age', () => {
     expect(html).toContain('5m ago')
     expect(html).toContain('Entered this state 5m ago')
   })
+
+  it.each(['backend stopped', 'backend present', 'backend unverified'])('shows %s beside explicit unobserved task status', (word) => {
+    const html = renderToStaticMarkup(
+      <SessionRow row={{ ...row, statusKind: 'unknown', stateLabel: 'Task unobserved' }}
+        backend={{ word, detail: 'Task completion is unobserved.' }}
+        onClick={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onAiName={vi.fn()}
+        onContextMenu={vi.fn()} onDragStart={vi.fn()} onDragEnd={vi.fn()} />
+    )
+    expect(html).toContain(`Task unobserved · ${word}`)
+    expect(html).toContain('Task completion is unobserved.')
+  })
+
+  it.each(['working', 'attention', 'done'] as const)('never replaces %s with a backend observation', (statusKind) => {
+    const html = renderToStaticMarkup(
+      <SessionRow row={{ ...row, statusKind }} backend={{ word: 'backend stopped', detail: 'Old observation' }}
+        onClick={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onAiName={vi.fn()}
+        onContextMenu={vi.fn()} onDragStart={vi.fn()} onDragEnd={vi.fn()} />
+    )
+    expect(html).not.toContain('backend stopped')
+    expect(html).not.toContain('Old observation')
+  })
 })

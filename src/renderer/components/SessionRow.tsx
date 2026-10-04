@@ -7,6 +7,7 @@ import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSettings } from '../state/settings'
 import { contextFillColor, contextPillText, percentText } from '../lib/usageFormat'
+import type { BackendPresentation } from '../lib/unobservedBackend'
 
 export interface SessionRowProps {
   row: SessionRowVM
@@ -19,6 +20,7 @@ export interface SessionRowProps {
   onDragEnd(): void
   /** Status-group mode only: elapsed time since the current state began. */
   stateAgeLabel?: string
+  backend?: BackendPresentation
 }
 
 function dirName(p?: string): string {
@@ -36,7 +38,8 @@ export function SessionRow({
   onContextMenu,
   onDragStart,
   onDragEnd,
-  stateAgeLabel
+  stateAgeLabel,
+  backend
 }: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(row.title)
@@ -177,6 +180,11 @@ export function SessionRow({
             ×
           </button>
         </div>
+        {row.statusKind === 'unknown' && (
+          <div className="ss-meta" title={backend?.detail ?? 'No current backend observation. Task status is unobserved.'}>
+            {row.stateLabel} · {backend?.word ?? 'backend unverified'}
+          </div>
+        )}
         {(row.projectName || row.cwd || row.sshHost || stateAgeLabel) && (
           <div className="ss-meta">
             {row.projectName && <span className="ss-meta__project">{row.projectName}</span>}

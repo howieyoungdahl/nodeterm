@@ -2445,12 +2445,18 @@ export class PtyManager {
    * callers keep using the boolean method above, where unknown deliberately means "possibly
    * alive"; operator inventory needs to expose that uncertainty instead of calling it alive.
    */
-  async sessionPresence(persistKey: string): Promise<SessionPresence> {
+  async sessionPresence(
+    persistKey: string,
+    options: { readOnly?: boolean } = {}
+  ): Promise<SessionPresence> {
     if (this.liveSessionForPersistKey(persistKey)) return 'alive'
     const probes: Promise<SessionPresence>[] = []
     if (this.tmuxPath) probes.push(this.tmuxSessionPresence(persistKey))
     if (this.getSettings().tmuxEnabled && sessionHostSupported()) {
-      probes.push(
+      // The ordinary host RPC lazily starts/reconnects its helper. A display probe must not
+      // trigger lifecycle work merely by opening the sidebar. Attached sessions were proven
+      // above; an unobserved host remains unknown, including when tmux alone answered absent.
+      probes.push(options.readOnly ? Promise.resolve('unknown') :
         sessionHostHasSession(sessionName(persistKey)).then(
           (exists): SessionPresence => exists ? 'alive' : 'dead',
           (): SessionPresence => 'unknown'

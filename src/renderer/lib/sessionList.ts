@@ -42,7 +42,7 @@ export const STATE_LABEL: Record<StatusKind, string> = {
   working: 'Running',
   attention: 'Waiting for your response',
   done: 'Done',
-  unknown: 'Unknown'
+  unknown: 'Task unobserved'
 }
 
 /**
@@ -64,7 +64,7 @@ const STATUS_GROUP_LABEL: Record<StatusGroup, string> = {
   unread: 'Unread',
   working: 'Running',
   idle: 'Idle',
-  unknown: 'Unknown'
+  unknown: 'Task unobserved'
 }
 
 /**

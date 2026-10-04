@@ -363,6 +363,15 @@ redundant encoding only, and a shell that forgets to register the pane-evidence 
 and simply never reports a failure — which is why `core/node-status-parity.test.ts` greps for both
 registrations.
 
+The sessions sidebar keeps backend presence separate from hook-reported task state. A hookless
+card remains **Task unobserved**, with a read-only observation of **backend present**, **backend
+stopped** (two definitive absence probes), or **backend unverified**. Presence does not prove an
+agent is running; absence does not prove task completion. This display cache is transient, expires,
+and rejects replies after target/status/core changes. Local presence cannot classify SSH or relay
+nodes. Keep it out of authorization, dispatch, hook stores, and workspace persistence.
+Both status-channel registrations request `sessionPresence`'s read-only mode: a supported but
+unobserved session-host backend remains unverified rather than starting a helper to check it.
+
 **Automatic layout only moves what it can prove is safe to move, and it says what it did not
 touch.** The engine (`src/core/canvas-layout/`) is opt-in, default off, and machine-local — the
 shared project file carries WHAT the rules are and never WHETHER they run, so cloning a repo can

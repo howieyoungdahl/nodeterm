@@ -6,6 +6,7 @@
 //
 //  * It asks `PtyManager.sessionPresence` — the same tri-state primitive the operator API's
 //    dead-card sweep asks (`server/node-ops.ts`), which is the one liveness proof in the product.
+//    Both shells request its read-only mode, so diagnostics never start a session-host helper.
 //    No second prober, no `ps` parsing, no reading what the pane printed.
 //  * It repeats the probe before returning `dead`, exactly as that sweep does. A single miss is a
 //    tmux that was busy, a socket that hiccuped, a session-host that had not answered yet; two
