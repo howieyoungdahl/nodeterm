@@ -1325,13 +1325,27 @@ else, and its context links must keep classifying across restarts).
   both have the whole surface (the bridge member is real, and a relay tab asks the remote core its
   nodes actually live on); the sessions sidebar keeps its own coarser `StatusKind` buckets and does
   not yet show `failed`.
-- **Status-grouped sessions** — three always-visible sections: **Waiting for your response** maps
-  internal `done`, `waiting`, and `blocked` together (a completed turn, question, or approval all
-  need the user); **Running** maps `working`; **Unknown** means no live hook state is available.
-  There is no Done bucket: a normal `done` hook means the turn ended and the agent is waiting for
-  another user prompt. Within each section rows sort newest-first by `lastEventAt`, the transition
-  clock (same-state hook freshness is `stateAt`), and show its short relative age. Missing clocks
-  stay last with no made-up timestamp. A click may clear the glow but cannot move the row.
+- **Status-grouped sessions** — five always-visible sections: **Need attention** maps `waiting`
+  and `blocked`; **Running** maps `working`; **Unread** holds settled, unseen results; **Idle**
+  holds read `done` turns; **Task unobserved** means no hook state is available. Running and
+  attention take priority over unread. Within each section rows sort newest-first by `lastEventAt`,
+  the transition clock (same-state hook freshness is `stateAt`). Missing clocks stay last with no
+  made-up timestamp. A click may clear the glow but cannot change the hook bucket.
+  Hookless rows in BOTH sidebar grouping modes also show a separate backend observation from the
+  existing `nodePaneEvidence` API: **backend present**, **backend stopped**, or **backend unverified**.
+  Only the core's double-confirmed absence yields stopped. Presence says nothing about foreground
+  agent activity; absence says nothing about task success. The task bucket remains unobserved.
+  The sidebar probes up to 16 eligible visible-list nodes per pass, only while open, rechecks after
+  `PANE_RECHECK_MS`, and expires old observations. It rejects removed/rebound targets, changed hook
+  entries, missing/corrupt replies and delayed results. SSH and relay nodes remain unverified because
+  this API observes local backends. Desktop and Server use the existing shared core registration;
+  both registrations request read-only presence. On Windows, attached backends can be proven present;
+  an unobserved session-host stays unverified because its ordinary existence RPC can start a helper.
+  When a host backend is supported, a tmux miss alone also stays unverified. Operational presence
+  callers retain their existing behavior. Older/missing APIs degrade to unverified.
+  This cache never writes the hook store or disk and never informs authorization or dispatch.
+  The native mobile companion has no sidebar change in this repo; its hook status protocol stays
+  unchanged, and any equivalent backend annotation needs a separate companion change.
 - **Session name ⇄ node title** — **two lists, because the two directions are separate facts**:
   `TITLE_READ_CAPABLE` (`canReadTitle` — claude, **codex**, grok, **gemini**) is the READ leg,
   `RENAME_CAPABLE` (`canRename` — claude, grok) the WRITE leg, and **read ⊇ write** is an invariant

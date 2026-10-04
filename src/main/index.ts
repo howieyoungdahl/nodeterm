@@ -2433,7 +2433,7 @@ app.whenReady().then(async () => {
   // The one input that may produce a `failed` badge: prove whether a node's tmux/session-host
   // backend is still there. Same primitive the operator API's dead-card sweep uses, double-checked
   // in core before it answers `dead`. Registered in both shells (see src/server/index.ts).
-  registerNodeStatusIpc({ panePresence: (nodeId) => ptyManager.sessionPresence(nodeId) })
+  registerNodeStatusIpc({ panePresence: (nodeId) => ptyManager.sessionPresence(nodeId, { readOnly: true }) })
   // Automatic canvas layout (`core/canvas-layout/`): the ONE way in. Nothing here polls — a plan
   // is built only when the renderer asks, on a node-created / status-changed / rules-changed /
   // organize trigger. Off unless `settings.canvasLayout.enabled` says otherwise, read at call

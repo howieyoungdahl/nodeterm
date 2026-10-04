@@ -18,7 +18,7 @@ describe('pane-evidence channel parity', () => {
     const src = read('src/main/index.ts')
     expect(src).toContain("import { registerNodeStatusIpc } from '../core/node-status-service'")
     expect(src).toMatch(
-      /registerNodeStatusIpc\(\{\s*panePresence:\s*\(nodeId\)\s*=>\s*ptyManager\.sessionPresence\(nodeId\)\s*\}\)/
+      /registerNodeStatusIpc\(\{\s*panePresence:\s*\(nodeId\)\s*=>\s*ptyManager\.sessionPresence\(nodeId,\s*\{\s*readOnly:\s*true\s*\}\)\s*\}\)/
     )
   })
 
@@ -26,7 +26,7 @@ describe('pane-evidence channel parity', () => {
     const src = read('src/server/index.ts')
     expect(src).toContain("import { registerNodeStatusIpc } from '../core/node-status-service'")
     expect(src).toMatch(
-      /registerNodeStatusIpc\(\{\s*panePresence:\s*\(nodeId\)\s*=>\s*ptyManager\.sessionPresence\(nodeId\)\s*\}\)/
+      /registerNodeStatusIpc\(\{\s*panePresence:\s*\(nodeId\)\s*=>\s*ptyManager\.sessionPresence\(nodeId,\s*\{\s*readOnly:\s*true\s*\}\)\s*\}\)/
     )
   })
 

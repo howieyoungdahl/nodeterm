@@ -561,7 +561,7 @@ describe('buildStatusList', () => {
   it('falls through to Unknown when no live state is known', () => {
     const sections = buildStatusList(proj, null, 'p1', status, '')
     const unknown = sections.find((s) => s.kind === 'unknown')!
-    expect(unknown.label).toBe('Unknown')
+    expect(unknown.label).toBe('Task unobserved')
     expect(unknown.rows.map((r) => r.id)).toEqual(['i1'])
   })
 

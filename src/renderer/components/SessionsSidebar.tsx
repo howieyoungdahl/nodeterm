@@ -24,7 +24,9 @@ import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSessionNaming } from '../state/sessionNaming'
-import { useSession } from '../session/session'
+import { sessionForProject, useSession } from '../session/session'
+import { useUnobservedBackends } from '../lib/useUnobservedBackends'
+import { unobservedBackendPresentation, type BackendProbeTarget, type BackendPresentation } from '../lib/unobservedBackend'
 
 export interface SessionsSidebarProps {
   open: boolean
@@ -76,7 +78,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const statusById = useAgentStatus((s) => s.byId)
   const namingById = useSessionNaming((s) => s.byId)
   // This sidebar's core api (a stable context read — the branch lookups run on the session's git).
-  const { api } = useSession()
+  const { api, source } = useSession()
 
   const [filter, setFilter] = useState('')
   const [statusNow, setStatusNow] = useState(() => Date.now())
@@ -150,14 +152,32 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
     [open, grouping, projects, liveActiveNodes, activeProjectId, statusById, filter]
   )
 
+  const backendTargets = useMemo<BackendProbeTarget[]>(() => groups.flatMap((group) =>
+    [...group.ungrouped, ...group.groups.flatMap(groupSessionRows)].map((row) => ({
+      id: row.id,
+      projectId: group.projectId,
+      // sessionPresence is a LOCAL backend probe. Absence on this core says nothing about SSH
+      // or relay terminals; those remain explicitly unverified instead of falsely stopped.
+      eligible: source !== 'relay' && sessionForProject(group.projectId).api === api &&
+        !projects.find((p) => p.id === group.projectId)?.ssh && !row.sshHost &&
+        statusById[row.id]?.state === undefined && !statusById[row.id]?.failure,
+      statusToken: statusById[row.id]
+    }))
+  ), [groups, projects, statusById, source, api])
+  const backendObservations = useUnobservedBackends(open, api, backendTargets)
+  const backendForRow = (projectId: string, row: SessionRowVM): BackendPresentation | undefined => {
+    const target = backendTargets.find((t) => t.id === row.id && t.projectId === projectId)
+    return target ? unobservedBackendPresentation(target, backendObservations[row.id], Date.now()) : undefined
+  }
+
   // Relative state ages need to advance even when no hook event arrives. Keep the clock dormant
-  // unless the status view is visible; 30s catches minute boundaries without per-row timers.
+  // unless the sidebar is visible; backend observations expire in BOTH grouping modes.
   useEffect(() => {
-    if (!open || grouping !== 'status') return
+    if (!open) return
     setStatusNow(Date.now())
     const timer = window.setInterval(() => setStatusNow(Date.now()), 30_000)
     return () => window.clearInterval(timer)
-  }, [open, grouping])
+  }, [open])
 
   const projectCount = (g: (typeof groups)[number]): number =>
     g.groups.reduce((n, b) => n + groupSessionCount(b), 0) + g.ungrouped.length
@@ -248,6 +268,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
       >
         <SessionRow
           row={row}
+          backend={backendForRow(projectId, row)}
           onClick={() => props.onFocusNode(row.id)}
           onClose={() => props.onCloseSession(projectId, row.id)}
           onRename={(title) => props.onRenameSession(projectId, row.id, title)}
@@ -438,6 +459,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
     <div key={row.id} className="ss-rowdrop">
       <SessionRow
         row={row}
+        backend={backendForRow(row.projectId!, row)}
         onClick={() => props.onFocusNode(row.id)}
         onClose={() => props.onCloseSession(row.projectId!, row.id)}
         onRename={(title) => props.onRenameSession(row.projectId!, row.id, title)}

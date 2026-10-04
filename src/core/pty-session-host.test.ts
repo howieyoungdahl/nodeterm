@@ -118,6 +118,22 @@ describe('PtyManager session-host contracts', () => {
     expect(backend.hasSession).toHaveBeenCalledWith('nt-node-a')
   })
 
+  it('a read-only presence check leaves an unobserved host unknown without starting its RPC client', async () => {
+    const m = await makeManager()
+    backend.hasSession.mockResolvedValue(false)
+    await expect(m.sessionPresence('node-a', { readOnly: true })).resolves.toBe('unknown')
+    expect(backend.hasSession).not.toHaveBeenCalled()
+    expect(backend.create).not.toHaveBeenCalled()
+    expect(backend.attachExisting).not.toHaveBeenCalled()
+  })
+
+  it('a read-only presence check preserves definitive absence when no host backend is supported', async () => {
+    const m = await makeManager()
+    backend.supported.mockReturnValue(false)
+    await expect(m.sessionPresence('node-a', { readOnly: true })).resolves.toBe('dead')
+    expect(backend.hasSession).not.toHaveBeenCalled()
+  })
+
   it('reports a definitive session-host miss as dead', async () => {
     const m = await makeManager()
     backend.hasSession.mockResolvedValue(false)
