@@ -7,6 +7,7 @@ import type { KanbanSession } from '../components/kanban/KanbanView'
  *  definition of that mapping — the card list and the board-log's `cardTitle` lookup must agree on
  *  what a node is called, or a title change would log as a card appearing and disappearing. */
 export function toKanbanSession(n: CanvasNode): KanbanSession | null {
+  if (n.data.cleanupArchiveId) return null
   if (n.type === 'browser') {
     return {
       id: n.id,

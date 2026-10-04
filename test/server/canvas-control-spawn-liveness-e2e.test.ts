@@ -128,7 +128,10 @@ describe.skipIf(!canDriveTmux)('disposable Server canvas-creation liveness', () 
     expect(secret).not.toBeNull()
     const nodeToken = nodeAuthToken(secret as Buffer, 'source')
     const body = new URLSearchParams({ nodeId: 'source' })
-    for (const [key, value] of Object.entries(args)) body.set(`arg.${key}`, value)
+    const metadata = verb.startsWith('open-') ? { 'task-id': 'explicit-liveness-task',
+      'creation-id': 'liveness-creation-' + verb, owner: 'Disposable assistant', workstream: 'test',
+      'functional-role': 'review', 'organization-project': 'spawn-project' } : {}
+    for (const [key, value] of Object.entries({ ...args, ...metadata })) body.set(`arg.${key}`, value)
     const response = await fetch(`http://127.0.0.1:${hookServer.getPort()}/control/${verb}`, {
       method: 'POST',
       headers: {

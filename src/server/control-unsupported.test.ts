@@ -352,7 +352,7 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
       nodes: 'term-a,term-b',
       label: 'Pair',
       color: '#bf5af2'
-    })
+    }, true)
     expect(a.rename).toHaveBeenCalledWith('term-source', { node: 'term-a', title: 'A' })
     expect(a.resize).toHaveBeenCalledWith(
       'term-source',

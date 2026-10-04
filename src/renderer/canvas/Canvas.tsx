@@ -1,3 +1,4 @@
+import { planWorkspaceFlowPublication, applyWorkspaceFlowPublication } from '../lib/workspaceFlowPublication'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { playSfx, primeSfx } from '@renderer/lib/sfx'
@@ -2016,6 +2017,8 @@ export function Canvas() {
   // live state lives in React Flow — pass it through here). Skipped entirely while the sidebar
   // is closed (the common case): this memo recomputes on every `nodes` change, i.e. every drag
   // frame, and the filter+map over all nodes would be pure waste with nobody consuming it.
+  const serverPublicationRevisionsRef = useRef(new Set<string>())
+
   const liveActiveNodes = useMemo<SessionNodeInput[] | null>(
     () =>
       sessionsOpen
@@ -2026,6 +2029,7 @@ export function Canvas() {
             })
             .map((n) => ({
               id: n.id,
+              cleanupArchiveId: n.data.cleanupArchiveId,
               kind: (n.type ?? 'terminal') as SessionNodeInput['kind'],
               title: n.data.title ?? n.id,
               color: n.data.color ?? '#888',
@@ -2572,85 +2576,52 @@ export function Canvas() {
     })
   }, [reloadDiskProject, adoptIncomingNodes])
 
-  // Writes this core made ITSELF: Server Edition headless canvas control (an agent ran
-  // `nodeterm open-agent`, `rename`, `close`…). Never a bar and never a reload — see
-  // lib/serverChange.ts for why the outside-edit classifier was the wrong instrument, and
-  // server/canvas-control.ts for the channel split.
+  // Saved core changes carry complete content and contiguous revision evidence. Merge
+  // disjoint local edits before advancing the revision; preserve a conflict warning when
+  // content overlaps or a publication was missed. Never repair a broken chain with an upsert.
   useEffect(() => {
     return api.workspace.onServerChange((project) => {
-      const { activeProjectId: current } = useProjects.getState()
-      if (project.id !== current) {
-        // Background project: the store copy IS that project until it is switched to, and it
-        // reloads into React Flow whole on the next switch.
-        const local = useProjects.getState().getProject(project.id)
-        useProjects.getState().replaceProject(project.organizationChange && local ? mergeOrganizationProject(local, project) : project)
-        if (project.organizationChange) useProjects.getState().acknowledgeOrganizationChange(project)
-        return
+      const store = useProjects.getState()
+      const active = store.getProject(store.activeProjectId)
+      const localProjects = store.projects.map(p => p.id === active?.id ? {
+        ...p, nodes: flowToNodeStates(nodesRef.current),
+        ropes: controlEdgesRef.current.map(e => ({ id: e.id, source: e.source, target: e.target })),
+        bridges: linkEdgesRef.current.map(e => ({ id: e.id, source: e.source, target: e.target }))
+      } : p)
+      if (project.workspaceChange) {
+        const seen = serverPublicationRevisionsRef.current
+        if (seen.size >= 64) seen.delete(seen.values().next().value!)
+        seen.add(project.workspaceChange.after)
       }
-      const plan = planServerChange({
-        base: useProjects.getState().getProject(project.id),
-        incoming: project,
-        liveNodeIds: nodesRef.current.map((n) => n.id),
-        liveRopes: controlEdgesRef.current.map((e) => ({
-          id: e.id,
-          source: e.source,
-          target: e.target
-        })),
-        liveBridges: linkEdgesRef.current.map((e) => ({
-          id: e.id,
-          source: e.source,
-          target: e.target
-        }))
+      const result = planWorkspaceFlowPublication({ revision: store.revision, projects: localProjects,
+        activeProjectId: store.activeProjectId, nodes: nodesRef.current, change: project.workspaceChange })
+      if (result.kind === 'duplicate') return
+      if (result.kind === 'conflict') { setConflict({ project, added: 0 }); return }
+      applyWorkspaceFlowPublication(result, {
+        content: (plan) => {
+          for (const id of plan.removed) useWebviewKeepAlive.getState().drop(id)
+          if (!plan.active) return
+          nodesRef.current = plan.nodes
+          setNodes(plan.nodes)
+          const edges = new Map(controlEdgesRef.current.map(e => [e.id, e]))
+          const nextEdges = (plan.active.ropes ?? []).map(r => {
+            const held = edges.get(r.id)
+            return held?.source === r.source && held.target === r.target ? held :
+              ropeEdge(r.id, r.source, r.target, ropeColorOf(plan.active!.nodes, r.source))
+          })
+          controlEdgesRef.current = nextEdges
+          setControlEdges(nextEdges)
+          const nextLinks = (plan.active.bridges ?? []).map(b => ({ id: b.id, source: b.source, target: b.target }))
+          linkEdgesRef.current = nextLinks
+          setLinkEdges(nextLinks)
+        },
+        acknowledge: (projects, revision) => useProjects.setState({ projects, revision }),
+        created: (ids) => void runLayoutTriggerRef.current?.('node-created', ids),
+        defer: queueMicrotask
       })
-      const adopted = adoptNodesSilently(plan.added)
-      // Only when the merge actually moved something: a fresh array of identical edges re-renders
-      // every edge on the canvas (displayEdges recomputes colour and the waiting look per edge)
-      // for no change at all, and these arrive in bursts.
-      if (plan.ropesChanged) {
-        // Reuse the Edge object for a rope the canvas already holds — it was built by the load
-        // effect / the spawn path and carries their colour (and its selection), and reusing it
-        // keeps React Flow from re-mounting an edge this merge did not touch. A rope the SERVER
-        // added is built the way the load effect builds one, off the file the server just wrote,
-        // so it looks like a restored rope rather than a stray blue one.
-        const held = new Map(controlEdgesRef.current.map((e) => [e.id, e]))
-        setControlEdges(
-          plan.ropes.map(
-            (r) =>
-              held.get(r.id) ??
-              ropeEdge(r.id, r.source, r.target, ropeColorOf(project.nodes, r.source))
-          )
-        )
-      }
-      if (plan.bridgesChanged)
-        setLinkEdges(plan.bridges.map((b) => ({ id: b.id, source: b.source, target: b.target })))
-      // The store copy is our disk baseline, and the server has already written this file — so it
-      // moves to the incoming version exactly as the 'merge' branch above does.
-      const local = useProjects.getState().getProject(project.id)
-      const merged = project.organizationChange && local ? mergeOrganizationProject(local, project) : project
-      useProjects.getState().replaceProject(merged)
-      // Organization is saved content, not a process identity. Update this field alone in
-      // React Flow so the next serialization cannot resurrect an older automatic marker.
-      const organizations = new Map(merged.nodes.filter((n) => n.organization).map((n) => [n.id, n.organization]))
-      if (organizations.size) {
-        const updated = nodesRef.current.map((n) => organizations.has(n.id)
-          ? { ...n, data: { ...n.data, organization: organizations.get(n.id) } } : n)
-        nodesRef.current = updated
-        setNodes(updated)
-      }
-      if (project.organizationChange) useProjects.getState().acknowledgeOrganizationChange(project)
-      // The merged canvas is not yet what is on disk (the server wrote its half, we hold the
-      // union), so it has to be saved. Both sides converge on the same state — the same "two
-      // clients saving one converged canvas is harmless" model the peer-mutation path relies on.
-      if (adopted || plan.ropesChanged || plan.bridgesChanged) bumpDirty()
-      // `node-created`, Server Edition side: an agent opened these through the headless factory.
-      // Same trigger, same engine, same refusals — the only difference is which shell created the
-      // card. Deferred for the same reason as the desktop path: the adopt is a `setNodes`.
-      if (plan.added.length) {
-        const created = plan.added.map((node) => node.id)
-        queueMicrotask(() => void runLayoutTriggerRef.current?.('node-created', created))
-      }
+      bumpDirty()
     })
-  }, [adoptNodesSilently, setControlEdges, setLinkEdges, bumpDirty])
+  }, [setNodes, setControlEdges, setLinkEdges, bumpDirty])
 
   // One-shot note after an on-disk migration (dismissible, non-blocking strip). Both kinds change
   // where the user's data lives, so neither may happen silently.
@@ -2949,6 +2920,15 @@ export function Canvas() {
     // `window.nodeTerminal`). Re-keyed on the api OBJECT below, in lockstep with the publisher, so a
     // tab switch tears down + re-binds both together (and a local→local switch does neither).
     return activeSession.api.canvas.onMutation((projectId, mutation) => {
+      if (mutation.workspaceRevision) {
+        // Saved core deltas follow the complete publication. Reapplying an upsert would erase
+        // the local fields the three-way merge just preserved, including on a refused overlap.
+        if (!serverPublicationRevisionsRef.current.has(mutation.workspaceRevision)) {
+          const project = useProjects.getState().getProject(projectId)
+          if (project) setConflict({ project, added: 0 })
+        }
+        return
+      }
       hasPeersRef.current = true // proof of a peer, whatever the presence table says
       const projects = useProjects.getState()
       const activeProjectId = projects.activeProjectId
@@ -9238,6 +9218,7 @@ export function Canvas() {
           case 'list': {
             const list = nodesRef.current.map((n) => ({
               id: n.id,
+              cleanupArchiveId: n.data.cleanupArchiveId,
               kind: n.type,
               title: n.data.title as string
             }))

@@ -4,7 +4,6 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import * as atomic from '../../src/core/fs-atomic'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { initPlatform, resetPlatformForTests } from '../../src/core/platform'
 import { fakePlatform } from '../../src/core/platform-fake'
@@ -15,6 +14,7 @@ import { ServerNodeOps } from '../../src/server/node-ops'
 import { createOpsApiHandler } from '../../src/server/ops-api'
 import { createPersistentHeadlessNodeOwnership } from '../../src/server/node-ownership-store'
 import { OrganizationJournal, ORGANIZATION_AUDIT_LIMIT } from '../../src/server/organization-journal'
+import { AssistantCreationReceipts } from '../../src/server/assistant-creation-receipts'
 import { WorkspaceMutationQueue } from '../../src/server/workspace-mutation-queue'
 import { IPC } from '../../src/shared/ipc'
 import type { CanvasNodeState, Project, Workspace, WorkspaceSaveAck } from '../../src/shared/types'
@@ -51,6 +51,7 @@ function service() {
   ops = new ServerNodeOps({ workspaceStore: store, mutationQueue: queue,
     ownerOf: (id) => ownership.ownerOf(id), recordOwnership: (id, owner) => ownership.record(id, owner),
     flushOwnership: () => ownership.flush(), organizationJournal: journal,
+    creationReceipts: new AssistantCreationReceipts(path.join(data, 'assistant-creation-receipts')),
     appendBoardLog: (_id, entry) => log.appendOnce(cwd, entry),
     publishProject: (project) => published.push(structuredClone(project)),
     createSession, sendText, destroySession: destroy, sessionPresence: async () => 'unknown', statusOf: () => undefined })
@@ -61,9 +62,12 @@ const request = async (route: string, body?: unknown, method = body === undefine
   const response = await fetch(base + route, { method, headers: auth, body: body === undefined ? undefined : JSON.stringify(body) })
   return { status: response.status, body: await response.json() as any }
 }
-const create = async (over: Record<string, unknown> = {}) => request('/opsapi/nodes', {
-  projectId: 'p1', organization: metadata(), idempotencyKey: 'create-test-0001', ...over
-})
+const createInput = (over: Record<string, unknown> = {}) => {
+  const input = { projectId: 'p1', organization: metadata(), idempotencyKey: 'create-test-0001', ...over }
+  return { creation: { version: 1 as const, taskId: 'organization-fixture-task', creationId: input.idempotencyKey,
+    declaredOwner: input.organization.owner }, ...input }
+}
+const create = async (over: Record<string, unknown> = {}) => request('/opsapi/nodes', createInput(over))
 const patch = async (id: string, role = 'security', over: Record<string, unknown> = {}) => {
   const project = (await store.load()).projects[0]
   return request(`/opsapi/nodes/${id}`, { organization: metadata(role), expectedRevision: project.revision, ...over }, 'PATCH')
@@ -183,14 +187,12 @@ describe('native organization through HTTP, store and renderer', () => {
   })
 
   it('rechecks durable ownership before launching an already persisted partial creation', async () => {
-    const write = atomic.writeFileAtomic
-    const failure = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async (file, ...args) => {
-      if (file === path.join(data, 'workspace.json')) throw new Error('fixture_index_full')
-      return write(file, ...args)
-    })
+    store.publicationPhase = async (phase, file) => {
+      if (file === path.join(data, 'workspace.json') && phase === 'before-displace') throw new Error('fixture_index_full')
+    }
     const partial = await create()
     expect(partial.status).toBe(503); expect(createSession).not.toHaveBeenCalled()
-    failure.mockRestore()
+    store.publicationPhase = undefined
     expect((await store.load()).projects[0].nodes.some((n) => n.id === partial.body.id)).toBe(true)
     vi.spyOn(ownership, 'flush').mockRejectedValueOnce(new Error('fixture_retry_ledger_full'))
     const failed = await create()
@@ -310,15 +312,13 @@ describe('native organization through HTTP, store and renderer', () => {
   })
 
   it('recovers a project write followed by an index failure without another card', async () => {
-    const original = atomic.writeFileAtomic
-    const write = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async (file, content, options) => {
-      if (file === path.join(data, 'workspace.json')) throw new Error('fixture_index_disk_full')
-      return original(file, content, options)
-    })
+    store.publicationPhase = async (phase, file) => {
+      if (file === path.join(data, 'workspace.json') && phase === 'before-displace') throw new Error('fixture_index_disk_full')
+    }
     const failed = await create()
     expect(failed.status).toBe(503); expect(createSession).not.toHaveBeenCalled()
     expect(JSON.parse(await fs.readFile(path.join(cwd, '.nodeterm/project.json'), 'utf8')).nodes).toHaveLength(2)
-    write.mockRestore()
+    store.publicationPhase = undefined
     service()
     const recovered = await create()
     expect(recovered.body.id).toBe(failed.body.id); expect(recovered.status).toBe(201)
@@ -350,7 +350,7 @@ describe('native organization through HTTP, store and renderer', () => {
   it('releases the workspace queue while a launch hangs, and never sends a command after timeout', async () => {
     let finish!: (v: { sessionId: string; fresh: boolean }) => void
     createSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
-    const task = ops.create({ projectId: 'p1', organization: metadata(), idempotencyKey: 'create-timeout-0001', cmd: 'once' })
+    const task = ops.create(createInput({ idempotencyKey: 'create-timeout-0001', cmd: 'once' }))
     await vi.waitFor(() => expect(createSession).toHaveBeenCalledTimes(1))
     const workspace = await store.load(); workspace.projects[1].name = 'queue stays available'
     await rpcSave(workspace)
@@ -360,7 +360,7 @@ describe('native organization through HTTP, store and renderer', () => {
     await Promise.resolve(); await Promise.resolve()
     expect(sendText).not.toHaveBeenCalled()
     service()
-    expect(await ops.create({ projectId: 'p1', organization: metadata(), idempotencyKey: 'create-timeout-0001', cmd: 'once' }))
+    expect(await ops.create(createInput({ idempotencyKey: 'create-timeout-0001', cmd: 'once' })))
       .toMatchObject({ ok: false, status: 502, replayed: true })
     expect(createSession).toHaveBeenCalledTimes(1)
   }, 35_000)
@@ -556,18 +556,31 @@ describe('native organization through HTTP, store and renderer', () => {
 
   it('does not acknowledge an external edit that races a successful file publication', async () => {
     const snapshot = await store.load(); snapshot.projects[0].name = 'browser edit'
-    const original = atomic.writeFileAtomic
-    const spy = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async (file, content, options) => {
-      await original(file, content, options)
-      if (file === path.join(data, 'workspace.json')) {
+    store.publicationPhase = async (phase, file) => {
+      if (file === path.join(data, 'workspace.json') && phase === 'published') {
         const projectFile = path.join(cwd, '.nodeterm/project.json')
         const changed = JSON.parse(await fs.readFile(projectFile, 'utf8')); changed.name = 'external after publication'
         await fs.writeFile(projectFile, JSON.stringify(changed))
       }
+    }
+    await expect(rpcSave(snapshot)).rejects.toThrow('workspace_conflict: project changed during save')
+    store.publicationPhase = undefined
+    expect((await store.load()).projects[0].name).toBe('external after publication')
+  })
+
+  it('refuses revision acknowledgment when external content changes during final content adoption', async () => {
+    const snapshot = await store.load(); snapshot.projects[0].name = 'browser edit'
+    const inner = (store as any).loadInner.bind(store)
+    vi.spyOn(store as any, 'loadInner').mockImplementationOnce(async (...args: unknown[]) => {
+      const adopted = await inner(...args)
+      const projectFile = path.join(cwd, '.nodeterm/project.json')
+      const external = JSON.parse(await fs.readFile(projectFile, 'utf8'))
+      external.name = 'external during final adoption'
+      await fs.writeFile(projectFile, JSON.stringify(external))
+      return adopted
     })
     await expect(rpcSave(snapshot)).rejects.toThrow('workspace_conflict: project changed during save')
-    spy.mockRestore()
-    expect((await store.load()).projects[0].name).toBe('external after publication')
+    expect((await store.load()).projects[0].name).toBe('external during final adoption')
   })
 
   it('preserves geometry, group, CLI and session identity in CAS metadata updates', async () => {
@@ -751,7 +764,7 @@ describe('native organization through HTTP, store and renderer', () => {
   it('runs the repository client against the disposable HTTP API without automatic retries', async () => {
     const credential = path.join(root, 'credential'), body = path.join(root, 'request.json')
     await fs.writeFile(credential, token, { mode: 0o600 })
-    await fs.writeFile(body, JSON.stringify({ projectId: 'p1', organization: metadata(), idempotencyKey: 'helper-create-0001' }))
+    await fs.writeFile(body, JSON.stringify(createInput({ idempotencyKey: 'helper-create-0001' })))
     const run = (command: string) => promisify(execFile)(process.execPath, [path.resolve('scripts/nodeterm-organization.mjs'), command,
       '--url', base, '--credential-file', credential, ...(command === 'create' ? ['--body-file', body] : [])], { timeout: 10_000 })
     const created = JSON.parse((await run('create')).stdout)

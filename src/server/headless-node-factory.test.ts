@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto'
+import { AssistantCreationReceipts } from './assistant-creation-receipts'
+import { platform } from '../core/platform'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -102,6 +105,19 @@ const terminal = (
   agentId
 })
 
+// Existing lifecycle fixtures now explicitly declare a task. Admission refusals use the real
+// unwrapped class below; this supplies content, never authority.
+const declaredArgs = (args: Record<string, string>) => ({ 'task-id': 'fixture-task-0001', 'creation-id': randomUUID(),
+  owner: 'Declared fixture owner', workstream: 'fixture', 'functional-role': 'ops',
+  'organization-project': args.project ?? 'project-1', ...args })
+class TaskFixtureFactory extends HeadlessNodeFactory {
+  constructor(deps: HeadlessNodeFactoryDeps) { super({ ...deps, creationReceipts: new AssistantCreationReceipts(path.join(platform().userDataDir, 'fixture-receipts')) }) }
+  override openTerminal(source: string, args: Record<string, string>, verified: boolean) { return super.openTerminal(source, declaredArgs(args), verified) }
+  override openAgent(source: string, args: Record<string, string>, verified: boolean) { return super.openAgent(source, declaredArgs(args), verified) }
+  override group(source: string, args: Record<string, string>) { return super.group(source, declaredArgs(args), true) }
+  override sticky(source: string, args: Record<string, string>) { return super.sticky(source, declaredArgs(args), true) }
+}
+
 describe('HeadlessNodeFactory', () => {
   let dataDir = ''
   let projectDir = ''
@@ -196,13 +212,79 @@ describe('HeadlessNodeFactory', () => {
       publishRemoval: (_projectId, nodeId) => removed.push(nodeId),
       publishProject: (project) => publishedProjects.push(structuredClone(project))
     }
-    factory = new HeadlessNodeFactory(factoryDeps)
+    factory = new TaskFixtureFactory(factoryDeps)
   })
 
   afterEach(() => {
     factory.stop()
     resetPlatformForTests()
     fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  it('requires exact declared task/owner metadata on the real creation boundary without writing or spawning', async () => {
+    const receipts = new AssistantCreationReceipts(path.join(dataDir, 'creation-admission'))
+    const actual = new HeadlessNodeFactory({ ...factoryDeps, creationReceipts: receipts })
+    const before = fs.readFileSync(path.join(dataDir, 'workspace.json'), 'utf8')
+    const complete = declaredArgs({})
+    for (const key of ['task-id', 'creation-id', 'owner', 'workstream', 'functional-role', 'organization-project']) {
+      const args: Record<string, string> = { ...complete }; delete args[key]
+      await expect(actual.openTerminal('term-source', args, true)).resolves.toMatchObject({ ok: false,
+        error: expect.stringContaining('assistant_creation_requires') })
+    }
+    await expect(actual.group('term-source', { nodes: 'term-owned' }, true)).resolves.toMatchObject({ ok: false })
+    await expect(actual.sticky('term-source', { node: 'new note', text: 'synthetic' }, true)).resolves.toMatchObject({ ok: false })
+    await expect(actual.openTerminal('term-source', complete, false)).resolves.toMatchObject({ ok: false })
+    expect(fs.readFileSync(path.join(dataDir, 'workspace.json'), 'utf8')).toBe(before)
+    expect(pty.creates).toEqual([]); expect(pty.sends).toEqual([])
+    actual.stop()
+  })
+
+  it.each(['openTerminal', 'group', 'sticky'] as const)('returns a named %s receipt refusal with no save, backend or unhandled rejection', async kind => {
+    const receipts = new AssistantCreationReceipts(path.join(dataDir, 'failed-admission'), async at => {
+      if (at === 'published') throw new Error('unconfirmed receipt acknowledgment')
+    })
+    const actual = new HeadlessNodeFactory({ ...factoryDeps, creationReceipts: receipts })
+    const args = declaredArgs(kind === 'group' ? { nodes: 'term-owned' }
+      : kind === 'sticky' ? { node: 'New note', text: 'fixture', create: 'yes' } : {})
+    const before = fs.readFileSync(path.join(dataDir, 'workspace.json'), 'utf8'), save = vi.spyOn(store, 'save')
+    try {
+      await expect(actual[kind]('term-source', args, true)).resolves.toEqual({ ok: false,
+        error: 'assistant_creation_receipt_unconfirmed_inspect_do_not_repeat' })
+      await expect(actual[kind]('term-source', args, true)).resolves.toMatchObject({ ok: false,
+        error: 'assistant_creation_receipt_unconfirmed_inspect_do_not_repeat' })
+      expect(save).not.toHaveBeenCalled()
+      expect(fs.readFileSync(path.join(dataDir, 'workspace.json'), 'utf8')).toBe(before)
+      expect(pty.creates).toEqual([]); expect(pty.sends).toEqual([])
+    } finally { save.mockRestore(); actual.stop() }
+  })
+
+  it.each(['group', 'sticky'] as const)('acknowledges native %s ownership before save without terminal placement or a backend', async kind => {
+    const receipts = new AssistantCreationReceipts(path.join(dataDir, 'structural-admission'))
+    const actual = new HeadlessNodeFactory({ ...factoryDeps, creationReceipts: receipts })
+    const args = declaredArgs(kind === 'group' ? { nodes: 'term-owned', label: 'Declared group' } : { node: 'Declared note', text: 'synthetic', create: 'yes' })
+    const source = { principal: 'verified-node' as const, sourceNodeId: 'term-source', projectId: 'project-1' }
+    const save = store.save.bind(store)
+    const spy = vi.spyOn(store, 'save').mockImplementation(async (workspace, options) => {
+      const evidence = await receipts.find(source, args['creation-id'])
+      expect(evidence).toMatchObject({ creation: { taskId: 'fixture-task-0001', declaredOwner: args.owner }, verifiedCreator: source })
+      expect(evidence!.nodes).toHaveLength(1)
+      const created = workspace.projects[0].nodes.find(n => n.id === evidence!.nodes[0].nodeId)!
+      expect(created.kind).toBe(kind); expect(created.organization!.metadata).toEqual(evidence!.nodes[0].organization)
+      expect(created.assistantCreation!.creationId).toBe(args['creation-id'])
+      expect(created.organization!.mode).toBe('manual')
+      return save(workspace, options)
+    })
+    try {
+      const reply = kind === 'group' ? await actual.group('term-source', args, true) : await actual.sticky('term-source', args, true)
+      expect(reply.ok).toBe(true); expect(spy).toHaveBeenCalledTimes(1)
+      expect(pty.creates).toEqual([]); expect(pty.sends).toEqual([])
+      const retained = await receipts.find(source, args['creation-id'])
+      const before = fs.readFileSync(path.join(dataDir, 'workspace.json'), 'utf8')
+      if (kind === 'group') await expect(actual.group('term-source', args, true)).resolves.toMatchObject({ ok: false,
+        error: expect.stringContaining('receipt_exists') })
+      expect(await receipts.find(source, args['creation-id'])).toEqual(retained)
+      expect(fs.readFileSync(path.join(dataDir, 'workspace.json'), 'utf8')).toBe(before)
+    } finally { spy.mockRestore(); actual.stop() }
   })
 
   it('creates a terminal PTY, persists both workspace index and project file, and publishes it', async () => {
@@ -253,8 +335,14 @@ describe('HeadlessNodeFactory', () => {
     // else is going to write it back. That is the only shape recovery may act on.
     expect(pty.hasAttachedClient(nodeId)).toBe(false)
     await expect(store.save(staleBrowserSnapshot)).rejects.toThrow('workspace_conflict')
-    // Legacy/external writers have no revision envelope. Recovery remains required for them.
-    await store.save({ ...staleBrowserSnapshot, revision: undefined })
+    // A coordinated omission now retains a deletion tombstone and must not be resurrected.
+    // Reproduce the legacy raw writer instead: it never participates in retained publication.
+    const file = path.join(projectDir, '.nodeterm', 'project.json')
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    raw.nodes = raw.nodes.filter((n: CanvasNodeState) => n.id !== nodeId)
+    raw.ropes = (raw.ropes ?? []).filter((e: { source: string; target: string }) => e.source !== nodeId && e.target !== nodeId)
+    raw.bridges = (raw.bridges ?? []).filter((e: { source: string; target: string }) => e.source !== nodeId && e.target !== nodeId)
+    fs.writeFileSync(file, JSON.stringify(raw))
     expect((await store.load({ sideline: false })).projects[0].nodes
       .some((node) => node.id === nodeId)).toBe(false)
 
@@ -267,7 +355,8 @@ describe('HeadlessNodeFactory', () => {
     // terminal still owns it, while the verified hand launch gets the narrow self-card mutation.
     expect(ownership.ownerOf(nodeId)).toEqual({
       sourceNodeId: 'term-source',
-      projectId: 'project-1'
+      projectId: 'project-1',
+      assistantCreationId: recovered!.organization!.receiptId
     })
     await expect(
       factory.rename(nodeId, { node: nodeId, title: 'Relaunched director' })
@@ -503,7 +592,7 @@ describe('HeadlessNodeFactory', () => {
 
   it('bounds a hung launch with a named timeout and leaves later creations available', async () => {
     factory.stop()
-    factory = new HeadlessNodeFactory({
+    factory = new TaskFixtureFactory({
       ...factoryDeps,
       ownership: createHeadlessNodeOwnership(),
       launchTimeoutMs: 25
@@ -552,7 +641,7 @@ describe('HeadlessNodeFactory', () => {
 
   it('bounds a missing Codex capability answer and degrades to the ordinary CLI', async () => {
     factory.stop()
-    factory = new HeadlessNodeFactory({
+    factory = new TaskFixtureFactory({
       ...factoryDeps,
       ownership: createHeadlessNodeOwnership(),
       capabilityTimeoutMs: 25,
@@ -2138,7 +2227,7 @@ describe('HeadlessNodeFactory', () => {
     const ledgerFile = path.join(dataDir, 'node-ownership.json')
     const durable = createPersistentHeadlessNodeOwnership(ledgerFile)
     durable.record('term-owned', { sourceNodeId: 'term-source', projectId: 'project-1' })
-    const shuttingDown = new HeadlessNodeFactory({ ...factoryDeps, ownership: durable })
+    const shuttingDown = new TaskFixtureFactory({ ...factoryDeps, ownership: durable })
 
     // The Server shell's exact shutdown order.
     shuttingDown.stop()

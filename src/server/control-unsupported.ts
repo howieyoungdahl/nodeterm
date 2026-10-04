@@ -93,7 +93,7 @@ export interface ServerEditionControlActions {
     args: Record<string, string>,
     verified: boolean
   ): Promise<ServerControlReply>
-  group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  group(sourceNodeId: string, args: Record<string, string>, verified: boolean): Promise<ServerControlReply>
   /**
    * The structural quartet. Unlike `group`, these four take `verified` explicitly: they rewrite the
    * parentage and geometry of nodes the caller did not name (a re-hugged frame re-bases every child
@@ -126,7 +126,7 @@ export interface ServerEditionControlActions {
     verified: boolean
   ): Promise<ServerControlReply>
   color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
-  sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  sticky(sourceNodeId: string, args: Record<string, string>, verified: boolean): Promise<ServerControlReply>
   deliver(input: {
     verb: 'send' | 'reply' | 'notify'
     sourceNodeId: string
@@ -227,7 +227,7 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
       case 'link':
         return actions.link(nodeId, command.args, verified)
       case 'group':
-        return actions.group(nodeId, command.args)
+        return actions.group(nodeId, command.args, verified)
       case 'ungroup':
         return actions.ungroup(nodeId, command.args, verified)
       case 'move':
@@ -243,7 +243,7 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
       case 'color':
         return actions.color(nodeId, command.args)
       case 'sticky':
-        return actions.sticky(nodeId, command.args)
+        return actions.sticky(nodeId, command.args, verified)
       case 'send':
       case 'reply':
       case 'notify':

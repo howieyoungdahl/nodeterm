@@ -68,6 +68,8 @@ export function reflectTargets(all: ClientId[], _sender: ClientId): ClientId[] {
  */
 export function stampMutation(m: CanvasMutation, seq: number): CanvasMutation {
   const stamped: CanvasMutation = { ...m, seq }
+  // Only the core publisher can attest that this delta was already persisted.
+  delete stamped.workspaceRevision
   if (!isRefId(stamped.src)) delete stamped.src
   return stamped
 }
@@ -93,10 +95,11 @@ let seq = 0
  * stamp as a browser cast, then fans out to every connected canvas. Disk persistence remains the
  * caller's responsibility; this function is only the live convergence leg.
  */
-export function publishCanvasMutation(projectId: string, mutation: CanvasMutation): boolean {
+export function publishCanvasMutation(projectId: string, mutation: CanvasMutation, workspaceRevision?: string): boolean {
   if (!isRefId(projectId) || !isCanvasMutation(mutation)) return false
   const p = platform()
   const stamped = stampMutation(sanitizeInboundMutation(mutation), ++seq)
+  if (workspaceRevision && /^[a-f0-9]{64}$/.test(workspaceRevision)) stamped.workspaceRevision = workspaceRevision
   for (const id of p.clientIds()) p.sendTo(id, IPC.canvasMut, projectId, stamped)
   return true
 }

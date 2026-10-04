@@ -75,6 +75,9 @@ export const COLLAPSED_HEIGHT = 40
 
 /** User data carried in the React Flow node's data field. */
 export interface NodeData {
+  /** Presentation only. Never changes backend or session identity. */
+  cleanupArchiveId?: string
+  assistantCreation?: CanvasNodeState['assistantCreation']
   organization?: import('@shared/kanban-organization').NodeOrganization
   title: string
   /**
@@ -1642,7 +1645,7 @@ export function duplicateNode(node: CanvasNode, offset = 28): CanvasNode {
     selected: true,
     parentId: undefined,
     extent: undefined,
-    data: { ...node.data, initialCommand: undefined, organization: undefined }
+    data: { ...node.data, initialCommand: undefined, organization: undefined, assistantCreation: undefined }
   }
 }
 
@@ -1897,6 +1900,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       id: n.id,
       // Default to 'terminal' for nodes saved before the kind field existed.
       type: n.kind ?? 'terminal',
+      hidden: !!n.cleanupArchiveId,
       ...((n.kind ?? 'terminal') === 'group' ? { dragHandle: '.group-node__label' } : {}),
       position: n.position,
       width: n.size.width,
@@ -1905,6 +1909,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       ...(n.parentId ? { parentId: n.parentId, extent: 'parent' as const } : {}),
       data: {
         title: n.title,
+        cleanupArchiveId: n.cleanupArchiveId,
         // Default true for older agent nodes saved before titleAuto existed, so they start
         // tracking the session name; non-agent nodes ignore it.
         titleAuto: n.titleAuto ?? true,
@@ -1917,6 +1922,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         role: n.role,
         taskSummary: n.taskSummary,
         organization: n.organization,
+        assistantCreation: n.assistantCreation,
         taskFrame: n.taskFrame,
         pinned: n.pinned,
         manualPlacement: n.manualPlacement,
@@ -1990,6 +1996,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
             : n.measured?.height ?? n.height ?? sizeFor(kind).height
         },
         title: n.data.title,
+        cleanupArchiveId: n.data.cleanupArchiveId,
         titleAuto: n.data.titleAuto,
         color: n.data.color,
         group: n.data.group,
@@ -2002,6 +2009,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         role: n.data.role,
         taskSummary: n.data.taskSummary,
         organization: n.data.organization,
+        assistantCreation: n.data.assistantCreation,
         taskFrame: n.data.taskFrame,
         pinned: n.data.pinned,
         manualPlacement: n.data.manualPlacement,

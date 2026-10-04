@@ -355,6 +355,9 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
 
   it('never exposes gateway credentials to a plain terminal', async () => {
     const inherited = process.env.ANTHROPIC_AUTH_TOKEN
+    const discovery = ['NODETERM_AGENT_ID', 'NODETERM_CANVAS_CONTROL', 'NODETERM_NODE_ID', 'NODETERM_HOOK_TOKEN', 'CODEX_THREAD_ID']
+    const previous = Object.fromEntries(discovery.map(key => [key, process.env[key]]))
+    for (const key of discovery) process.env[key] = 'synthetic-parent-only'
     process.env.ANTHROPIC_AUTH_TOKEN = 'preexisting-shell-token'
     try {
       const { PtyManager } = await import('./pty-manager')
@@ -372,9 +375,16 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       expect(spawnArgs[0].env.ANTHROPIC_AUTH_TOKEN).toBe('preexisting-shell-token')
       expect(spawnArgs[0].env.NODETERM_AGENT_ID).toBeUndefined()
       expect(spawnArgs[0].env.NODETERM_CANVAS_CONTROL).toBeUndefined()
+      expect(spawnArgs[0].env.NODETERM_NODE_ID).not.toBe('synthetic-parent-only')
+      expect(spawnArgs[0].env.NODETERM_HOOK_TOKEN).toBeUndefined()
+      expect(spawnArgs[0].env.CODEX_THREAD_ID).toBeUndefined()
       expect(spawnArgs[0].args.join(' ')).not.toContain('vk-secret')
       expect(spawnArgs[0].args.join(' ')).not.toContain('bifrost.example.test')
     } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
       if (inherited === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
       else process.env.ANTHROPIC_AUTH_TOKEN = inherited
     }

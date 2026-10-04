@@ -467,3 +467,31 @@ Two files, two audiences:
 **If you change or discover something other contributors must know, update this file too.** An
 invariant that only lives in a commit message is one refactor away from being violated by someone
 who never saw it.
+
+Operational presentation cleanup uses retained raw marker writes and durable inverse
+receipts, separate from destructive sweep and agent task control. Human reviewed
+receipts never establish hook completion. Serialized Server publications must carry
+complete changed content and contiguous workspace revision evidence; acknowledge
+only after safe content adoption, including background projects. Read-only publication
+snapshots must not enroll the saving store in files it has never read. Preserve opaque
+raw fields and manual board/pin/order intent. See `docs/session-cleanup.md`.
+Automatic cleanup also requires host-private task/creator receipts: a human card
+with verified completion history is still excluded. Ordinary saves cannot clear
+archive markers or drop hidden archived cards, including older-client round trips.
+On Windows, never-enrolled ordinary files have a separate exclusive admission
+fence and visibility-only save path; retained metadata, pending requests or crash
+evidence forbid downgrade. Native Windows archive enrollment explicitly refuses
+until directory durability has a real adapter. Do not replace that refusal with
+an atomic-overwrite fallback.
+Native Windows creation/organization uses an explicit private flushed-file receipt
+acknowledgment before save/spawn; it does not claim directory or power-loss durability.
+Linux receipts also sync directories. The read-only creation contract reports the
+platform guarantee. Unknown, copied, legacy and Windows receipts cannot supply
+Linux automatic cleanup admission. Interrupted receipts retain intent/fences and
+refuse replay. Native Windows tests must prove ordinary creation/organization/saves
+and retained/history/race refusal; Linux platform simulations are not native evidence.
+Management creation callers must validate the explicit stable task envelope,
+complete owner/project/workstream/role metadata and exact matching creation key
+before POST, then require the authenticated read-only creation capability and
+truthful receipt publication guarantee. Manual browser creation uses its ordinary
+workspace/terminal path. Never infer task/creator evidence or backfill legacy cards.

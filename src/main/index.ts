@@ -168,6 +168,7 @@ import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
+import { cleanupReaperGuards } from '../core/session-cleanup-protection'
 import { initKeepAwake } from './keep-awake'
 import type { KeepAwakeTracker } from '../core/keep-awake'
 import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
@@ -2470,6 +2471,7 @@ app.whenReady().then(async () => {
   // accumulation, the pty-pressure monitor covers the resource that actually ran out, and the
   // session-memory panel gives the user the visibility to cull deliberately.
   const sessionReaper = createSessionReaper({
+    ...cleanupReaperGuards(app.getPath('userData')),
     tmuxBin: () => ptyManager.getTmuxBin(),
     shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
   })

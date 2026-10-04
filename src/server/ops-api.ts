@@ -1,3 +1,6 @@
+import { creationAdmission, parseAssistantCreation } from '../shared/assistant-creation'
+import { receiptPublication } from './assistant-creation-receipts'
+import { CleanupError, type SessionCleanup } from '../core/session-cleanup'
 import http from 'node:http'
 import path from 'node:path'
 
@@ -49,6 +52,7 @@ export interface OpsHealth {
 }
 
 export interface OpsApiDeps {
+  cleanup?: SessionCleanup
   creationReceipt?(key: string): Promise<unknown>
   boards?(): Promise<unknown>
   previewOrganization?(projectId: string, entries: Array<{ nodeId: string; metadata: OrganizationMetadata }>): Promise<unknown>
@@ -109,7 +113,7 @@ export function isLoopbackPeer(address: string | undefined): boolean {
   return nums.every((n) => Number.isInteger(n) && n >= 0 && n <= 255) && nums[0] === 127
 }
 
-function readJson(req: http.IncomingMessage): Promise<unknown> {
+function readJson(req: http.IncomingMessage, maxBytes = OPS_BODY_MAX_BYTES): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
@@ -122,7 +126,7 @@ function readJson(req: http.IncomingMessage): Promise<unknown> {
     req.on('data', (chunk: Buffer) => {
       if (settled) return
       size += chunk.length
-      if (size > OPS_BODY_MAX_BYTES) {
+      if (size > maxBytes) {
         fail(Object.assign(new Error('body_too_large'), { code: 'BODY_TOO_LARGE' }))
         return
       }
@@ -245,6 +249,33 @@ export function createOpsApiHandler(
         return
       }
 
+      if (pathname.startsWith('/opsapi/cleanup/')) {
+        if (!deps.cleanup) { sendJson(res, 501, { version: 1, error: 'cleanup_unavailable' }); return }
+        const action = pathname.slice('/opsapi/cleanup/'.length)
+        const receiptMatch = /^receipts\/([a-f0-9-]{36})$/.exec(action)
+        const expected = action === 'preview' || action === 'receipts' || receiptMatch ? 'GET' : 'POST'
+        if (method !== expected) { res.setHeader('Allow', expected); sendJson(res, 405, { version: 1, error: 'method_not_allowed' }); return }
+        try {
+          if (action === 'preview') { sendJson(res, 200, await deps.cleanup.preview()); return }
+          if (action === 'receipts') { sendJson(res, 200, await deps.cleanup.receipts()); return }
+          if (receiptMatch) { sendJson(res, 200, await deps.cleanup.receipt(receiptMatch[1])); return }
+          if (action !== 'archive' && action !== 'undo' && action !== 'reviewed-preview') { sendJson(res, 404, { version: 1, error: 'not_found' }); return }
+          if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+            sendJson(res, 415, { version: 1, error: 'application_json_required' }); return
+          }
+          const body = await readJson(req, 64_000)
+          if (action === 'reviewed-preview') { sendJson(res, 200, await deps.cleanup.reviewedPreview(body)); return }
+          if (action === 'archive') { sendJson(res, 200, await deps.cleanup.archive(body)); return }
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).join() !== 'receiptId' ||
+            typeof (body as { receiptId?: unknown }).receiptId !== 'string') {
+            sendJson(res, 400, { version: 1, error: 'receipt_id_required' }); return
+          }
+          sendJson(res, 200, await deps.cleanup.undo((body as { receiptId: string }).receiptId)); return
+        } catch (e) {
+          const status = e instanceof CleanupError ? e.status : (e as NodeJS.ErrnoException)?.code === 'BODY_TOO_LARGE' ? 413 : e instanceof SyntaxError || (e as Error)?.message === 'invalid_json' ? 400 : 500
+          sendJson(res, status, { version: 1, error: e instanceof CleanupError ? e.code : status === 400 ? 'bad_json' : status === 413 ? 'body_too_large' : 'cleanup_failed' }); return
+        }
+      }
       if (pathname === '/opsapi/nodes') {
         if (method === 'GET') {
           sendJson(res, 200, { nodes: await deps.nodes() })
@@ -269,7 +300,7 @@ export function createOpsApiHandler(
             return
           }
           const raw = body as Record<string, unknown>
-          const allowed = new Set(['projectId', 'cmd', 'cwd', 'title', 'width', 'height', 'organization', 'organizationPolicy', 'expectedRevision', 'idempotencyKey'])
+          const allowed = new Set(['projectId', 'cmd', 'cwd', 'title', 'width', 'height', 'organization', 'organizationPolicy', 'expectedRevision', 'idempotencyKey', 'creation'])
           const unknownKey = Object.keys(raw).find((key) => !allowed.has(key))
           if (unknownKey) {
             sendJson(res, 400, { error: `unknown_field: ${unknownKey}` })
@@ -278,6 +309,8 @@ export function createOpsApiHandler(
           const invalid: string[] = []
           const input: OpsCreateInput = {}
           organizationFields(raw, input, invalid)
+          input.creation = parseAssistantCreation(raw.creation)
+          if (!input.creation) invalid.push('creation')
           if (raw.idempotencyKey !== undefined) {
             if (organizationKey(raw.idempotencyKey)) input.idempotencyKey = raw.idempotencyKey
             else invalid.push('idempotencyKey')
@@ -311,6 +344,8 @@ export function createOpsApiHandler(
             sendJson(res, 400, { error: `invalid_field(s): ${invalid.join(', ')}` })
             return
           }
+          const admission = creationAdmission(input.creation, input.organization, input.projectId, input.idempotencyKey)
+          if (admission || !input.idempotencyKey) { sendJson(res, 400, { error: admission ?? 'assistant_creation_key_required' }); return }
           const result = await deps.createNode(input)
           if (!result.ok) {
             sendJson(res, result.status, {
@@ -401,6 +436,20 @@ export function createOpsApiHandler(
           return
         }
         sendJson(res, 200, await deps.health())
+        return
+      }
+
+      // Separate from conversation capabilities. Older management servers do not promise
+      // private task receipts and must not receive a mixed-version helper's creation POST.
+      if (pathname === '/opsapi/creation-contract') {
+        if (method !== 'GET') {
+          res.setHeader('Allow', 'GET')
+          sendJson(res, 405, { error: 'method_not_allowed' })
+          return
+        }
+        sendJson(res, 200, { version: 1, receiptPublication: receiptPublication(), assistantCreation: { version: 1,
+          taskId: 'required', creationKey: 'exact-required', metadata: 'owner-project-workstream-functionalRole-required',
+          privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true } })
         return
       }
 

@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { AssistantCreationReceipts } from './assistant-creation-receipts'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -33,6 +34,8 @@ import { initPlatform, resetPlatformForTests } from '../core/platform'
 import type { PtyManager } from '../core/pty-manager'
 import type { WorkspaceStore } from '../core/workspace-store'
 import { IPC } from '../shared/ipc'
+const managed = (creationId: string) => ({ 'task-id': 'explicit-fixture-task', 'creation-id': creationId,
+  owner: 'Fixture assistant', workstream: 'test', 'functional-role': 'review', 'organization-project': 'p1' })
 import { DEFAULT_SETTINGS, type Project, type Settings, type Workspace } from '../shared/types'
 import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
 
@@ -135,6 +138,7 @@ describe('initServerCanvasControl', () => {
         remoteControlFlag: false
       }),
       codexSharedIdentity: async () => true,
+      creationReceipts: new AssistantCreationReceipts(path.join(dataDir, 'creation-receipts')),
       installAgentIntegrations: false
     })
 
@@ -153,7 +157,7 @@ describe('initServerCanvasControl', () => {
     const opened = await runtime.handler({
       verb: 'open-agent',
       nodeId: 'source',
-      args: { agent: 'codex', prompt: 'identity proof' },
+      args: { agent: 'codex', prompt: 'identity proof', ...managed('identity-proof-creation') },
       verified: true
     })
     expect(opened).toMatchObject({ ok: true })
@@ -208,6 +212,7 @@ describe('initServerCanvasControl', () => {
         sessionIdFlag: false,
         remoteControlFlag: false
       }),
+      creationReceipts: new AssistantCreationReceipts(path.join(dataDir, 'creation-receipts')),
       installAgentIntegrations: false
     })
     sendText.mockClear()
@@ -215,7 +220,7 @@ describe('initServerCanvasControl', () => {
     const managedOpen = runtime.handler({
       verb: 'open-agent',
       nodeId: 'source',
-      args: { agent: 'codex', prompt: 'must not wedge' },
+      args: { agent: 'codex', prompt: 'must not wedge', ...managed('not-wedged-creation') },
       verified: true
     })
     const managedReply = await Promise.race([
@@ -320,13 +325,14 @@ describe('initServerCanvasControl', () => {
       ptyManager: pty,
       settings: () => ({ ...DEFAULT_SETTINGS }),
       boardLog: { append: async () => false },
+      creationReceipts: new AssistantCreationReceipts(path.join(dataDir, 'creation-receipts')),
       installAgentIntegrations: false
     })
 
     const opened = await runtime.handler({
       verb: 'open-agent',
       nodeId: 'source',
-      args: { agent: 'claude', prompt: 'owned target' },
+      args: { agent: 'claude', prompt: 'owned target', ...managed('owned-target-creation') },
       verified: true
     })
     expect(opened).toMatchObject({ ok: true })
@@ -408,6 +414,7 @@ describe('initServerCanvasControl', () => {
       ptyManager: pty,
       settings: () => ({ ...DEFAULT_SETTINGS }),
       boardLog: { append: async () => false },
+      creationReceipts: new AssistantCreationReceipts(path.join(dataDir, 'creation-receipts')),
       installAgentIntegrations: false
     })
     fake.sent.length = 0
@@ -415,7 +422,7 @@ describe('initServerCanvasControl', () => {
     const opened = await runtime.handler({
       verb: 'open-agent',
       nodeId: 'source',
-      args: { agent: 'claude', prompt: 'spawn me' },
+      args: { agent: 'claude', prompt: 'spawn me', ...managed('server-publication-creation') },
       verified: true
     })
     expect(opened).toMatchObject({ ok: true })

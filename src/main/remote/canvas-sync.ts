@@ -32,7 +32,8 @@ export function sanitizeClientMutation(
   m: CanvasMutation,
   current: CanvasState | null
 ): CanvasMutation | null {
-  if (m.op === 'remove') return typeof m.id === 'string' && m.id ? m : null
+  if (m.op === 'remove') return typeof m.id === 'string' && m.id &&
+    !current?.nodes.find(n => n.id === m.id)?.cleanupArchiveId ? m : null
   if (m.op !== 'upsert' || !m.node || typeof m.node !== 'object') return null
   const incoming = m.node
   const existing = current?.nodes.find((n) => n.id === incoming.id)

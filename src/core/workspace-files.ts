@@ -1,3 +1,4 @@
+import { sameProjectJson, type ProjectDocument } from '../shared/project-reconciliation'
 import path from 'path'
 import { createHash } from 'node:crypto'
 import { organizationId, parseOrganizationPolicy, sanitizeOrganizationNodes } from '../shared/kanban-organization'
@@ -540,7 +541,7 @@ export function framingViewport(nodes: CanvasNodeState[]): Viewport {
  */
 export function sameProjectContent(a: ProjectFileV1, b: ProjectFileV1): boolean {
   const strip = ({ rev: _r, savedAt: _s, ...rest }: ProjectFileV1) => rest
-  return JSON.stringify(strip(a)) === JSON.stringify(strip(b))
+  return sameProjectJson(strip(a) as unknown as ProjectDocument, strip(b) as unknown as ProjectDocument)
 }
 
 /** Splits an in-memory workspace into the v3 index + the local project files to write. */
@@ -568,7 +569,7 @@ export function splitWorkspace(
       ? derivedProjectId(incoming.id, collisionSeed(incoming), (candidate) => seenIds.has(candidate))
       : incoming.id
     seenIds.add(id)
-    const { revision: _evidence, organizationChange: _publication, loadedKanban: _baseline, ...content } = incoming
+    const { revision: _evidence, organizationChange: _publication, workspaceChange: _workspacePublication, loadedKanban: _baseline, ...content } = incoming
     const p = { ...content, id, nodes: sanitizeOrganizationNodes(content.nodes, content.kanban) }
     const header = { id: p.id, name: p.name, color: p.color, ...(p.closed ? { closed: true } : {}) }
     // The machine-local half of a REF'd project (a folder or an ssh endpoint), which used to ride

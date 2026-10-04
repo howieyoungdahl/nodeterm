@@ -1,6 +1,6 @@
 # Assistant Kanban organization
 
-New operator-created terminal cards can opt into deterministic placement. The request supplies a
+New assistant-created terminal cards require explicit stable task and creation IDs,
 descriptive owner, exact NodeTerm project ID, workstream and functional role. A project policy maps
 functional roles to **existing column IDs**, with optional exact workstream/role overrides. Neither
 titles nor model names affect placement. Renaming a column retains its route; a missing policy,
@@ -8,7 +8,7 @@ board, role or column leaves the card in virtual Ungrouped. No columns are creat
 
 There is no timer, startup migration or automatic reshuffling. Existing cards do not become
 eligible by acquiring labels. The private creator ledger must attest opt-in at new-node creation,
-and the private journal must match that exact node/project/origin. The shared `ops-operator` label,
+and private task/creation receipts and the journal must match that exact node/project/origin. The shared `ops-operator` label,
 an owner string and hand-edited project metadata confer no permission. Primary cards, unknown
 ownership, pins, manual canvas placement and changed assignment provenance are protected.
 
@@ -47,23 +47,63 @@ that project's inventory. Role/workstream comparisons are exact and case-sensiti
 }
 ```
 
-`POST /opsapi/nodes` retains `projectId`, `cmd`, `cwd`, `title`, `width` and `height`. It accepts:
+Before every assistant creation POST, authenticate a read-only
+`GET /opsapi/creation-contract` with the management bearer. Require version 1 and
+`assistantCreation:{version:1,taskId:"required",creationKey:"exact-required",metadata:"owner-project-workstream-functionalRole-required",privateReceipt:"before-save-and-spawn",verifiedCreatorSource:true}`.
+Also require `receiptPublication:{version:1,platform,guarantee}`: `win32` promises
+`file-flush-visibility`; Linux and other admitted platforms promise
+`file-and-directory-sync`. Windows does not promise directory or power-loss
+durability. Missing, older, unavailable or inconsistent capabilities refuse
+before POST. Never test compatibility by creating a card.
+
+`POST /opsapi/nodes` retains `cmd`, `cwd`, `title`, `width` and `height`, and requires:
 
 | Field | Contract |
 |---|---|
-| `organization` | Exact `{owner, projectId, workstream, functionalRole}`; opts the new worker card in. |
-| `idempotencyKey` | 8–128 letters/digits/`.`/`_`/`-`; required for organization creation. Generate once per logical create. |
+| `projectId` | Explicit exact project ID, equal to `organization.projectId`. |
+| `creation` | Required exact `{version:1,taskId,creationId,declaredOwner}`. Task ID is explicit and stable; creation ID equals the key; declared owner equals `organization.owner`. |
+| `organization` | Required exact `{owner, projectId, workstream, functionalRole}`; descriptive metadata is separate from authenticated creator identity. |
+| `idempotencyKey` | Required 8–128 letters/digits/`.`/`_`/`-`; exactly `creation.creationId`. Generate once per logical creation; never silently replace. |
 | `organizationPolicy` | Optional exact policy above; requires organization and `expectedRevision`. |
 | `expectedRevision` | Current 64-character project digest; required when configuring policy, optional otherwise. |
 
-Organization creation requires an explicit `projectId` matching metadata; no active-project
-guessing. Policy version is 1; at most 64 roles and 128 exact overrides. Owner is 1–160 printable
+Task and creation IDs use the same 8–128-character key grammar. No title/model,
+shared principal or active-project inference supplies identity. Policy version is 1;
+at most 64 roles and 128 exact overrides. Owner is 1–160 printable
 characters; workstream/role are 1–80 letters/digits/`.`/`_`/`-`. Unknown nested/top-level keys and
 prototype keys reject. SSH/unavailable projects reject rather than target another host.
 The management JSON body/client input is capped at 10 KiB, including policy and command fields.
 
+Example body for one explicitly authorized new task (replace all example IDs):
+
+```json
+{
+  "projectId": "project-example",
+  "title": "Directory release checks",
+  "idempotencyKey": "create-example-0001",
+  "creation": {
+    "version": 1,
+    "taskId": "task-example-0001",
+    "creationId": "create-example-0001",
+    "declaredOwner": "Directory assistant"
+  },
+  "organization": {
+    "owner": "Directory assistant",
+    "projectId": "project-example",
+    "workstream": "directory",
+    "functionalRole": "ops"
+  }
+}
+```
+
+Manual browser creation stays available through the ordinary workspace/terminal
+path and requires no assistant envelope. Such cards receive no automatic assistant
+cleanup eligibility. Legacy/keyless management bodies are refused; no creation
+envelope or owner receipt is backfilled onto existing cards.
+
 Within the shared workspace transaction the Server reserves the node ID and request fingerprint,
-persists creator opt-in, saves the node/assignment and receipt, then durably claims launch. PTY and
+acknowledges private task/creator receipt publication before saving or spawning,
+persists creator opt-in and node/assignment evidence, then claims launch. PTY and
 initial command work cannot start before the ownership ledger's atomic write finishes. Flush waits
 for an already running background write and rejects failed publication; a retry must reach disk.
 External work runs after that queue releases. Successful create returns `201` with `id`,
@@ -75,8 +115,9 @@ Retries retain the reserved ID after complete/partial save failures. A claimed l
 replayed after timeout, crash, spawn or delivery failure. The 30-second deadline may leave a late
 PTY running; it cannot deliver the initial command after that deadline. Partial responses retain
 the original ID/key. Inspect `GET /opsapi/creation-receipts/<key>` for `stage` and `outcome`; it is
-read-only. An uncertain result requires inspection, not a new key or automatic retry. Legacy
-keyless creation receives a generated key; clients should supply one so a lost response is safe.
+read-only. An uncertain result requires inspection, not a new key or automatic retry.
+Missing task envelopes, incomplete organization and missing/mismatched keys reject
+before persistence or launch. The server never generates a replacement caller key.
 
 ## Managed updates, preview and undo
 
@@ -116,9 +157,10 @@ recover evidence.
 The preview returns `dryRun:true`, project revision and deterministic plans/reasons. Entries are an
 explicit, unique allowlist of 1–100 nodes; only reliably attested creation/placement evidence is
 eligible. It writes nothing and launches nothing. There is **no bulk apply/backfill endpoint**.
-Applying a reviewed backfill requires separate concrete operator approval covering its node IDs,
-metadata and destinations, then individual CAS updates against freshly checked revisions. An
-`apply` field on preview is rejected. Do not translate all operator cards into an allowlist.
+Individual CAS updates require existing verified creator/task/placement evidence
+and freshly checked revisions. Operator approval or labels cannot backfill missing
+private ownership or adopt existing manual/legacy cards. An `apply` field on
+preview is rejected. Do not translate all operator cards into an allowlist.
 
 `GET /opsapi/nodes/<id>/organization-audit` returns at most 20 receipts for that node. Each contains
 exact before/after assignment and order anchors, the organization marker, operation/time, and
@@ -156,6 +198,8 @@ private and owned by the caller on POSIX; it is opened without following symlink
 in memory and out of argv/output. Only loopback HTTP is allowed. Use an explicitly approved target.
 
 ```sh
+node scripts/nodeterm-organization.mjs contract \
+  --url http://127.0.0.1:8443 --credential-file /protected/path/ops-token
 node scripts/nodeterm-organization.mjs boards \
   --url http://127.0.0.1:8443 --credential-file /protected/path/ops-token
 node scripts/nodeterm-organization.mjs create \
@@ -165,16 +209,21 @@ node scripts/nodeterm-organization.mjs receipt \
   --url http://127.0.0.1:8443 --credential-file /protected/path/ops-token --key create-example-0001
 ```
 
-Commands are `boards`, `create`, `update --node ID`, `preview`, `audit --node ID`, `undo --node ID`,
+Commands are `contract`, `boards`, `create`, `update --node ID`, `preview`, `audit --node ID`, `undo --node ID`,
 `receipt --key KEY`, and `retry-events`. JSON commands accept `--body-file` or stdin. Creates require
-a key. Response JSON, including partial IDs, goes to stdout; HTTP rejection exits 2, client failure
-exits 3. Requests time out after 35 seconds and are never automatically retried.
+the complete task envelope, organization, explicit matching project and exact key.
+Local validation precedes any HTTP request; `create` then checks the authenticated
+read-only creation contract before POST. Response JSON, including partial IDs,
+goes to stdout; HTTP rejection exits 2, client failure exits 3. Requests time out
+after 35 seconds and are never automatically retried.
 
 External helpers can call this repository client as a subprocess and put reviewed JSON on stdin,
 or add the exact fields/routes above to their existing authenticated management transport. Keep a
-single key and identical body for one creation across retries; inspect receipts after transport
-failure. Do not put commands or credentials in generated shell arguments. No external helper file
-needs modification to use this client.
+stable task ID, single creation key and identical body across explicit retries;
+inspect receipts after transport failure. Do not put commands or credentials in
+generated shell arguments. Older callers lacking the envelope and capability check
+must upgrade before activation; the repository client provides both. Manual browser
+creation is separate.
 
 ## Browser and platform behavior
 
@@ -197,6 +246,13 @@ and management HTTP are Server Edition features. Local/inline projects are suppo
 its existing remote-file reconciliation; the new fence covers the local index/cache and does not
 claim cross-host CAS. Relay clients forward real workspace calls to their owning host. Windows
 paths remain opaque content; private state uses the existing atomic publication/retry utilities.
+Native Windows creation and organization use an explicit private receipt adapter:
+exclusive file publication, file flush and exact acknowledgment before save/spawn,
+with no directory or power-loss durability claim. Linux additionally syncs receipt
+directories. `GET /opsapi/creation-contract` reports this publication guarantee.
+Interrupted acknowledgment refuses launch and preserves intent; unknown, Windows
+or copied receipts never supply Linux automatic cleanup admission. Retained archive
+publication remains unsupported on Windows, without enrolling ordinary files.
 
 The private Swift mobile companion (`nodeterm-ios`) is outside this repository. Saved assignments
 remain readable; mobile writers must preserve organization fields/manual tombstones, record manual

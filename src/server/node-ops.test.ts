@@ -1,6 +1,11 @@
 import path from 'path'
+import fs from 'node:fs'
+import os from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { OrganizationJournal } from './organization-journal'
+import { AssistantCreationReceipts } from './assistant-creation-receipts'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import type { AgentState } from '../shared/agents/normalize'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
@@ -13,6 +18,9 @@ import {
   type DeadCardMassLimit,
   type NodeOpsWorkspace
 } from './node-ops'
+
+const fixtureDirs: string[] = []
+afterEach(() => { for (const dir of fixtureDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }) })
 
 const node = (
   id: string,
@@ -82,7 +90,12 @@ function harness(opts: {
       saves += 1
     }
   }
+  const evidenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-ops-fixture-'))
+  fixtureDirs.push(evidenceDir)
   const service = new ServerNodeOps({
+    organizationJournal: new OrganizationJournal(path.join(evidenceDir, 'organization.json')),
+    creationReceipts: new AssistantCreationReceipts(path.join(evidenceDir, 'creations')),
+    flushOwnership: async () => {},
     workspaceStore: store,
     sessionPresence: async (id) => {
       probes.push(id)
@@ -121,6 +134,11 @@ function harness(opts: {
   })
   return {
     service,
+    create: (input: Parameters<ServerNodeOps['create']>[0]) => {
+      const projectId = input.projectId ?? 'p1', key = randomUUID(), owner = 'Declared test task owner'
+      return service.create({ projectId, organization: { owner, projectId, workstream: 'fixture', functionalRole: 'ops' },
+        creation: { version: 1, taskId: 'fixture-task-0001', creationId: key, declaredOwner: owner }, idempotencyKey: key, ...input })
+    },
     ownership,
     workspace: () => workspace,
     saves: () => saves,
@@ -289,7 +307,7 @@ describe('ServerNodeOps', () => {
 describe('ServerNodeOps.create', () => {
   it('creates into the workspace default project, stamps ownership, and spawns a session', async () => {
     const h = harness()
-    const result = await h.service.create({})
+    const result = await h.create({})
     expect(result).toMatchObject({ ok: true, projectId: 'p1' })
     if (!result.ok) throw new Error('unreachable')
     expect(result.tmuxSession).toBe(`nt-${result.id}`)
@@ -299,7 +317,12 @@ describe('ServerNodeOps.create', () => {
       size: { width: 640, height: 440 },
       role: 'worker'
     })
-    expect(h.ownership.ownerOf(result.id)).toEqual({ sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' })
+    const receipt = await h.service.creationReceipt(result.idempotencyKey!) as any
+    expect(receipt).toMatchObject({ id: result.id, stage: 'finished', outcome: 'success',
+      verifiedCreator: { principal: 'ops-bearer', sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' },
+      creation: { declaredOwner: 'Declared test task owner', taskId: 'fixture-task-0001', creationId: result.idempotencyKey } })
+    expect(h.ownership.ownerOf(result.id)).toEqual({ sourceNodeId: OPS_OPERATOR_SOURCE_ID,
+      projectId: 'p1', assistantCreationId: receipt.creationReceiptId })
     expect(h.sessionsCreated).toEqual([result.id])
     expect(h.sentText).toEqual([])
   })
@@ -308,7 +331,7 @@ describe('ServerNodeOps.create', () => {
     const h = harness({
       nodes: [{ id: 'existing', kind: 'terminal', title: 'x', color: '#000', group: null, position: { x: 0, y: 0 }, size: { width: 640, height: 440 } }]
     })
-    const result = await h.service.create({
+    const result = await h.create({
       projectId: 'p1',
       title: 'My Terminal',
       width: 700,
@@ -326,7 +349,7 @@ describe('ServerNodeOps.create', () => {
 
   it('refuses an unknown projectId and names the known ones', async () => {
     const h = harness()
-    const result = await h.service.create({ projectId: 'nope' })
+    const result = await h.create({ projectId: 'nope' })
     expect(result).toMatchObject({ ok: false, status: 400 })
     if (result.ok) throw new Error('unreachable')
     expect(result.error).toContain('nope')
@@ -336,30 +359,30 @@ describe('ServerNodeOps.create', () => {
 
   it('refuses an ssh project as a local-only surface', async () => {
     const h = harness({ remote: true })
-    const result = await h.service.create({ projectId: 'p1' })
+    const result = await h.create({ projectId: 'p1' })
     expect(result).toMatchObject({ ok: false, status: 400, error: expect.stringContaining('ssh') })
   })
 
   it('refuses a cwd that does not exist or is not a directory, before touching the workspace', async () => {
     const h = harness()
-    const missing = await h.service.create({ cwd: '/definitely/not/a/real/path/xyz' })
+    const missing = await h.create({ cwd: '/definitely/not/a/real/path/xyz' })
     expect(missing).toMatchObject({ ok: false, status: 400, error: expect.stringContaining('cwd_not_found') })
 
-    const notADir = await h.service.create({ cwd: process.execPath })
+    const notADir = await h.create({ cwd: process.execPath })
     expect(notADir).toMatchObject({ ok: false, status: 400, error: expect.stringContaining('cwd_not_a_directory') })
     expect(h.workspace().projects[0].nodes).toHaveLength(0)
   })
 
   it('persists the card but reports 501 when the server has no session wiring', async () => {
     const h = harness({ noCreateSession: true })
-    const result = await h.service.create({})
+    const result = await h.create({})
     expect(result).toMatchObject({ ok: false, status: 501, error: expect.stringContaining('create_not_supported') })
     expect(h.workspace().projects[0].nodes).toHaveLength(1)
   })
 
   it('reports 502 with the persisted id and tmux session name when the pty spawn fails', async () => {
     const h = harness({ createSession: async () => ({ sessionId: '', fresh: false }) })
-    const result = await h.service.create({})
+    const result = await h.create({})
     expect(result).toMatchObject({ ok: false, status: 502, error: expect.stringContaining('pty_spawn_failed') })
     if (result.ok) throw new Error('unreachable')
     expect(result.id).toBeTruthy()
@@ -370,7 +393,7 @@ describe('ServerNodeOps.create', () => {
 
   it('reports 502 with the persisted id and tmux session name when the initial cmd cannot be typed', async () => {
     const h = harness({ sendText: async () => false })
-    const result = await h.service.create({ cmd: 'echo hi' })
+    const result = await h.create({ cmd: 'echo hi' })
     expect(result).toMatchObject({ ok: false, status: 502, error: expect.stringContaining('pty_command_failed') })
     if (result.ok) throw new Error('unreachable')
     expect(result.id).toBeTruthy()
@@ -384,7 +407,7 @@ describe('ServerNodeOps.create', () => {
         throw new Error('boom')
       }
     })
-    const result = await h.service.create({})
+    const result = await h.create({})
     expect(result).toMatchObject({ ok: false, status: 502, error: expect.stringContaining('boom') })
     if (result.ok) throw new Error('unreachable')
     expect(result.id).toBeTruthy()
@@ -394,7 +417,7 @@ describe('ServerNodeOps.create', () => {
 
   it('defaults an omitted cwd to the project folder, like every other server-spawned terminal', async () => {
     const h = harness({ projectCwd: '/srv/project-one' })
-    const result = await h.service.create({})
+    const result = await h.create({})
     expect(result).toMatchObject({ ok: true })
     expect(h.createSessionCwds).toEqual(['/srv/project-one'])
     // The persisted card itself carries no cwd override (matches headless-node-factory.ts's own
@@ -406,7 +429,7 @@ describe('ServerNodeOps.create', () => {
 
   it('an explicit cwd still wins over the project folder', async () => {
     const h = harness({ projectCwd: '/srv/project-one' })
-    const result = await h.service.create({ cwd: process.cwd() })
+    const result = await h.create({ cwd: process.cwd() })
     expect(result).toMatchObject({ ok: true })
     expect(h.createSessionCwds).toEqual([process.cwd()])
   })
@@ -427,7 +450,7 @@ describe('ServerNodeOps.create', () => {
       ]
     })
     const start = Date.now()
-    const result = await h.service.create({})
+    const result = await h.create({})
     expect(Date.now() - start).toBeLessThan(2_000)
     expect(result).toMatchObject({ ok: true })
     if (!result.ok) throw new Error('unreachable')
@@ -440,7 +463,7 @@ describe('ServerNodeOps.create', () => {
 describe('ServerNodeOps.update', () => {
   it('renames and resizes an operator-created node without force', async () => {
     const h = harness()
-    const created = await h.service.create({})
+    const created = await h.create({})
     if (!created.ok) throw new Error('unreachable')
     const result = await h.service.update(created.id, { title: 'renamed', width: 900 }, false)
     expect(result).toMatchObject({ ok: true, title: 'renamed', size: { width: 900, height: 440 } })
@@ -660,7 +683,12 @@ function adoptHarness(opts: {
         listPaneCwds: async () =>
           new Map(Object.entries(opts.paneCwds ?? { 'nt-term-a': path.join(cwd, 'src') }))
       }
+  const evidenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-ops-fixture-'))
+  fixtureDirs.push(evidenceDir)
   const service = new ServerNodeOps({
+    organizationJournal: new OrganizationJournal(path.join(evidenceDir, 'organization.json')),
+    creationReceipts: new AssistantCreationReceipts(path.join(evidenceDir, 'creations')),
+    flushOwnership: async () => {},
     workspaceStore: {
       load: async () => structuredClone(workspace),
       save: async (next) => {

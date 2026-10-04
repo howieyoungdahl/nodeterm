@@ -1,3 +1,4 @@
+import type { AssistantCreationReceipts } from './assistant-creation-receipts'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -55,6 +56,7 @@ export interface ServerCanvasControlDeps {
   /** Test seam for the boot-populated shared Codex capability answer. */
   codexSharedIdentity?: () => Promise<boolean>
   /** Shared with the operator inventory so creator provenance has one process-local source. */
+  creationReceipts?: AssistantCreationReceipts
   ownership?: HeadlessNodeOwnership
   /** Shared with `/opsapi/health`; snapshotting it never waits on the handler. */
   spawnHandlerState?: SpawnHandlerState
@@ -169,6 +171,7 @@ export async function initServerCanvasControl(
     stateOf: nodeState,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
     paneProjectOf: paneOwnerProject,
+    creationReceipts: deps.creationReceipts,
     ownership: deps.ownership,
     spawnHandlerState: deps.spawnHandlerState,
     mutationQueue: deps.mutationQueue,
@@ -225,7 +228,7 @@ export async function initServerCanvasControl(
     openAgent: (sourceNodeId, args, verified) => factory.openAgent(sourceNodeId, args, verified),
     close: (sourceNodeId, args, verified) => factory.close(sourceNodeId, args, verified),
     link: (sourceNodeId, args, verified) => factory.link(sourceNodeId, args, verified),
-    group: (sourceNodeId, args) => factory.group(sourceNodeId, args),
+    group: (sourceNodeId, args, verified) => factory.group(sourceNodeId, args, verified),
     ungroup: (sourceNodeId, args, verified) => factory.ungroup(sourceNodeId, args, verified),
     move: (sourceNodeId, args, verified) => factory.move(sourceNodeId, args, verified),
     arrange: (sourceNodeId, args, verified) => factory.arrange(sourceNodeId, args, verified),
@@ -233,7 +236,7 @@ export async function initServerCanvasControl(
     rename: (sourceNodeId, args) => factory.rename(sourceNodeId, args),
     resize: (sourceNodeId, args, verified) => factory.resize(sourceNodeId, args, verified),
     color: (sourceNodeId, args) => factory.color(sourceNodeId, args),
-    sticky: (sourceNodeId, args) => factory.sticky(sourceNodeId, args),
+    sticky: (sourceNodeId, args, verified) => factory.sticky(sourceNodeId, args, verified),
     // `runDelivery` applies caller→target creator proof before any pane probe or write, and
     // re-applies it when a queued delivery flushes.
     deliver: async (input) => (await deliverFromControl(input, messaging)).reply

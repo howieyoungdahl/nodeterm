@@ -105,6 +105,7 @@ export function wireAgentStatus(
     } satisfies NormalizedAgentEvent
     platform.broadcast(IPC.agentStatus, taskDoneEvent)
     recordAgentEvent(taskDoneEvent)
+    opts.onEvent?.(taskDoneEvent)
     subagentTail.finish(n.toolUseId)
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
   }

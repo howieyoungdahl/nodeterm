@@ -1,3 +1,5 @@
+import { creationAdmission, type AssistantCreation } from '../shared/assistant-creation'
+import { AssistantCreationReceipts } from './assistant-creation-receipts'
 import { promises as fsPromises } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 
@@ -143,6 +145,7 @@ export interface ServerNodeOpsDeps {
    *  never recorded and the node reads back as not operator-created (fails closed). */
   recordOwnership?(nodeId: string, owner: { sourceNodeId: string; projectId: string; assistantCreationId?: string }): void
   flushOwnership?(): Promise<void>
+  creationReceipts?: AssistantCreationReceipts
   organizationJournal?: OrganizationJournal
   appendBoardLog?(projectId: string, entry: BoardLogEntry): Promise<boolean>
   /**
@@ -160,11 +163,12 @@ export interface ServerNodeOpsDeps {
   /** Type a `create()` node's initial `--cmd` once its session exists. */
   sendText?(nodeId: string, text: string): Promise<boolean>
   onRemoved?(nodeIds: readonly string[]): void
+  protectedCleanupNodeIds?(): Promise<string[]>
   publishProject?(project: Project): void
-  publishRemoval?(projectId: string, nodeId: string): void
+  publishRemoval?(projectId: string, nodeId: string, workspaceRevision?: string): void
   /** Live insertion of one adopted card into every attached browser (canvas-sync upsert). Absent
    *  = no live channel, and `adoptOrphans` says so in its reply instead of implying one. */
-  publishNode?(projectId: string, node: CanvasNodeState): void
+  publishNode?(projectId: string, node: CanvasNodeState, workspaceRevision?: string): void
   /** Live `nt-<id>` session names on this host (`PtyManager.listNodetermSessions`). Absent = the
    *  shell wired no adoption; `adoptOrphans` then adopts nothing. */
   listSessions?(): Promise<string[]>
@@ -287,6 +291,7 @@ export type OpsRemoveResult =
   | { ok: false; status: number; error: string; paneState?: OpsPaneState }
 
 export interface OpsCreateInput {
+  creation?: AssistantCreation
   idempotencyKey?: string
   organization?: OrganizationMetadata
   organizationPolicy?: OrganizationPolicy
@@ -491,10 +496,11 @@ export class ServerNodeOps {
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
       const deadByProject = new Map<Project, string[]>()
       let scanned = 0
+      const protectedCleanupIds = new Set(await this.deps.protectedCleanupNodeIds?.() ?? [])
       for (const project of workspace.projects) {
         if (project.ssh) continue
         for (const node of project.nodes) {
-          if (node.kind !== 'terminal') continue
+          if (node.kind !== 'terminal' || node.cleanupArchiveId || protectedCleanupIds.has(node.id)) continue
           scanned += 1
           // Two definitive misses: the second is the mutation-boundary recheck. Any read failure
           // becomes `unknown`, never absence, and therefore cannot enter the deletion set.
@@ -533,7 +539,7 @@ export class ServerNodeOps {
       await this.deps.workspaceStore.save(workspace)
       for (const [project, ids] of deadByProject) {
         this.deps.publishProject?.(project)
-        for (const id of ids) this.deps.publishRemoval?.(project.id, id)
+        for (const id of ids) this.deps.publishRemoval?.(project.id, id, project.workspaceChange?.after)
       }
       this.deps.onRemoved?.(affectedIds)
       return { dryRun, affectedIds, scanned }
@@ -605,7 +611,7 @@ export class ServerNodeOps {
       for (const project of touched.values()) this.deps.publishProject?.(project)
       for (const adoption of plan.adopt) {
         if (!touched.has(adoption.projectId)) continue
-        this.deps.publishNode?.(adoption.projectId, adoption.node)
+        this.deps.publishNode?.(adoption.projectId, adoption.node, touched.get(adoption.projectId)?.workspaceChange?.after)
       }
       return { adopted, skipped, live }
     })
@@ -654,7 +660,7 @@ export class ServerNodeOps {
       removeNodeCard(project, node.id)
       await this.deps.workspaceStore.save(workspace)
       this.deps.publishProject?.(project)
-      this.deps.publishRemoval?.(project.id, node.id)
+      this.deps.publishRemoval?.(project.id, node.id, project.workspaceChange?.after)
       this.deps.onRemoved?.([node.id])
       return { ok: true, removedIds: [node.id], forced: effectiveForce }
     })
@@ -674,6 +680,9 @@ export class ServerNodeOps {
    * spawn failure is reported honestly rather than rolled back into an unknown state.
    */
   async create(input: OpsCreateInput): Promise<OpsCreateResult> {
+    const refusal = creationAdmission(input.creation, input.organization, input.projectId, input.idempotencyKey)
+    if (refusal || !input.idempotencyKey) return { ok: false, status: 400, error: refusal ?? 'assistant_creation_key_required' }
+    if (!this.deps.creationReceipts || !this.deps.organizationJournal) return { ok: false, status: 503, error: 'assistant_creation_evidence_unavailable' }
     if (this.deps.organizationJournal) return this.createDurable(input)
     if (input.organization || input.organizationPolicy || input.idempotencyKey) {
       return { ok: false, status: 503, error: 'organization_persistence_unavailable' }
@@ -743,7 +752,7 @@ export class ServerNodeOps {
       await this.deps.workspaceStore.save(workspace)
       this.deps.recordOwnership?.(id, { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: project.id })
       this.deps.publishProject?.(project)
-      this.deps.publishNode?.(project.id, node)
+      this.deps.publishNode?.(project.id, node, project.workspaceChange?.after)
       return { ok: true as const, project, node }
     })
     if (!prepared.ok) return prepared
@@ -855,7 +864,7 @@ export class ServerNodeOps {
       project.nodes = project.nodes.map((candidate) => (candidate.id === nodeId ? updated : candidate))
       await this.deps.workspaceStore.save(workspace)
       this.deps.publishProject?.(project)
-      this.deps.publishNode?.(project.id, updated)
+      this.deps.publishNode?.(project.id, updated, project.workspaceChange?.after)
       return { ok: true, id: nodeId, title: updated.title, size: updated.size }
     })
   }
@@ -947,7 +956,9 @@ export class ServerNodeOps {
   async creationReceipt(key: string): Promise<unknown> {
     const state = await this.deps.organizationJournal?.read()
     const receipt = state?.creations[key]
+    const attribution = receipt && await this.deps.creationReceipts?.find({ principal: 'ops-bearer', sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: receipt.projectId }, key)
     return receipt ? { idempotencyKey: key, id: receipt.nodeId, projectId: receipt.projectId,
+      ...(attribution ? { creation: attribution.creation, verifiedCreator: attribution.verifiedCreator, creationReceiptId: attribution.id } : {}),
       stage: receipt.stage, outcome: receipt.outcome ?? null } : { error: 'creation_receipt_not_found' }
   }
 
@@ -979,7 +990,6 @@ export class ServerNodeOps {
 
   private async createDurable(input: OpsCreateInput): Promise<OpsCreateResult> {
     const journal = this.deps.organizationJournal!
-    if (!this.deps.createSession) return { ok: false, status: 501, error: 'create_not_supported' }
     if (input.organization && (!parseOrganizationMetadata(input.organization) || !input.projectId ||
       input.organization.projectId !== input.projectId || !organizationKey(input.idempotencyKey))) {
       return { ok: false, status: 400, error: 'organization_requires_exact_project_and_idempotency_key' }
@@ -993,6 +1003,7 @@ export class ServerNodeOps {
     // Fixed field order; private command/title/cwd bytes never enter the journal or audit.
     const fingerprint = createHash('sha256').update(JSON.stringify({ projectId: input.projectId,
       cmd: input.cmd, cwd: input.cwd, title: input.title, width: input.width, height: input.height,
+      creation: input.creation,
       organization: input.organization && parseOrganizationMetadata(input.organization),
       organizationPolicy: input.organizationPolicy && parseOrganizationPolicy(input.organizationPolicy),
       expectedRevision: input.expectedRevision }, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
@@ -1005,6 +1016,10 @@ export class ServerNodeOps {
       const prepared = await this.runExclusive(async () => {
         const state = await journal.read()
         reservation = state.creations[key]
+        const evidence = await this.deps.creationReceipts!.find({ principal: 'ops-bearer', sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: input.projectId! }, key)
+        if (evidence && (!reservation || evidence.id !== reservation.id || evidence.fingerprint !== fingerprint || evidence.nodes[0]?.nodeId !== reservation.nodeId))
+          return { ok: false as const, status: 409, error: 'assistant_creation_evidence_conflict' }
+        if (reservation && !evidence) return { ok: false as const, status: 409, error: 'assistant_creation_evidence_missing_no_adoption' }
         if (reservation && reservation.fingerprint !== fingerprint) return { ok: false as const, status: 409, error: 'idempotency_key_reused' }
         if (reservation?.stage === 'launch_claimed') return { ok: false as const, status: 409, error: 'launch_outcome_uncertain_do_not_repeat',
           id: reservation.nodeId, tmuxSession: sessionName(reservation.nodeId), idempotencyKey: key, replayed: true }
@@ -1016,7 +1031,9 @@ export class ServerNodeOps {
         }
         const workspace = await this.deps.workspaceStore.load({ sideline: false })
         const project = workspace.projects.find((p) => p.id === (reservation?.projectId ?? input.projectId ?? workspace.activeProjectId))
-        if (!project) return { ok: false as const, status: 400, error: `unknown_project_id: ${input.projectId ?? '(no active project)'}` }
+        if (!project) return { ok: false as const, status: 400, error: input.projectId !== undefined
+          ? `unknown_project_id: no project ${JSON.stringify(input.projectId)}; known ids: ${workspace.projects.map(p => p.id).join(', ') || '(none)'}`
+          : `no_default_project: workspace has no active project; pass projectId explicitly; known ids: ${workspace.projects.map(p => p.id).join(', ') || '(none)'}` }
         if (project.ssh || project.unavailable) return { ok: false as const, status: 400, error: 'project_target_unavailable_or_ssh' }
         // A prior move can be on disk while its position evidence is still unacknowledged.
         // Appending against that mixed state would wrongly advance untouched sibling evidence.
@@ -1026,12 +1043,15 @@ export class ServerNodeOps {
         })) return partial('organization_write_pending_inspect_audit')
         if (!reservation && input.expectedRevision && input.expectedRevision !== project.revision) return { ok: false as const, status: 409, error: 'revision_conflict' }
         if (input.cwd !== undefined) {
-          try { if (!(await fsPromises.stat(input.cwd)).isDirectory()) return { ok: false as const, status: 400, error: 'cwd_not_a_directory' } }
-          catch { return { ok: false as const, status: 400, error: 'cwd_unreadable' } }
+          try { if (!(await fsPromises.stat(input.cwd)).isDirectory()) return { ok: false as const, status: 400, error: `cwd_not_a_directory: ${input.cwd}` } }
+          catch (error) { return { ok: false as const, status: 400, error:
+            `${(error as NodeJS.ErrnoException).code === 'ENOENT' ? 'cwd_not_found' : 'cwd_unreadable'}: ${input.cwd}` } }
         }
         if (!reservation) {
           reservation = { id: randomUUID(), nodeId: nextOperatorNodeId(), projectId: project.id,
             fingerprint, assistant: !!input.organization, stage: 'reserved' }
+          await this.deps.creationReceipts!.record({ principal: 'ops-bearer', sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: project.id },
+            input.creation!, [{ nodeId: reservation.nodeId, organization: input.organization! }], fingerprint, reservation.id)
           state.creations[key] = reservation
           await journal.write(state)
         }
@@ -1045,7 +1065,7 @@ export class ServerNodeOps {
             ok: false as const, status: 409, error: 'revision_conflict', id: reservation.nodeId, idempotencyKey: key }
           const size = { width: input.width ?? OPERATOR_DEFAULT_NODE_SIZE.width, height: input.height ?? OPERATOR_DEFAULT_NODE_SIZE.height }
           node = { id: reservation.nodeId, kind: 'terminal', position: placeFromOrigin(project, size), size,
-            title: input.title ?? `Operator ${reservation.nodeId}`, titleAuto: false, role: 'worker',
+            title: input.title ?? `Operator ${reservation.nodeId}`, titleAuto: false, role: 'worker', assistantCreation: input.creation,
             color: OPERATOR_NODE_COLOR, group: null, tags: [], ...(input.cwd !== undefined ? { cwd: input.cwd } : {}) }
           if (input.organizationPolicy) project.kanbanOrganization = input.organizationPolicy
           if (input.organization) {
@@ -1087,12 +1107,14 @@ export class ServerNodeOps {
       const { project, node } = prepared
       // No workspace FIFO is held across PTY, command delivery, publication or board log I/O.
       this.deps.publishProject?.(project)
-      this.deps.publishNode?.(project.id, node)
+      this.deps.publishNode?.(project.id, node, project.workspaceChange?.after)
       let outcome: CreationReservation['outcome'] = 'uncertain'
+      let launchError: string | undefined
       let expired = false
       let timer: ReturnType<typeof setTimeout> | undefined
       try {
         const work = (async (): Promise<CreationReservation['outcome']> => {
+          if (!this.deps.createSession) return 'spawn_failed'
           const spawned = await this.deps.createSession!({ cwd: node.cwd || project.cwd, cols: OPERATOR_TERMINAL_COLS,
             rows: OPERATOR_TERMINAL_ROWS, persistKey: node.id, ownerProjectId: project.id })
           if (expired) return 'uncertain'
@@ -1105,7 +1127,11 @@ export class ServerNodeOps {
         outcome = await Promise.race([work, new Promise<'uncertain'>((resolve) => {
           timer = setTimeout(() => { expired = true; resolve('uncertain') }, 30_000)
         })])
-      } catch { /* The claimed launch is never replayed, even if the backend finished late. */ }
+      } catch (error) {
+        // Keep the public diagnostic and the uncertain receipt together. A throw does not
+        // prove the external effect never happened, so the creation key cannot launch again.
+        launchError = `pty_spawn_failed: ${error instanceof Error ? error.message : String(error)}`
+      }
       finally { if (timer) clearTimeout(timer) }
       await this.runExclusive(async () => {
         const state = await journal.read()
@@ -1117,9 +1143,12 @@ export class ServerNodeOps {
       if (receipt) await this.publishReceipt(receipt).catch((error) => {
         console.warn('[organization] durable board event remains pending', error instanceof Error ? error.message : 'publication_failed')
       })
+      if (!this.deps.createSession) return { ok: false, status: 501,
+        error: 'create_not_supported: this server was not wired for operator node creation',
+        id: node.id, tmuxSession: sessionName(node.id), idempotencyKey: key }
       return outcome === 'success' ? { ok: true, id: node.id, projectId: project.id, title: node.title,
         tmuxSession: sessionName(node.id), idempotencyKey: key, organization: node.organization } :
-        { ok: false, status: 502, error: outcome === 'uncertain' ? 'launch_outcome_uncertain_do_not_repeat' :
+        { ok: false, status: 502, error: outcome === 'uncertain' ? `${launchError ? launchError + '; ' : ''}launch_outcome_uncertain_do_not_repeat` :
           `pty_${outcome}_do_not_repeat`, id: node.id, tmuxSession: sessionName(node.id), idempotencyKey: key }
     } catch (error) {
       return partial(error instanceof Error ? error.message : 'creation_outcome_uncertain')
@@ -1158,7 +1187,7 @@ export class ServerNodeOps {
     journal.commitReceipt(state, receipt)
     await journal.write(state)
     this.deps.publishProject?.(project)
-    this.deps.publishNode?.(project.id, updated)
+    this.deps.publishNode?.(project.id, updated, project.workspaceChange?.after)
     // Publication is retried by an explicit API call after the durable transaction releases.
     return { ok: true, id: node.id, title: node.title, size: node.size, revision: project.revision,
       organization: updated.organization, placement: plan, receiptId: id }

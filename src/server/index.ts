@@ -1,3 +1,12 @@
+import { AssistantCreationReceipts } from './assistant-creation-receipts'
+import { createReviewedCleanupProbe } from '../core/session-cleanup-reviewed-probe'
+import { SessionCleanup } from '../core/session-cleanup'
+import { createCleanupPersistence } from '../core/session-cleanup-persistence'
+import { FileCleanupReservations } from '../core/session-cleanup-reservations'
+import { cleanupReaperGuards } from '../core/session-cleanup-protection'
+import { CleanupActivity, createCleanupProbe } from '../core/session-cleanup-probe'
+import { createCleanupStartupWitness } from '../core/session-cleanup-generation'
+import { sessionName } from '../core/tmux-naming'
 import fs from 'fs'
 import { readAgentSessionName } from '../core/agent-session-name'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
@@ -216,7 +225,9 @@ export async function startServer(
 
   // Core services — same construction + registration order as src/main/index.ts.
   const settingsStore = new SettingsStore()
-  const ptyManager = new PtyManager()
+  const cleanupActivity = new CleanupActivity((id, claim) =>
+    createCleanupStartupWitness(() => ptyManager.getTmuxBin(), cleanupActivity.bootId)(id, claim))
+  const ptyManager = new PtyManager({ cleanupBootId: cleanupActivity.bootId })
   // Revision fencing rejects stale browser snapshots before writing. Backend rescue remains
   // defense in depth for older/internal unversioned writers: keep a dropped card when its
   // backend is still there and nobody deleted it here.
@@ -478,6 +489,7 @@ export async function startServer(
   // Set after the initial workspace load when the opt-in flag is on. The status listener is wired
   // now so the runtime, once present, consumes the exact same normalized stream as the UI/mirror.
   let canvasControl: ServerCanvasControl | null = null
+  const assistantCreationReceipts = new AssistantCreationReceipts(path.join(config.dataDir, 'assistant-creation-receipts'))
   const nodeOps = new ServerNodeOps({
     workspaceStore,
     sessionPresence: (nodeId) => ptyManager.sessionPresence(nodeId),
@@ -493,6 +505,7 @@ export async function startServer(
     ownerOf: (nodeId) => nodeOwnership.ownerOf(nodeId),
     recordOwnership: (nodeId, owner) => nodeOwnership.record(nodeId, owner),
     flushOwnership: () => nodeOwnership.flush(),
+    creationReceipts: assistantCreationReceipts,
     organizationJournal: new OrganizationJournal(path.join(config.dataDir, 'kanban-organization.json')),
     appendBoardLog: (projectId, entry) => boardLog.appendOnce!(projectId, entry),
     // Same PtyManager call the verified-node control plane's `attach()` makes
@@ -509,13 +522,14 @@ export async function startServer(
     // and already persisted, so they must not travel the outside-edit channel and end up behind
     // the Reload/Keep-mine bar. The renderer three-way merges `workspace:server-change` instead.
     publishProject: (project) => platform.broadcast(IPC.workspaceServerChange, project),
-    publishRemoval: (projectId, nodeId) =>
-      publishCanvasMutation(projectId, { op: 'remove', id: nodeId }),
+    publishRemoval: (projectId, nodeId, revision) =>
+      publishCanvasMutation(projectId, { op: 'remove', id: nodeId }, revision),
     // Orphan adoption's live insertion — the same upsert the headless factory publishes for a node
     // it just created, so an adopted card appears in every open tab without a reload.
-    publishNode: (projectId, node) => publishCanvasMutation(projectId, { op: 'upsert', node }),
+    publishNode: (projectId, node, revision) => publishCanvasMutation(projectId, { op: 'upsert', node }, revision),
     listSessions: () => ptyManager.listNodetermSessions(),
     listPaneCwds: () => ptyManager.listNodetermPaneCwds(),
+    protectedCleanupNodeIds: () => sessionCleanup.protectedNodeIds(),
     mirrorOf: (nodeId) => mirrorEntry(nodeId),
     // The adopted id was NOT created during this Server run, so it takes the persisted-card
     // classification, not the fresh-spawn path: `attach-session` only, dead card if the session
@@ -534,11 +548,27 @@ export async function startServer(
     intervalMs: (config.deadCardReapMinutes ?? 30) * 60_000,
     sweep: (dryRun) => nodeOps.sweep(dryRun)
   })
+  const cleanupReservations = new FileCleanupReservations()
+  const cleanupPersistence = createCleanupPersistence(workspaceStore)
+  const sessionCleanup = new SessionCleanup({
+    dataDir: config.dataDir,
+    ...cleanupPersistence,
+    exclusive: work => workspaceMutationQueue.run(work),
+    probe: createCleanupProbe({ tmuxBin: () => ptyManager.getTmuxBin(), status: mirrorEntry,
+      lastActivity: nodeLastActivityAt, activity: cleanupActivity,
+      assistantTaskEvidence: (project, node) => assistantCreationReceipts.attestNode(project.id, node.id, nodeOwnership.ownerOf(node.id)) }),
+    reviewedProbe: createReviewedCleanupProbe({ tmuxBin: () => ptyManager.getTmuxBin(), owner: id => nodeOwnership.ownerOf(id),
+      status: mirrorEntry, activity: nodeLastActivityAt }),
+    activityVersion: ids => cleanupActivity.version(ids),
+    reserveSessions: ids => cleanupReservations.reserve(ids.map(sessionName)),
+    publish: project => platform.broadcast(IPC.workspaceServerChange, cleanupPersistence.publication(project))
+  })
   const operatorBindings = new OperatorSessionBindings()
   const { contextTail, geminiContextTail } = wireAgentStatus(platform, {
     onRegistration: (agentId, nodeId, verified) =>
       canvasControl?.onHookRegistration(agentId, nodeId, verified),
     onEvent: (event) => {
+      void cleanupActivity.observe(event)
       canvasControl?.onAgentEvent(event)
     },
     onSessionHook: (agentId, nodeId, payload, verified, transcriptPath) =>
@@ -799,6 +829,7 @@ export async function startServer(
         ptyManager,
         settings: () => settingsStore.get(),
         boardLog,
+        creationReceipts: assistantCreationReceipts,
         ownership: nodeOwnership,
         spawnHandlerState,
         mutationQueue: workspaceMutationQueue,
@@ -827,6 +858,7 @@ export async function startServer(
   // for a Mac serving the browser UI, where available bytes are not the OS's pressure signal (see
   // hostMemReader). Kept identical to the desktop shell so the two cannot drift.
   const sessionReaper = createSessionReaper({
+    ...cleanupReaperGuards(config.dataDir, cleanupReservations, () => sessionCleanup.protectedNodeIds()),
     tmuxBin: () => ptyManager.getTmuxBin(),
     shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
   })
@@ -945,6 +977,7 @@ export async function startServer(
       : { kind: 'notPermitted', reason: 'unsupported-edition' }
   })
   const opsApi = createOpsApiHandler({
+    cleanup: sessionCleanup,
     token: opsToken,
     conversations: operatorConversations,
     nodes: () => nodeOps.list(),
