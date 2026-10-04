@@ -17,15 +17,15 @@ describe('buildNote', () => {
 
   it('agent node with no session and no title falls back to the agent label', () => {
     expect(buildNote(target({ agentId: 'claude', title: '' }), undefined))
-      .toBe('Claude Code · Unknown')
+      .toBe('Claude Code · Task unobserved')
   })
 
   it('agent node with no session names the NODE rather than the bare agent label', () => {
     // The common case right after an app restart: `agentStatus.state` is transient, so neither a
-    // session name nor a live state exists — "Claude Code · Unknown" would name neither the node
+    // session name nor a live state exists — "Claude Code · Task unobserved" would name neither the node
     // nor what was happening. The node's title auto-tracks the session name via `titleAuto`.
     expect(buildNote(target({ agentId: 'claude', title: 'fix-auth-bug' }), undefined))
-      .toBe('fix-auth-bug · Unknown')
+      .toBe('fix-auth-bug · Task unobserved')
   })
 
   it('agent node with a live state uses the sessions-sidebar phrasing', () => {
@@ -42,7 +42,7 @@ describe('buildNote', () => {
 
   it('custom agent id with no builtin config falls back to the raw id', () => {
     expect(buildNote(target({ agentId: 'my-custom-agent', title: '' }), undefined))
-      .toBe('my-custom-agent · Unknown')
+      .toBe('my-custom-agent · Task unobserved')
   })
 
   it('a missing kind defaults to the terminal label', () => {
