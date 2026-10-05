@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local operator CLI for the user's NodeTerm terminals; no browser session required."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import http.client
 import json
@@ -10,6 +11,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,10 +44,96 @@ class CreationUncertain(ControlError):
         super().__init__('Creation outcome is uncertain; inspect the same key without repeating POST.')
 
 
+class CleanupUncertain(ControlError):
+    def __init__(self, details):
+        self.details = details
+        super().__init__('Cleanup outcome is uncertain; inspect its receipt without repeating the mutation.')
+
+
 FORBIDDEN_LABELS = {'__proto__', 'constructor', 'prototype'}
 REQUEST_TIMEOUT = 20
 # The server's external launch deadline is 30 seconds; allow its final response to arrive.
 CREATE_TIMEOUT = 35
+CLEANUP_TIMEOUT = 30
+CLEANUP_BYTES = 1_048_576
+DISPOSITIONS = {'obsolete-completed', 'obsolete-superseded', 'obsolete-paused', 'obsolete-shell'}
+
+
+def cleanup_uuid(value):
+    return isinstance(value, str) and re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', value) is not None
+
+
+def digest(value):
+    return isinstance(value, str) and re.fullmatch(r'[a-f0-9]{64}', value) is not None
+
+
+def reviewed_cleanup_body(value):
+    if (not isinstance(value, dict) or set(value) != {'projectId', 'entries'} or not safe_id(value['projectId'])
+            or not isinstance(value['entries'], list) or not 1 <= len(value['entries']) <= 100):
+        raise ControlError('Cleanup requires one exact project and 1 to 100 explicitly reviewed entries.')
+    seen = set()
+    for entry in value['entries']:
+        if (not isinstance(entry, dict) or set(entry) != {'nodeId', 'disposition', 'ownerDigest', 'evidenceDigest'}
+                or not safe_id(entry['nodeId']) or entry['nodeId'] in seen
+                or not isinstance(entry['disposition'], str) or entry['disposition'] not in DISPOSITIONS
+                or not digest(entry['ownerDigest']) or not digest(entry['evidenceDigest'])):
+            raise ControlError('Cleanup needs unique exact IDs, explicit dispositions and current evidence/owner digests.')
+        seen.add(entry['nodeId'])
+    if len(json.dumps(value).encode('utf-8')) > 64_000:
+        raise ControlError('Cleanup request exceeds the server 64,000-byte budget.')
+    return value
+
+
+def cleanup_receipt(value, receipt_id=None):
+    receipt = value.get('receipt') if isinstance(value, dict) and type(value.get('version')) is int and value['version'] == 1 else None
+    if (not isinstance(receipt, dict) or set(receipt) - {'version', 'id', 'planId', 'at', 'state', 'items', 'review'}
+            or type(receipt.get('version')) is not int or receipt['version'] != 1
+            or not cleanup_uuid(receipt.get('id')) or (receipt_id is not None and receipt['id'] != receipt_id)
+            or not cleanup_uuid(receipt.get('planId')) or type(receipt.get('at')) is not int or receipt['at'] <= 0
+            or not isinstance(receipt.get('state'), str) or receipt['state'] not in {'prepared', 'applied', 'undo-prepared', 'undone'}
+            or not isinstance(receipt.get('items'), list) or not 1 <= len(receipt['items']) <= 100):
+        raise ControlError('Invalid cleanup receipt; outcome remains unknown.')
+    seen = set()
+    for item in receipt['items']:
+        if (not isinstance(item, dict) or set(item) != {'projectId', 'nodeId', 'generation', 'before', 'after'}
+                or not safe_id(item['projectId']) or not safe_id(item['nodeId']) or item['nodeId'] in seen
+                or not isinstance(item['generation'], str) or not 1 <= len(item['generation']) <= 16_384
+                or not digest(item['before']) or not digest(item['after'])):
+            raise ControlError('Invalid cleanup receipt cohort; outcome remains unknown.')
+        seen.add(item['nodeId'])
+    if 'review' in receipt:
+        reviewed_cleanup_body({'projectId': receipt['items'][0]['projectId'], 'entries': receipt['review']})
+        if ([e['nodeId'] for e in receipt['review']] != [i['nodeId'] for i in receipt['items']]
+                or any(i['projectId'] != receipt['items'][0]['projectId'] for i in receipt['items'])):
+            raise ControlError('Invalid reviewed receipt scope; outcome remains unknown.')
+    return receipt
+
+
+def read_cleanup_request(file):
+    source = Path(file)
+    if not source.is_absolute() or not source.is_file():
+        raise ControlError('Cleanup request must be an absolute regular host file.')
+    with source.open('rb') as stream:
+        raw = stream.read(64_001)
+    if len(raw) > 64_000:
+        raise ControlError('Cleanup request exceeds the server 64,000-byte budget.')
+    return reviewed_cleanup_body(json.loads(raw.decode('utf-8-sig')))
+
+
+@contextmanager
+def cleanup_record(output):
+    dest = Path(output)
+    if not dest.is_absolute():
+        raise ControlError('Cleanup receipt output must be an absolute host path.')
+    # Reserve before any POST; never overwrite an earlier packet or receipt.
+    with dest.open('x', encoding='utf-8') as stream:
+        os.chmod(dest, 0o600)
+        def write(value):
+            body = json.dumps(value, ensure_ascii=False, indent=2) + '\n'
+            stream.seek(0); stream.write(body); stream.truncate(); stream.flush(); os.fsync(stream.fileno())
+            if dest.read_text(encoding='utf-8') != body:
+                raise ControlError('Cleanup receipt verification failed; execution outcome must be reconciled.')
+        yield write
 
 
 def safe_id(value):
@@ -124,7 +212,7 @@ class NodeTerm:
         if not self.token or '\n' in self.token or '\r' in self.token:
             raise ControlError('Invalid operator credential file.')
 
-    def request(self, route, method='GET', body=None, *, timeout=REQUEST_TIMEOUT):
+    def request(self, route, method='GET', body=None, *, timeout=REQUEST_TIMEOUT, max_bytes=None):
         data = None if body is None else json.dumps(body).encode('utf-8')
         headers = {'Authorization': 'Bearer ' + self.token}
         if data is not None:
@@ -138,15 +226,149 @@ class NodeTerm:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         try:
             with opener.open(request, timeout=timeout) as reply:
+                if max_bytes is not None:
+                    raw = reply.read(max_bytes + 1)
+                    if len(raw) > max_bytes:
+                        raise ControlError('NodeTerm cleanup response exceeds its 1 MiB budget.')
+                    try:
+                        return json.loads(raw)
+                    except RecursionError:
+                        raise ControlError('Invalid cleanup response nesting; execution outcome remains unknown.') from None
                 return json.load(reply)
         except urllib.error.HTTPError as error:
             try:
                 payload = json.loads(error.read(4096))
-            except (OSError, ValueError, http.client.HTTPException):
+            except (OSError, ValueError, RecursionError, http.client.HTTPException):
                 payload = None
             finally:
                 error.close()
             raise HTTPControlError(error.code, payload) from None
+
+    def cleanup_preview(self):
+        result = self.request('cleanup/preview', timeout=CLEANUP_TIMEOUT, max_bytes=CLEANUP_BYTES)
+        if (not isinstance(result, dict) or type(result.get('version')) is not int or result['version'] != 1
+                or result.get('dryRun') is not True or not isinstance(result.get('plan'), dict)
+                or not isinstance(result['plan'].get('rows'), list)):
+            raise ControlError('Invalid cleanup preview; nothing was archived.')
+        return result
+
+    def cleanup_receipt(self, receipt_id):
+        if not cleanup_uuid(receipt_id):
+            raise ControlError('An exact cleanup receipt UUID is required.')
+        result = self.request('cleanup/receipts/' + receipt_id, max_bytes=CLEANUP_BYTES)
+        cleanup_receipt(result, receipt_id)
+        return result
+
+    def cleanup_receipts(self):
+        result = self.request('cleanup/receipts', max_bytes=CLEANUP_BYTES)
+        ids = result.get('receiptIds') if isinstance(result, dict) else None
+        if (not isinstance(result, dict) or type(result.get('version')) is not int or result['version'] != 1
+                or not isinstance(ids, list) or len(ids) > 1000 or any(not cleanup_uuid(i) for i in ids)
+                or len(set(ids)) != len(ids)):
+            raise ControlError('Invalid cleanup receipt listing; execution outcome remains unknown.')
+        return result
+
+    def _cleanup_mutation(self, route, body, record, context, validate):
+        record({**context, 'phase': 'requesting', 'outcomeKnown': False})
+        result = None
+        try:
+            result = self.request(route, 'POST', body, timeout=CLEANUP_TIMEOUT, max_bytes=CLEANUP_BYTES)
+            receipt = validate(result)
+            verified = {**context, 'phase': 'verified', 'outcomeKnown': True, 'receipt': receipt}
+            record(verified)
+            return verified
+        except HTTPControlError as error:
+            if error.status in (401, 403):
+                record({**context, 'phase': 'refused', 'httpStatus': error.status, 'outcomeKnown': True})
+                raise  # No secondary read after an authorization refusal.
+            failure = {'httpStatus': error.status, 'errorType': type(error).__name__}
+        except (ControlError, OSError, ValueError, http.client.HTTPException) as error:
+            failure = {'errorType': type(error).__name__}
+        details = {**context, 'phase': 'outcome-unknown', 'outcomeKnown': False, **failure}
+        receipt_id = context.get('receiptId')
+        if (receipt_id is None and isinstance(result, dict) and isinstance(result.get('receipt'), dict)
+                and cleanup_uuid(result['receipt'].get('id'))):
+            receipt_id = result['receipt']['id']
+        try:
+            # One read-only reconciliation attempt, never a mutation retry or Close fallback.
+            details['reconciliation'] = self.cleanup_receipt(receipt_id) if receipt_id else self.cleanup_receipts()
+        except (ControlError, OSError, ValueError, http.client.HTTPException) as error:
+            details['reconciliationErrorType'] = type(error).__name__
+        try:
+            record(details)
+        except (ControlError, OSError) as error:
+            details['localReceiptWriteErrorType'] = type(error).__name__
+        raise CleanupUncertain(details)
+
+    def cleanup(self, reviewed, output):
+        reviewed = reviewed_cleanup_body(reviewed)
+        entries = reviewed['entries']
+        selected = {e['nodeId']: e for e in entries}
+        context = {'version': 1, 'operation': 'archive', 'projectId': reviewed['projectId'],
+                   'nodeIds': list(selected), 'review': entries, 'receiptFile': str(output)}
+        with cleanup_record(output) as record:
+            record({**context, 'phase': 'reviewed-request', 'outcomeKnown': True, 'archiveRequested': False})
+            preview = self.request('cleanup/reviewed-preview', 'POST', reviewed,
+                                   timeout=CLEANUP_TIMEOUT, max_bytes=CLEANUP_BYTES)
+            plan = preview.get('plan') if isinstance(preview, dict) else None
+            now = int(time.time() * 1000)
+            if (not isinstance(preview, dict) or type(preview.get('version')) is not int or preview['version'] != 1
+                    or preview.get('dryRun') is not True or not isinstance(plan, dict)
+                    or not cleanup_uuid(plan.get('id')) or plan.get('mode') != 'operator-reviewed'
+                    or not digest(plan.get('workspaceHash')) or type(plan.get('createdAt')) is not int
+                    or type(plan.get('expiresAt')) is not int or not 0 < plan['createdAt'] <= now < plan['expiresAt']
+                    or plan['expiresAt'] - plan['createdAt'] != 300_000 or not isinstance(plan.get('rows'), list)):
+                raise ControlError('Fresh exact reviewed cleanup preview required; nothing was archived.')
+            eligible = [row for row in plan['rows'] if isinstance(row, dict) and row.get('eligible') is True]
+            if (len(eligible) != len(selected) or any(not safe_id(r.get('nodeId')) for r in eligible)
+                    or {r.get('nodeId') for r in eligible} != set(selected)):
+                raise ControlError('Reviewed cleanup cohort mismatch; nothing was archived.')
+            generations = {}
+            for node_id, entry in selected.items():
+                rows = [r for r in plan['rows'] if isinstance(r, dict) and r.get('nodeId') == node_id]
+                row = rows[0] if len(rows) == 1 else {}
+                fence = row.get('reviewedFence') or {}
+                evidence = row.get('evidence')
+                generation = evidence.get('generation') if isinstance(evidence, dict) else None
+                row_review = {k: entry[k] for k in ('disposition', 'evidenceDigest', 'ownerDigest')}
+                if (row.get('projectId') != reviewed['projectId'] or row.get('archived') is not False
+                        or row.get('eligible') is not True or row.get('review') != row_review
+                        or not isinstance(fence, dict) or fence.get('admissible') is not True
+                        or fence.get('ownerDigest') != entry['ownerDigest'] or not isinstance(generation, str)
+                        or not generation or generation != fence.get('generation')):
+                    raise ControlError('Reviewed cleanup identity/owner evidence changed; nothing was archived.')
+                generations[node_id] = generation
+            context['planId'] = plan['id']
+            def validate(result):
+                receipt = cleanup_receipt(result)
+                if (receipt['state'] != 'applied' or receipt['planId'] != plan['id'] or receipt.get('review') != entries
+                        or [i['nodeId'] for i in receipt['items']] != list(selected)
+                        or any(i['projectId'] != reviewed['projectId'] or i['generation'] != generations[i['nodeId']]
+                               for i in receipt['items'])):
+                    raise ControlError('Exact archive acknowledgment mismatch; outcome remains unknown.')
+                return receipt
+            return self._cleanup_mutation('cleanup/archive', {'planId': plan['id'], 'nodeIds': list(selected)},
+                                          record, context, validate)
+
+    def cleanup_undo(self, receipt_id, output):
+        if not cleanup_uuid(receipt_id):
+            raise ControlError('An exact cleanup receipt UUID is required.')
+        with cleanup_record(output) as record:
+            context = {'version': 1, 'operation': 'undo', 'receiptId': receipt_id, 'receiptFile': str(output)}
+            record({**context, 'phase': 'receipt-read', 'outcomeKnown': True, 'undoRequested': False})
+            original = cleanup_receipt(self.cleanup_receipt(receipt_id), receipt_id)
+            context['nodeIds'] = [i['nodeId'] for i in original['items']]
+            if original['state'] == 'undone':
+                result = {**context, 'phase': 'verified', 'outcomeKnown': True, 'receipt': original}
+                record(result)
+                return result
+            def validate(result):
+                receipt = cleanup_receipt(result, receipt_id)
+                if (receipt['state'] != 'undone' or receipt['planId'] != original['planId']
+                        or receipt['items'] != original['items'] or receipt.get('review') != original.get('review')):
+                    raise ControlError('Exact undo acknowledgment mismatch; outcome remains unknown.')
+                return receipt
+            return self._cleanup_mutation('cleanup/undo', {'receiptId': receipt_id}, record, context, validate)
 
     def receipt(self, key):
         key = validate_creation_key(key)
@@ -368,7 +590,17 @@ def main():
     spawn.add_argument('--idempotency-key', required=True, help='Stable caller-provided logical creation key, required for organization.')
     receipt = commands.add_parser('receipt', help='Read one creation receipt; never creates or repeats a launch.')
     receipt.add_argument('--idempotency-key', required=True)
-    close = commands.add_parser('close', help='Delete a dead operator-created node; never force a live node.')
+    commands.add_parser('cleanup-preview', help='Read current archive witnesses; no task disposition is inferred.')
+    cleanup = commands.add_parser('cleanup', aliases=['archive'], help='Routine cleanup: recoverable archive of one exact reviewed cohort.')
+    cleanup.add_argument('--request-file', required=True, help='Bounded current reviewed-preview packet with explicit task dispositions.')
+    cleanup.add_argument('--receipt-file', required=True, help='New absolute local outcome/undo receipt file; never overwrites.')
+    cleanup_receipt_parser = commands.add_parser('cleanup-receipt', help='Read one archive/undo receipt without a mutation.')
+    cleanup_receipt_parser.add_argument('--receipt-id', required=True)
+    commands.add_parser('cleanup-receipts', help='List recovery receipt IDs; never retries a mutation.')
+    cleanup_undo = commands.add_parser('cleanup-undo', aliases=['undo'], help='Clear only the exact receipt archive markers; preserve later edits.')
+    cleanup_undo.add_argument('--receipt-id', required=True)
+    cleanup_undo.add_argument('--receipt-file', required=True, help='New absolute local undo outcome file; never overwrites.')
+    close = commands.add_parser('close', help='Permanently remove a dead operator-created card/history/bindings; routine cleanup uses archive.')
     close.add_argument('--target-file', required=True)
     args = parser.parse_args()
     if args.command == 'spawn':
@@ -383,6 +615,11 @@ def main():
         spawn_body(**spawn_args)  # Reject incomplete/bad metadata before authentication or network I/O.
     elif args.command == 'receipt':
         validate_creation_key(args.idempotency_key)
+    elif args.command in ('cleanup', 'archive'):
+        cleanup_request = read_cleanup_request(args.request_file)
+    elif args.command in ('cleanup-receipt', 'cleanup-undo', 'undo'):
+        if not cleanup_uuid(args.receipt_id):
+            raise ControlError('An exact cleanup receipt UUID is required.')
     client = NodeTerm(args)
     if args.command == 'nodes':
         emit({'nodes': client.inventory()})
@@ -412,6 +649,16 @@ def main():
         emit(client.spawn(**spawn_args))
     elif args.command == 'receipt':
         emit(client.receipt(args.idempotency_key))
+    elif args.command == 'cleanup-preview':
+        emit(client.cleanup_preview())
+    elif args.command in ('cleanup', 'archive'):
+        emit(client.cleanup(cleanup_request, args.receipt_file))
+    elif args.command == 'cleanup-receipt':
+        emit(client.cleanup_receipt(args.receipt_id))
+    elif args.command == 'cleanup-receipts':
+        emit(client.cleanup_receipts())
+    elif args.command in ('cleanup-undo', 'undo'):
+        emit(client.cleanup_undo(args.receipt_id, args.receipt_file))
 
 
 if __name__ == '__main__':
@@ -423,6 +670,6 @@ if __name__ == '__main__':
     try:
         main()
     except (ControlError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
-        details = error.details if isinstance(error, CreationUncertain) else {'error': str(error)}
+        details = error.details if isinstance(error, (CreationUncertain, CleanupUncertain)) else {'error': str(error)}
         print(json.dumps(details, ensure_ascii=False), file=sys.stderr)
         sys.exit(1)

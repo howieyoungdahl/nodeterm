@@ -1,6 +1,9 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import http from 'node:http'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { WorkspaceStore } from '../../src/core/workspace-store'
 import { initPlatform, resetPlatformForTests } from '../../src/core/platform'
@@ -9,6 +12,7 @@ import { createCleanupPersistence } from '../../src/core/session-cleanup-persist
 import { SessionCleanup, CLEANUP_IDLE_MS, cleanupHash } from '../../src/core/session-cleanup'
 import { FileCleanupReservations } from '../../src/core/session-cleanup-reservations'
 import { WorkspaceMutationQueue } from '../../src/server/workspace-mutation-queue'
+import { createOpsApiHandler, type OpsApiDeps } from '../../src/server/ops-api'
 import { ProjectCommitStore, revisionOf, type PublicationPhase } from '../../src/core/project-commit-store'
 import { mergeWorkspacePublication } from '../../src/renderer/lib/workspacePublication'
 import { flowToNodeStates, nodeStatesToFlow } from '../../src/renderer/state/workspace'
@@ -25,9 +29,9 @@ const project = (id: string): Project => ({ id, name: id, color: '#888', cwd: pa
   kanban: { columns: [{ id: 'manual', title: 'Manual', color: '#888' }], assignments: [{ nodeId: id+'a', columnId: 'manual' }],
     manualAssignments: { [id+'a']: true }, manualAssignmentVersions: { [id+'a']: 'operator-choice' } } })
 const file = (id: string) => path.join(dir,id,'.nodeterm','project.json')
-const makeCleanup = (save?: (w: Workspace, check?: () => string | undefined) => Promise<void>) => {
+const makeCleanup = (save?: (w: Workspace, check?: () => string | undefined) => Promise<void>, clock = () => now) => {
   const persistence = createCleanupPersistence(store), queue = new WorkspaceMutationQueue()
-  return new SessionCleanup({ dataDir: dir, now: () => now, ...persistence, ...(save ? { save: async (w: Workspace, check?: () => string | undefined) => { await persistence.save(w,check); await save(w,check) } } : {}),
+  return new SessionCleanup({ dataDir: dir, now: clock, ...persistence, ...(save ? { save: async (w: Workspace, check?: () => string | undefined) => { await persistence.save(w,check); await save(w,check) } } : {}),
     exclusive: work => queue.run(work), reserveSessions: ids => new FileCleanupReservations(path.join(dir,'leases')).reserve(ids, 'unique-fixture'),
     activityVersion: () => fence,
     probe: async () => ({ generation: 'generation', state: 'completed', activityAt: now-CLEANUP_IDLE_MS,
@@ -49,6 +53,51 @@ beforeEach(async () => {
 })
 afterEach(async () => { resetPlatformForTests(); await fs.rm(dir,{recursive:true,force:true}) })
 const request = async (ids = ['pa']) => ({ planId: (await cleanup.preview()).plan.id, nodeIds: ids })
+
+it.skipIf(process.platform !== 'linux')('runs the Fern helper through the actual reviewed HTTP archive and undo contract with retained data', async () => {
+  cleanup = makeCleanup(undefined, Date.now)
+  const token = 'synthetic-helper-cleanup-token-00000000000000000'
+  await fs.writeFile(path.join(dir, 'ops-token'), token, { mode: 0o600 })
+  const handler = createOpsApiHandler({ token, cleanup } as unknown as OpsApiDeps)
+  const pending = new Set<Promise<void>>()
+  const server = http.createServer((q, r) => {
+    const work = handler(q, r); pending.add(work)
+    void work.finally(() => pending.delete(work))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+    const run = async (command: string, args: string[]) => JSON.parse((await promisify(execFile)('python3',
+      [path.resolve('drafts/fern/fern-nodeterm.py'), '--url', url, '--data-dir', dir, command, ...args],
+      { timeout: 15_000, maxBuffer: 1024 * 1024 })).stdout)
+    const preview = await run('cleanup-preview', []), row = preview.plan.rows.find((r: { nodeId: string }) => r.nodeId === 'pa')
+    const packet = path.join(dir, 'review.json'), output = path.join(dir, 'archive-outcome.json')
+    await fs.writeFile(packet, JSON.stringify({ projectId: 'p', entries: [{ nodeId: 'pa', disposition: 'obsolete-paused',
+      ownerDigest: row.reviewedFence.ownerDigest, evidenceDigest: cleanupHash('explicit authorized fixture task disposition') }] }))
+    const history = path.join(dir, 'history.bin'), binding = path.join(dir, 'binding.json')
+    await fs.writeFile(history, 'retained terminal history'); await fs.writeFile(binding, '{"nodeId":"pa","sessionId":"session-pa"}')
+    const index = await fs.readFile(path.join(dir, 'workspace.json'), 'utf8'), sibling = await fs.readFile(file('q'), 'utf8')
+    const archived = await run('cleanup', ['--request-file', packet, '--receipt-file', output])
+    expect(archived.outcomeKnown).toBe(true); expect(archived.receipt.state).toBe('applied')
+    expect(archived.receipt.items.map((i: { nodeId: string }) => i.nodeId)).toEqual(['pa'])
+    expect(JSON.parse(await fs.readFile(output, 'utf8'))).toEqual(archived)
+    const raw = JSON.parse(await fs.readFile(file('p'), 'utf8'))
+    expect(raw.nodes[0]).toMatchObject({ cleanupArchiveId: archived.receipt.id, agentSessionId: 'session-pa',
+      agentModel: 'gpt-6.1-sol', pinned: true, manualPlacement: true, futureIdentity: { preserved: 'raw', owner: 'foreign' } })
+    raw.nodes[0].title = 'later edit'; await fs.writeFile(file('p'), JSON.stringify(raw))
+    const undone = await run('cleanup-undo', ['--receipt-id', archived.receipt.id, '--receipt-file', path.join(dir, 'undo-outcome.json')])
+    expect(undone.outcomeKnown).toBe(true); expect(undone.receipt.state).toBe('undone')
+    const after = JSON.parse(await fs.readFile(file('p'), 'utf8'))
+    expect(after.nodes[0].cleanupArchiveId).toBeUndefined(); expect(after.nodes[0].title).toBe('later edit')
+    expect(after.kanban).toEqual(raw.kanban)
+    expect(await fs.readFile(history, 'utf8')).toBe('retained terminal history')
+    expect(await fs.readFile(binding, 'utf8')).toBe('{"nodeId":"pa","sessionId":"session-pa"}')
+    expect(await fs.readFile(file('q'), 'utf8')).toBe(sibling); expect(await fs.readFile(path.join(dir, 'workspace.json'), 'utf8')).toBe(index)
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await Promise.allSettled([...pending])
+  }
+}, 30_000)
 
 it.skipIf(process.platform === 'win32')('uses the real retained writer, preserves unknown fields and sibling/index bytes, and recovers receipts after restart', async () => {
   const index = await fs.readFile(path.join(dir,'workspace.json'),'utf8'), sibling = await fs.readFile(file('q'),'utf8')

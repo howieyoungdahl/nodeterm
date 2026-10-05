@@ -271,26 +271,38 @@ describe('persistent headless node ownership — how it reaches disk', () => {
     expect(existsSync(file)).toBe(false)
   })
 
-  it('flush waits for a timer-started in-flight atomic publication', async () => {
+  it('flush waits for a timer-started logical publication through a transient rename retry', async () => {
     const store = createPersistentHeadlessNodeOwnership(file)
     const rename = fsp.rename.bind(fsp)
     let release!: () => void
     const blocked = new Promise<void>((resolve) => { release = resolve })
-    const publish = vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+    let successfulCommits = 0
+    let ledgerAttempts = 0
+    const stagingSources = new Set<string>()
+    vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+      if (String(to) !== file) return rename(from, to)
+      stagingSources.add(String(from))
+      ledgerAttempts++
+      if (ledgerAttempts === 1) throw Object.assign(new Error('fixture_transient_lock'), { code: 'EPERM' })
       await blocked
       await rename(from, to)
+      successfulCommits++
     })
     store.record('n-child', owner)
-    await vi.waitFor(() => expect(publish).toHaveBeenCalled(), { timeout: 3000 })
+    await vi.waitFor(() => expect(ledgerAttempts).toBeGreaterThanOrEqual(2), { timeout: 3000 })
     let acknowledged = false
     const flushing = store.flush().then(() => { acknowledged = true })
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(acknowledged).toBe(false)
-    expect(existsSync(file)).toBe(false)
-    release()
-    await flushing
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(acknowledged).toBe(false)
+      expect(existsSync(file)).toBe(false)
+    } finally {
+      release()
+      await flushing
+    }
     expect(onDisk().owners['n-child']).toMatchObject(owner)
-    expect(publish).toHaveBeenCalledTimes(1)
+    expect(stagingSources.size).toBe(1)
+    expect(successfulCommits).toBe(1)
   })
 
   it('flush rejects an in-flight background failure and retries failed publication without another mutation', async () => {

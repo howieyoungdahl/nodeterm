@@ -42,6 +42,10 @@ let published: Project[]
 let pendingRequests: Set<Promise<void>>
 const token = 'disposable-test-token-000000000000'
 const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+// These cases perform several serial durable publications, not a latency benchmark.
+// Keep their semantic checks on Windows while allowing bounded scanner/retry overhead.
+const serialIoTimeout = process.platform === 'win32' ? 15_000 : 5_000
+const auditIoTimeout = process.platform === 'win32' ? 30_000 : 5_000
 
 function service() {
   store = new WorkspaceStore()
@@ -115,7 +119,7 @@ afterEach(async () => {
   await Promise.allSettled([...pendingRequests])
   await ownership.flush()
   resetPlatformForTests(); await fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
-})
+}, process.platform === 'win32' ? 30_000 : 10_000)
 
 describe('native organization through HTTP, store and renderer', () => {
   it('replays an unchanged historical creation without adding defaults to its immutable fingerprint', async () => {
@@ -238,7 +242,7 @@ describe('native organization through HTTP, store and renderer', () => {
     expect(createSession).toHaveBeenCalledTimes(2); expect(destroy).not.toHaveBeenCalled()
     service() // Expected positions survive restart as well as receipt history.
     expect((await patch(b.body.id, 'ops')).status).toBe(200)
-  })
+  }, serialIoTimeout)
 
   it.each(['manual', 'unmarked', 'duplicate'])('blocks a %s reorder after automatic sibling shifts', async (kind) => {
     const a = await create(), b = await create({ idempotencyKey: 'reorder-card-b' })
@@ -771,7 +775,7 @@ describe('native organization through HTTP, store and renderer', () => {
     expect(createSession).toHaveBeenCalledTimes(1); expect(destroy).not.toHaveBeenCalled()
     const boards = await request('/opsapi/boards')
     expect(boards.body.boards[0].columns.map((c: any) => c.id)).toEqual(['col-a', 'col-b'])
-  })
+  }, serialIoTimeout)
 
   it('undo restores only the affected assignment, preserves unrelated edits and becomes manual', async () => {
     const created = await create(), update = await patch(created.body.id)
@@ -788,7 +792,7 @@ describe('native organization through HTTP, store and renderer', () => {
     expect((await patch(created.body.id)).status).toBe(409)
     expect((await request(`/opsapi/nodes/${created.body.id}/organization-undo`, { receiptId: update.body.receiptId, expectedRevision: saved.revision })).status).toBe(409)
     expect(createSession).toHaveBeenCalledTimes(1); expect(destroy).not.toHaveBeenCalled()
-  })
+  }, serialIoTimeout)
 
   it('rejects stale undo and undone placements changed by a user', async () => {
     const created = await create(), before = (await store.load()).projects[0]
@@ -811,7 +815,7 @@ describe('native organization through HTTP, store and renderer', () => {
     const entries = await new BoardLogStore({}).read(cwd, { all: true })
     expect(new Set(entries.map((e) => e.id)).size).toBe(entries.length)
     expect(entries).toHaveLength(ORGANIZATION_AUDIT_LIMIT + 4)
-  })
+  }, auditIoTimeout)
 
   it('reports events as still pending when durable board-log publication refuses', async () => {
     const created = await create()

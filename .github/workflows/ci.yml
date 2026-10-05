@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Fern operator helper contracts
+        run: python3 drafts/fern/fern-nodeterm.test.py
+
       - name: Type check
         run: npm run typecheck
 
@@ -52,6 +55,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Fern operator helper contracts
+        run: python drafts/fern/fern-nodeterm.test.py
 
       - name: Type check
         run: npm run typecheck

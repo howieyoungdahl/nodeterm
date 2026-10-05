@@ -150,3 +150,52 @@ body with an existing key must be rejected, never accepted through a GET receipt
 
 Browser visibility is separate: this CLI does not establish that Fern can see or
 control Chrome. Use the browser's normal approval flow for visual browser work.
+
+## Recoverable routine cleanup
+
+After the reviewed Server rollout, use `cleanup` (alias `archive`) for ordinary
+authorized card cleanup. It calls the existing reviewed-preview and archive API,
+hides only an exact cohort, and keeps card records, history, session identities,
+bindings and backend processes. `close` remains a separate permanent removal;
+cleanup never falls back to Close, sweep, process termination or permission changes.
+
+Use the current task outcome and authorized scope to select cards. Unknown work,
+working tasks, missing private ownership and user-owned cards stay held unless
+the current request explicitly covers them. A title or dead pane never supplies
+an obsolete disposition. The request packet contains exactly `projectId` and
+1 to 100 unique `entries`; each entry carries `nodeId`, an explicit disposition
+(`obsolete-completed`, `obsolete-superseded`, `obsolete-paused`, or `obsolete-shell`),
+the current `ownerDigest`, and the recorded task-decision `evidenceDigest`.
+Both digests are SHA-256. Reuse the repository's offline review-packet helper
+described in `docs/session-cleanup.md`; do not manufacture ownership or completed
+task evidence. Existing user authorization can supply task disposition within
+its scope; reversible archive does not require a separate permanent-loss approval.
+
+```powershell
+py $env:USERPROFILE\.codex\scripts\fern-nodeterm.py cleanup-preview
+py $env:USERPROFILE\.codex\scripts\fern-nodeterm.py cleanup --request-file C:\absolute\current-review.json --receipt-file C:\absolute\archive-outcome.json
+py $env:USERPROFILE\.codex\scripts\fern-nodeterm.py cleanup-receipt --receipt-id EXACT_RECEIPT_UUID
+py $env:USERPROFILE\.codex\scripts\fern-nodeterm.py cleanup-undo --receipt-id EXACT_RECEIPT_UUID --receipt-file C:\absolute\undo-outcome.json
+```
+
+The helper reserves a new private outcome file before submitting the reviewed
+preview, flushes and reopens each saved stage, and archives only a fresh five-minute
+plan whose entire cohort, project, dispositions, owner digests and generations
+match the request. Success requires the exact applied receipt. Undo reads that
+receipt first, verifies the exact inverse acknowledgment, and changes no later
+title/position edits. An already-undone receipt needs no second POST.
+
+Timeouts, partial responses and invalid acknowledgments remain unknown. The helper
+makes at most one recovery read (`cleanup-receipt` when the UUID is known, otherwise
+`cleanup-receipts`) and never repeats a mutation or claims success from that read.
+Authorization refusal stops immediately without a secondary read. Inspect the
+retained outcome file and server receipt before any explicit recovery action;
+the output file must never be overwritten. Requests stay within the existing
+64,000-byte limit; responses and receipt listings are bounded. The existing
+management credential is unchanged, remains on Linux and never rides argv.
+
+The Windows wrapper runs this on the Linux Server host. Native Windows Server
+archive remains unsupported by the existing retained-publication contract;
+the helper adds no fallback. An older served build lacking reviewed archive
+refuses without deleting a card. Upgrade the helper and guide as a reviewed pair;
+no archive is run as an installation or verification test on the live board.
