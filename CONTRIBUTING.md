@@ -196,6 +196,11 @@ preserving manual choices and the relative order of untouched cards. Run the org
 suites in both Linux and Windows CI; terminal integration tests use private disposable sockets.
 No automatic column creation, backfill or background reshuffling. See
 [Assistant Kanban organization](docs/kanban-organization.md) for the API, client and surface limits.
+Every new task terminal also records category, urgency and reason before save/launch. Work
+category, stage, blocked state and urgency are independent. Supporting sessions fold only
+through explicit task/parent intent; preserve pins, manual placement and user metadata overrides.
+Use [Creation-time work planning](docs/task-planning.md) for the schema and bounded CAS updates.
+
 The conversation principal is separate from management and has a small external CLI;
 see `docs/operator-conversations.md` for credential handling, policy provisioning boundaries,
 receipt meaning, and WSL use. Policy v1 keeps exact grants. Policy v2 also accepts the explicit

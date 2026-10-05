@@ -13,7 +13,8 @@ spec.loader.exec_module(fern)
 CONTRACT = {'version': 1, 'receiptPublication': {'version': 1, 'platform': 'linux', 'guarantee': 'file-and-directory-sync'},
             'assistantCreation': {'version': 1, 'taskId': 'required', 'creationKey': 'exact-required',
             'metadata': 'owner-project-workstream-functionalRole-required', 'privateReceipt': 'before-save-and-spawn',
-            'verifiedCreatorSource': True}}
+            'verifiedCreatorSource': True,
+            'taskPlanning': 'category-urgency-reason-relationship-before-save-and-spawn'}}
 ARGS = {'project_id': 'fixture-project', 'title': 'Explicit caller title', 'owner': 'Declared Fern',
         'workstream': 'fixture', 'functional_role': 'review', 'idempotency_key': 'stable-creation', 'task_id': 'stable-task'}
 
@@ -89,6 +90,22 @@ class CallerCompatibility(unittest.TestCase):
         self.contract = {**CONTRACT, 'receiptPublication': {'version': 1, 'platform': 'win32', 'guarantee': 'file-flush-visibility'}}
         self.assertEqual(self.client.spawn(**ARGS)['id'], 'child')
         self.assertEqual([(m, r) for m, r, _ in self.calls], [('GET', '/opsapi/creation-contract'), ('POST', '/opsapi/nodes')])
+
+    def test_planning_keeps_exact_category_reason_and_explicit_parent_intent(self):
+        planning = {'version': 1, 'taskId': 'stable-task', 'category': 'research',
+                    'categoryReason': 'Explicit evidence collection task', 'relationship': 'support',
+                    'parentTaskId': 'parent-task-1234',
+                    'urgency': {'mode': 'auto', 'level': 'medium', 'reason': 'Routine evidence work', 'signals': []}}
+        self.assertEqual(self.client.spawn(**ARGS, task_planning=planning)['id'], 'child')
+        self.assertEqual(self.calls[1][2]['creation']['planning'], planning)
+        with self.assertRaises(fern.ControlError):
+            fern.spawn_body(**ARGS, task_planning={**planning, 'taskId': 'another-task'})
+
+    def test_old_contract_without_planning_guarantee_refuses_before_post(self):
+        self.contract = {**CONTRACT, 'assistantCreation': {k: v for k, v in CONTRACT['assistantCreation'].items() if k != 'taskPlanning'}}
+        with self.assertRaises(fern.ControlError):
+            self.client.spawn(**ARGS)
+        self.assertEqual([(m, r) for m, r, _ in self.calls], [('GET', '/opsapi/creation-contract')])
 
     def test_uncertain_post_reads_one_receipt_and_never_repeats_post_or_claims_success(self):
         for receipt_status in (200, 404):

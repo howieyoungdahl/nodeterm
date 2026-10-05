@@ -10,7 +10,8 @@ import { afterEach, beforeEach, expect, it } from 'vitest'
 let dir: string, base: string, server: http.Server, calls: Array<{ method: string; route: string; body?: unknown }>
 let contract: unknown, status: number, createStatus: number
 const promise = { version: 1, taskId: 'required', creationKey: 'exact-required',
-  metadata: 'owner-project-workstream-functionalRole-required', privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true }
+  metadata: 'owner-project-workstream-functionalRole-required', privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true,
+  taskPlanning: 'category-urgency-reason-relationship-before-save-and-spawn' }
 const capability = (platform = 'linux') => ({ version: 1, assistantCreation: promise,
   receiptPublication: { version: 1, platform, guarantee: platform === 'win32' ? 'file-flush-visibility' : 'file-and-directory-sync' } })
 const input = { projectId: 'fixture-project', title: 'Explicit title', idempotencyKey: 'fixture-creation',
@@ -54,6 +55,7 @@ it('refuses missing/mismatched task, key, owner/project/role and unknown envelop
 it('refuses old/unavailable/weaker or inconsistent receipt publication capabilities without POST or recovery reads', async () => {
   for (const candidate of [undefined, { version: 1 }, { ...capability(), version: 2 },
     { ...capability(), assistantCreation: { ...promise, privateReceipt: 'optional' } },
+    { ...capability(), assistantCreation: { ...promise, taskPlanning: undefined } },
     { ...capability(), receiptPublication: { version: 1, platform: 'win32', guarantee: 'file-and-directory-sync' } },
     { ...capability(), receiptPublication: { version: 1, platform: 'unknown', guarantee: 'file-and-directory-sync' } }]) {
     calls = []; contract = candidate ?? {}; status = candidate === undefined ? 404 : 200

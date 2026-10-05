@@ -9,6 +9,8 @@ import type { AgentId } from '@shared/agents/config'
 import { NodeStatusBadge } from '../../nodes/NodeStatusBadge'
 import { showsStatus } from '../../lib/nodeStatusView'
 import { OrganizationBadge } from '../OrganizationBadge'
+import { TaskPlanningBadge } from '../TaskPlanningBadge'
+import { assessTaskUrgency, parseTaskPlanning } from '@shared/task-planning'
 
 const PRIO_COLOR: Record<KanbanPriority, string> = {
   low: '#8e8e93',
@@ -18,6 +20,10 @@ const PRIO_COLOR: Record<KanbanPriority, string> = {
 }
 
 interface SessionCardProps {
+  supportingSessions?: KanbanSession[]
+  urgentSupportingCount?: number
+  supportsExpanded?: boolean
+  onToggleSupport?: (nodeId: string) => void
   session: KanbanSession
   meta?: KanbanCardMeta
   /** Resolved board labels on this card (LabelChips) — resolved by the board, passed in. */
@@ -35,7 +41,8 @@ interface SessionCardProps {
 }
 
 export const SessionCard = memo(function SessionCard({
-  session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext
+  session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext,
+  supportingSessions = [], urgentSupportingCount = 0, supportsExpanded = false, onToggleSupport
 }: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
   // KanbanView used to hold `useAgentStatus((s) => s.byId)` and pass the map through the column:
@@ -72,7 +79,9 @@ export const SessionCard = memo(function SessionCard({
   const assignees = meta?.assignees ?? []
   const due = meta?.dueAt
   const overdue = due !== undefined && due < Date.now()
-  const priority = meta?.priority
+  const planning = parseTaskPlanning(session.taskPlanning)
+  const automaticUrgency = planning ? assessTaskUrgency(planning, Date.now()) : undefined
+  const priority = meta?.priorityManual ? meta.priority : meta?.priority ?? automaticUrgency?.level
   // The account chip counts as detail in its own right: a card whose only thing to say is "this
   // one is on the other Claude login" is exactly the card that must say it.
   const hasDetail =
@@ -132,6 +141,18 @@ export const SessionCard = memo(function SessionCard({
         {status?.unread && <span className="kanban-card__unread" />}
       </div>
       {session.organization && <div className="kanban-card__metarow"><OrganizationBadge organization={session.organization} nodeId={session.id} /></div>}
+      {session.kind === 'terminal' && <div className="kanban-card__metarow"><TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} /></div>}
+      {supportingSessions.length > 0 && <div className="kanban-card__detail" onClick={e => e.stopPropagation()}>
+        <button type="button" draggable={false} aria-expanded={supportsExpanded}
+          onClick={() => onToggleSupport?.(session.id)}>
+          {supportsExpanded ? 'Collapse' : 'Expand'} {supportingSessions.length} supporting sessions
+          {urgentSupportingCount > 0 ? ` · ${urgentSupportingCount} urgent` : ''}
+        </button>
+        {supportsExpanded && <ul>{supportingSessions.map(child => <li key={child.id}>
+          <button type="button" draggable={false} onClick={() => onOpen(child.id)}>{child.title}</button>
+          <TaskPlanningBadge planning={child.taskPlanning} nodeId={child.id} />
+        </li>)}</ul>}
+      </div>}
       {(labels.length > 0 || assignees.length > 0 || due !== undefined || priority !== undefined) && (
         <div className="kanban-card__metarow">
           {/* Labels share the priority/due/avatars row (left); the meta chips hug the right. */}
@@ -140,6 +161,7 @@ export const SessionCard = memo(function SessionCard({
             {priority !== undefined && PRIO_COLOR[priority] && (
               <span
                 className="kanban-due kanban-prio-chip"
+                title={meta?.priority !== undefined || meta?.priorityManual ? 'Manual urgency override' : automaticUrgency?.reason}
                 style={{ background: `${PRIO_COLOR[priority]}26`, color: PRIO_COLOR[priority] }}
               >
                 {priority.toUpperCase()}

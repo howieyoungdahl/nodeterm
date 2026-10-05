@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { creationAdmission, creationFlags, creationFromArgs } from '../shared/assistant-creation'
+import { planningAtCreation } from '../shared/task-planning'
 import type { AssistantCreationReceipts } from './assistant-creation-receipts'
 import { planOrganization, placeNode } from '../core/kanban-organization'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -807,6 +808,7 @@ export class HeadlessNodeFactory {
     } catch (error) { throw new CreationReceiptRefusal('assistant_creation_receipt_unconfirmed_inspect_do_not_repeat', { cause: error }) }
     for (const node of nodes) {
       node.assistantCreation = creation
+      node.taskPlanning = planningAtCreation(creation!.taskId, organization!.functionalRole, creation!.planning)
       // Structural nodes carry the same immutable ownership intent, but are not terminal
       // organization targets. Receipt admission must not depend on Kanban eligibility.
       if (node.kind !== 'terminal') {

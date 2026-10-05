@@ -2913,6 +2913,12 @@ the overlap tests exercise the resulting race.
 
 ## Conventions
 
+**Creation-time work planning:** every new task terminal records category, urgency and reason
+before save/launch. Keep work category, stage, blocked state and urgency independent. Supporting
+sessions fold only under an explicit uniquely present parent; retain manual placement, pins,
+priority/category overrides and the original sessions. See `docs/task-planning.md` for the shared
+schema, automatic evidence assessment, creation fingerprint boundary and bounded CAS updates.
+
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their
   reasoning and measurements; it is dense on purpose and is loaded automatically by coding agents.
   **`CONTRIBUTING.md` is the short human door**: setup, the process-boundary rules, the house rules

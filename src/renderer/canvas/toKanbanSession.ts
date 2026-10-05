@@ -14,6 +14,9 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
       title: (n.data.title as string) || 'Browser',
       color: (n.data.color as string) ?? NODE_COLORS[0],
       kind: 'browser',
+      taskPlanning: n.data.taskPlanning,
+      pinned: n.data.pinned,
+      manualPlacement: n.data.manualPlacement,
       url: n.data.url as string | undefined,
       partition: n.data.partition as string | undefined,
       spawn: {}
@@ -31,6 +34,9 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
       title: text.trim().split('\n')[0].replace(/^#{1,6}\s+/, '').trim().slice(0, 80) || 'Note',
       color: (n.data.color as string) ?? NODE_COLORS[2],
       kind: 'sticky',
+      taskPlanning: n.data.taskPlanning,
+      pinned: n.data.pinned,
+      manualPlacement: n.data.manualPlacement,
       text,
       textUpdatedAt: n.data.textUpdatedAt as number | undefined,
       textUpdatedBy: n.data.textUpdatedBy as string | undefined,
@@ -45,6 +51,9 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
     color: (n.data.color as string) ?? NODE_COLORS[0],
     kind: 'terminal',
     organization: n.data.organization,
+    taskPlanning: n.data.taskPlanning,
+    pinned: n.data.pinned,
+    manualPlacement: n.data.manualPlacement,
     agentId: n.data.agentId as string | undefined,
     // What the card modal's co-attach terminal needs to join THIS node's session the same way the
     // canvas TerminalNode does.

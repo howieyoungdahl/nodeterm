@@ -3,7 +3,7 @@ import { receiptPublication } from './assistant-creation-receipts'
 import { CleanupError, type SessionCleanup } from '../core/session-cleanup'
 import http from 'node:http'
 import path from 'node:path'
-
+import { parseTaskPlanning } from '../shared/task-planning'
 import {
   OPERATOR_NODE_HEIGHT_BOUNDS,
   OPERATOR_NODE_WIDTH_BOUNDS,
@@ -449,7 +449,8 @@ export function createOpsApiHandler(
         }
         sendJson(res, 200, { version: 1, receiptPublication: receiptPublication(), assistantCreation: { version: 1,
           taskId: 'required', creationKey: 'exact-required', metadata: 'owner-project-workstream-functionalRole-required',
-          privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true } })
+          privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true,
+          taskPlanning: 'category-urgency-reason-relationship-before-save-and-spawn' } })
         return
       }
 
@@ -491,19 +492,25 @@ export function createOpsApiHandler(
             return
           }
           const raw = body as Record<string, unknown>
-          const allowed = new Set(['title', 'width', 'height', 'organization', 'organizationPolicy', 'expectedRevision'])
+          const allowed = new Set(['title', 'width', 'height', 'organization', 'organizationPolicy', 'expectedRevision', 'taskPlanning'])
           const unknownKey = Object.keys(raw).find((key) => !allowed.has(key))
           if (unknownKey) {
             sendJson(res, 400, { error: `unknown_field: ${unknownKey}` })
             return
           }
-          if (raw.title === undefined && raw.width === undefined && raw.height === undefined && raw.organization === undefined) {
+          if (raw.title === undefined && raw.width === undefined && raw.height === undefined && raw.organization === undefined && raw.taskPlanning === undefined) {
             sendJson(res, 400, { error: 'body_must_set_title_width_or_height' })
             return
           }
           const invalid: string[] = []
           const input: OpsUpdateInput = {}
           organizationFields(raw, input, invalid)
+          if (raw.taskPlanning !== undefined) {
+            input.taskPlanning = parseTaskPlanning(raw.taskPlanning)
+            if (!input.taskPlanning) invalid.push('taskPlanning')
+            if (raw.organization !== undefined || raw.organizationPolicy !== undefined || raw.title !== undefined || raw.width !== undefined || raw.height !== undefined)
+              invalid.push('taskPlanning_cannot_change_placement_geometry_or_title')
+          }
           if ((input.organization || input.organizationPolicy) &&
             (raw.title !== undefined || raw.width !== undefined || raw.height !== undefined)) invalid.push('organization_cannot_change_geometry_or_title')
           if (raw.title !== undefined) {

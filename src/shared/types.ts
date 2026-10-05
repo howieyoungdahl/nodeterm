@@ -336,6 +336,8 @@ export interface PendingLaunch {
 }
 
 export interface CanvasNodeState {
+  /** Creation-time work intent; presentation only, never creator/session authority. */
+  taskPlanning?: import('./task-planning').TaskPlanning
   assistantCreation?: AssistantCreation
   /** Presentation only. Never changes backend or session identity. */
   cleanupArchiveId?: string
@@ -560,11 +562,16 @@ export type KanbanPriority = 'low' | 'medium' | 'high' | 'urgent'
 
 export interface KanbanCardMeta {
   nodeId: string
+  /** Explicit user classification; independent from stage, priority and placement. */
+  category?: import('./task-planning').TaskCategory
+  categoryReason?: string
   assignees?: BoardLogAuthor[]
   /** Due timestamp (ms). Absent = no due date. */
   dueAt?: number
   /** Absent = no priority. */
   priority?: KanbanPriority
+  /** Includes explicit clear: automatic urgency must not replace a user decision. */
+  priorityManual?: true
   /** Ids of the board labels applied to this card (see ProjectKanban.labels). Absent/empty = none;
    *  ids that no longer resolve to a label are dropped by readers (dangling-safe). */
   labels?: string[]

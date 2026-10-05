@@ -61,7 +61,7 @@ def validate_creation_key(value):
 
 
 def spawn_body(project_id, title, cwd='/tmp', owner=None, workstream=None, functional_role=None,
-               idempotency_key=None, task_id=None):
+               idempotency_key=None, task_id=None, task_planning=None):
     # All shared-management creation is explicitly task managed; the token does not name Fern.
     if any(value is None for value in (owner, workstream, functional_role, idempotency_key, task_id)):
         raise ControlError('Spawn requires task ID, creation key, declared owner and complete explicit organization.')
@@ -88,6 +88,10 @@ def spawn_body(project_id, title, cwd='/tmp', owner=None, workstream=None, funct
         body['organization'] = {'owner': owner, 'projectId': project_id,
                                 'workstream': workstream, 'functionalRole': functional_role}
     body['creation'] = {'version': 1, 'taskId': task_id, 'creationId': idempotency_key, 'declaredOwner': owner}
+    if task_planning is not None:
+        if not isinstance(task_planning, dict) or task_planning.get('taskId') != task_id:
+            raise ControlError('Task planning must be an object matching the exact declared task ID.')
+        body['creation']['planning'] = task_planning
     return body
 
 
@@ -181,8 +185,8 @@ class NodeTerm:
         raise CreationUncertain(details) from None
 
     def spawn(self, project_id, title, cwd='/tmp', owner=None, workstream=None, functional_role=None,
-              idempotency_key=None, task_id=None):
-        body = spawn_body(project_id, title, cwd, owner, workstream, functional_role, idempotency_key, task_id)
+              idempotency_key=None, task_id=None, task_planning=None):
+        body = spawn_body(project_id, title, cwd, owner, workstream, functional_role, idempotency_key, task_id, task_planning)
         # Read-only mixed-version admission. A 404, old shape, transport failure or weaker
         # promise stops locally before POST; it cannot create an uncertain launch to recover.
         try:
@@ -191,7 +195,8 @@ class NodeTerm:
             raise ControlError('Assistant creation contract unavailable; no launch POST was made.') from None
         expected = {'version': 1, 'taskId': 'required', 'creationKey': 'exact-required',
                     'metadata': 'owner-project-workstream-functionalRole-required',
-                    'privateReceipt': 'before-save-and-spawn', 'verifiedCreatorSource': True}
+                    'privateReceipt': 'before-save-and-spawn', 'verifiedCreatorSource': True,
+                    'taskPlanning': 'category-urgency-reason-relationship-before-save-and-spawn'}
         promise = contract.get('assistantCreation') if isinstance(contract, dict) else None
         publication = contract.get('receiptPublication') if isinstance(contract, dict) else None
         receipt_platform = publication.get('platform') if isinstance(publication, dict) else None
@@ -356,6 +361,7 @@ def main():
     spawn.add_argument('--title', required=True)
     spawn.add_argument('--cwd', default='/tmp')
     spawn.add_argument('--task-id', required=True, help='Stable declared task ID; never inferred from title or model.')
+    spawn.add_argument('--task-planning-file', help='UTF-8 JSON planning: explicit category, urgency evidence and independent/support parent intent.')
     spawn.add_argument('--owner', required=True, help='Descriptive owner; organization requires all three metadata flags.')
     spawn.add_argument('--workstream', required=True, help='Exact independent workstream label (1 to 80 ASCII characters).')
     spawn.add_argument('--functional-role', required=True, help='Explicit exact role; no title or model classification.')
@@ -369,6 +375,11 @@ def main():
         spawn_args = {'project_id': args.project_id, 'title': args.title, 'cwd': args.cwd,
                       'owner': args.owner, 'workstream': args.workstream,
                       'functional_role': args.functional_role, 'idempotency_key': args.idempotency_key, 'task_id': args.task_id}
+        if args.task_planning_file:
+            planning_bytes = Path(args.task_planning_file).read_bytes()
+            if len(planning_bytes) > 16384:
+                raise ControlError('Task planning exceeds the 16 KiB input budget.')
+            spawn_args['task_planning'] = json.loads(planning_bytes.decode('utf-8-sig'))
         spawn_body(**spawn_args)  # Reject incomplete/bad metadata before authentication or network I/O.
     elif args.command == 'receipt':
         validate_creation_key(args.idempotency_key)

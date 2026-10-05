@@ -1,4 +1,5 @@
-import { creationAdmission, type AssistantCreation } from '../shared/assistant-creation'
+import { completeCreationPlanning, creationAdmission, type AssistantCreation } from '../shared/assistant-creation'
+import { parseTaskPlanning, planningAtCreation, type TaskPlanning } from '../shared/task-planning'
 import { AssistantCreationReceipts } from './assistant-creation-receipts'
 import { promises as fsPromises } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -320,6 +321,7 @@ export type OpsCreateResult =
     }
 
 export interface OpsUpdateInput {
+  taskPlanning?: TaskPlanning
   organization?: OrganizationMetadata
   organizationPolicy?: OrganizationPolicy
   expectedRevision?: string
@@ -834,6 +836,38 @@ export class ServerNodeOps {
       if (matches.length !== 1) return { ok: false, status: 409, error: 'ambiguous_node_id' }
 
       const { project, node } = matches[0]
+      if (input.taskPlanning) {
+        if (!input.expectedRevision || input.expectedRevision !== project.revision) return { ok: false, status: 409, error: 'revision_conflict' }
+        if (input.organization || input.organizationPolicy || input.title !== undefined || input.width !== undefined || input.height !== undefined)
+          return { ok: false, status: 400, error: 'task_planning_requires_metadata_only_update' }
+        const planning = parseTaskPlanning(input.taskPlanning)
+        if (!planning || (node.taskPlanning && planning.taskId !== node.taskPlanning.taskId) ||
+          (node.assistantCreation && planning.taskId !== node.assistantCreation.taskId))
+          return { ok: false, status: 400, error: 'task_planning_requires_stable_task_identity' }
+        const state = await this.deps.organizationJournal?.read()
+        if (!state || node.kind !== 'terminal' || node.role !== 'worker' || !this.attested(project, nodeId, state))
+          return { ok: false, status: 403, error: 'task_planning_creator_evidence_required' }
+        const owner = this.deps.ownerOf(nodeId)!
+        const reservations = Object.entries(state.creations).filter(([, reservation]) =>
+          reservation.id === owner.assistantCreationId && reservation.nodeId === nodeId && reservation.projectId === project.id)
+        if (reservations.length !== 1 || !this.deps.creationReceipts)
+          return { ok: false, status: 403, error: 'task_planning_creator_evidence_required' }
+        let evidence
+        try { evidence = await this.deps.creationReceipts.find({ principal: 'ops-bearer',
+          sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: project.id }, reservations[0][0]) }
+        catch { return { ok: false, status: 503, error: 'task_planning_creator_evidence_unavailable' } }
+        if (!evidence || evidence.id !== owner.assistantCreationId || evidence.fingerprint !== reservations[0][1].fingerprint ||
+          !evidence.nodes.some(entry => entry.nodeId === nodeId) || evidence.creation.taskId !== planning.taskId)
+          return { ok: false, status: 403, error: 'task_planning_immutable_task_identity_required' }
+        // Descriptive metadata only. The board, manual priorities, geometry and all processes stay untouched.
+        const updated = { ...node, taskPlanning: planningAtCreation(planning.taskId, undefined, planning) }
+        project.nodes = project.nodes.map(candidate => candidate.id === nodeId ? updated : candidate)
+        try { await this.deps.workspaceStore.save(workspace) }
+        catch { return { ok: false, id: nodeId, status: 503, error: 'task_planning_write_uncertain_reload_before_retry' } }
+        this.deps.publishProject?.(project)
+        this.deps.publishNode?.(project.id, updated, project.workspaceChange?.after)
+        return { ok: true, id: nodeId, title: node.title, size: node.size, revision: project.revision }
+      }
       if (input.organization || input.organizationPolicy) {
         try { return await this.updateOrganization(workspace, project, node, input) }
         catch { return { ok: false, id: nodeId, status: 503, error: 'organization_write_uncertain_inspect_audit_before_retry' } }
@@ -1051,7 +1085,7 @@ export class ServerNodeOps {
           reservation = { id: randomUUID(), nodeId: nextOperatorNodeId(), projectId: project.id,
             fingerprint, assistant: !!input.organization, stage: 'reserved' }
           await this.deps.creationReceipts!.record({ principal: 'ops-bearer', sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: project.id },
-            input.creation!, [{ nodeId: reservation.nodeId, organization: input.organization! }], fingerprint, reservation.id)
+            completeCreationPlanning(input.creation!, input.organization!), [{ nodeId: reservation.nodeId, organization: input.organization! }], fingerprint, reservation.id)
           state.creations[key] = reservation
           await journal.write(state)
         }
@@ -1065,7 +1099,9 @@ export class ServerNodeOps {
             ok: false as const, status: 409, error: 'revision_conflict', id: reservation.nodeId, idempotencyKey: key }
           const size = { width: input.width ?? OPERATOR_DEFAULT_NODE_SIZE.width, height: input.height ?? OPERATOR_DEFAULT_NODE_SIZE.height }
           node = { id: reservation.nodeId, kind: 'terminal', position: placeFromOrigin(project, size), size,
-            title: input.title ?? `Operator ${reservation.nodeId}`, titleAuto: false, role: 'worker', assistantCreation: input.creation,
+            title: input.title ?? `Operator ${reservation.nodeId}`, titleAuto: false, role: 'worker',
+            assistantCreation: completeCreationPlanning(input.creation!, input.organization!),
+            taskPlanning: planningAtCreation(input.creation!.taskId, input.organization!.functionalRole, input.creation!.planning),
             color: OPERATOR_NODE_COLOR, group: null, tags: [], ...(input.cwd !== undefined ? { cwd: input.cwd } : {}) }
           if (input.organizationPolicy) project.kanbanOrganization = input.organizationPolicy
           if (input.organization) {

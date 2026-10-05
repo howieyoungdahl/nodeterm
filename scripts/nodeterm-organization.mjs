@@ -12,16 +12,19 @@ const exact = (value, keys) => value && typeof value === 'object' && !Array.isAr
 function validateCreation(body) {
   if (!body || !identifier(body.idempotencyKey, 8)) fail('create_requires_idempotency_key')
   const c = body.creation, o = body.organization
-  if (!exact(c, ['version', 'taskId', 'creationId', 'declaredOwner']) || c.version !== 1 ||
+  if (!exact(c, ['version', 'taskId', 'creationId', 'declaredOwner', ...(c?.planning === undefined ? [] : ['planning'])]) || c.version !== 1 ||
     !identifier(c.taskId, 8) || !identifier(c.creationId, 8) || c.creationId !== body.idempotencyKey || !label(c.declaredOwner) ||
     !exact(o, ['owner', 'projectId', 'workstream', 'functionalRole']) || !label(o.owner) || o.owner !== c.declaredOwner ||
     !identifier(body.projectId) || ['.', '..'].includes(body.projectId) || o.projectId !== body.projectId ||
     !identifier(o.workstream, 1, 80) || !identifier(o.functionalRole, 1, 80))
     fail('create_requires_task_owner_organization_and_exact_creation_key')
+  if (c.planning !== undefined && (!c.planning || typeof c.planning !== 'object' || Array.isArray(c.planning) || c.planning.taskId !== c.taskId))
+    fail('creation_planning_requires_exact_task_identity')
 }
 function creationContract(contract) {
   const promised = { version: 1, taskId: 'required', creationKey: 'exact-required',
-    metadata: 'owner-project-workstream-functionalRole-required', privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true }
+    metadata: 'owner-project-workstream-functionalRole-required', privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true,
+    taskPlanning: 'category-urgency-reason-relationship-before-save-and-spawn' }
   const c = contract?.assistantCreation, p = contract?.receiptPublication
   return contract?.version === 1 && exact(c, Object.keys(promised)) && Object.entries(promised).every(([key, value]) => c[key] === value) &&
     p?.version === 1 && ['aix', 'android', 'darwin', 'freebsd', 'haiku', 'linux', 'openbsd', 'sunos', 'win32', 'cygwin', 'netbsd'].includes(p.platform) &&

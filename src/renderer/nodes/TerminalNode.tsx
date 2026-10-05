@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import { OrganizationBadge } from '../components/OrganizationBadge'
+import { TaskPlanningBadge } from '../components/TaskPlanningBadge'
 import {
   Handle,
   NodeResizer,
@@ -4624,6 +4625,7 @@ export function TerminalNode({
         </div>
         <div className="term-node__toolbar">
         <OrganizationBadge organization={data.organization} nodeId={id} />
+        <TaskPlanningBadge planning={data.taskPlanning} nodeId={id} />
         {status?.session && status.session !== data.title && (
           <span className="term-node__session" title={status.session}>
             {status.session}

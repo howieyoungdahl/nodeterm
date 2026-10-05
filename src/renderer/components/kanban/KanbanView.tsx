@@ -13,6 +13,8 @@ import { labelSwatch } from '../../lib/kanbanLabelColors'
 import { CardModal } from './CardModal'
 import { KanbanColumn, type KanbanLane } from './KanbanColumn'
 import { SessionCard } from './SessionCard'
+import { taskBoardVisibility } from '../../lib/taskBoardVisibility'
+import { assessTaskUrgency, parseTaskPlanning, TASK_CATEGORIES, type TaskCategory } from '@shared/task-planning'
 import { GitHubIssueCard } from './GitHubIssueCard'
 import { kanbanSource, sourceVisible } from '../../lib/kanbanSources'
 import type { ModalSpawn } from './ModalTerminal'
@@ -34,6 +36,9 @@ import {
 /** One session node shown as a board card — derived LIVE from the canvas nodes; the board
  *  itself stores only column assignments. */
 export interface KanbanSession {
+  taskPlanning?: import('@shared/task-planning').TaskPlanning
+  pinned?: boolean
+  manualPlacement?: boolean
   organization?: import('@shared/kanban-organization').NodeOrganization
   id: string
   title: string
@@ -123,11 +128,18 @@ export const KanbanView = memo(function KanbanView({
   const dragRef = useRef<Drag>(null)
   // One card modal at a time; a deleted node closes it via the byId.has render guard.
   const [modalNodeId, setModalNodeId] = useState<string | null>(null)
+  const [expandedSupport, setExpandedSupport] = useState<Set<string>>(new Set())
+  const toggleSupport = useCallback((id: string) => setExpandedSupport(previous => {
+    const next = new Set(previous)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  }), [])
   // Right-click card menu (open on canvas / move / delete).
   const [cardMenu, setCardMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
   // Board label filter — transient (per board session; resets when you leave the board). Empty =
   // show everything; otherwise a card must carry at least one selected label (cardMatchesLabelFilter).
   const [labelFilter, setLabelFilter] = useState<string[]>([])
+  const [categoryFilter, setCategoryFilter] = useState<TaskCategory | 'all'>('all')
   const [filterOpen, setFilterOpen] = useState(false)
   const [source, setSource] = useState<KanbanSource>('all')
   const [modalIssue, setModalIssue] = useState<GitHubIssueCardView | null>(null)
@@ -248,6 +260,7 @@ export const KanbanView = memo(function KanbanView({
   )
   const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
   const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
+  const taskVisibility = useMemo(() => taskBoardVisibility(sessions, board), [sessions, board])
 
   // Stable per-card label arrays: labelsForCard allocates a fresh array per call, and that
   // identity churn alone would defeat SessionCard's memo. Recomputed only on a board change.
@@ -343,14 +356,19 @@ export const KanbanView = memo(function KanbanView({
     const vis = (ids: string[]): string[] =>
       activeLocalFilter.length ? ids.filter((id) => cardMatchesLabelFilter(board, id, activeLocalFilter)) : ids
     const toCards = (ids: string[]): KanbanSession[] => {
-      const cards = ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []))
+      const cards = ids.flatMap((id) => {
+        const card = byId.get(id)
+        if (!card || taskVisibility.hidden.has(id)) return []
+        const matches = (entry: KanbanSession) => (cardMeta(board, entry.id)?.category ?? parseTaskPlanning(entry.taskPlanning)?.category ?? 'needs-classification') === categoryFilter
+        return categoryFilter === 'all' || matches(card) || taskVisibility.supports.get(id)?.some(matches) ? [card] : []
+      })
       return cards.length ? cards : NO_CARDS
     }
     return {
       ungrouped: toCards(vis(unassigned(board, sessionIds))),
       byColumn: new Map(board.columns.map((c) => [c.id, toCards(vis(assignedTo(board, c.id)))]))
     }
-  }, [board, byId, sessionIds, activeLocalFilter])
+  }, [board, byId, sessionIds, activeLocalFilter, taskVisibility, categoryFilter])
 
   // Stable column/card plumbing — every handler the memoized columns receive is identity-stable
   // across renders (the column binds its own id; cards bind theirs).
@@ -421,6 +439,14 @@ export const KanbanView = memo(function KanbanView({
             session={s}
             meta={metaOf(s.id)}
             labels={labelsOf(s.id)}
+            supportingSessions={taskVisibility.supports.get(s.id)}
+            urgentSupportingCount={(taskVisibility.supports.get(s.id) ?? []).filter(child => {
+              const meta = metaOf(child.id), planning = parseTaskPlanning(child.taskPlanning)
+              const level = meta?.priorityManual ? meta.priority : meta?.priority ?? (planning ? assessTaskUrgency(planning, Date.now()).level : undefined)
+              return level === 'urgent'
+            }).length}
+            supportsExpanded={expandedSupport.has(s.id)}
+            onToggleSupport={toggleSupport}
             onOpen={setModalNodeId}
             onContext={handleCardContext}
             onDragStart={handleCardDragStart}
@@ -498,6 +524,10 @@ export const KanbanView = memo(function KanbanView({
         <span className="kanban-header__dot" style={{ background: projectColor }} />
         <span className="kanban-header__name">{projectName}</span>
         {board.github && <KanbanSourceFilter value={source} onChange={setSource} />}
+        <select aria-label="Work category" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value as TaskCategory | 'all')}>
+          <option value="all">All work categories</option>
+          {TASK_CATEGORIES.map(category => <option key={category} value={category}>{category.replaceAll('-', ' ')}</option>)}
+        </select>
         {board.github && github?.loading && <span className="kanban-github-status">Loading GitHub issues…</span>}
         {board.github && github?.error && (
           <button
