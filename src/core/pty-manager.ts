@@ -4526,9 +4526,17 @@ export class PtyManager {
   destroySession(
     clientId: ClientId | null,
     persistKey: string,
-    opts?: { everySocket?: boolean }
+    opts?: { everySocket?: boolean; afterPending?: boolean }
   ): Promise<void> {
-    return this.endSession(clientId, persistKey, 'delete', opts?.everySocket === true)
+    const destroy = (): Promise<void> =>
+      this.endSession(clientId, persistKey, 'delete', opts?.everySocket === true)
+    // A cancelled, non-cancellable create may establish a backend AFTER an earlier destroy's
+    // local kill, while that destroy still awaits another socket. That earlier acknowledgement
+    // cannot cover this late generation. Internal cancellation cleanup requests a pass started
+    // after the pending operation settles, even if its outcome was uncertain. Ordinary deletes
+    // retain their identical-request coalescing; this option is never exposed over IPC.
+    const pending = opts?.afterPending === true ? this.ending.get(persistKey)?.promise : undefined
+    return pending ? pending.then(destroy, destroy) : destroy()
   }
 
   /** Register shell cleanup after end processing (and the session-host acknowledgement). Failures are

@@ -1573,8 +1573,11 @@ else, and its context links must keep classifying across restarts).
   timeout response; parallel launches have separate tickets and health names the oldest one.
   A concurrent close, operator removal, or Server stop marks an in-flight node cancelled; if the
   non-cancellable create resolves after the first destroy already found nothing, launch cleanup
-  destroys the exact backend again. Keep this two-pass guard when moving work outside the lock or
-  removed cards leak tmux husks.
+  destroys the exact backend again using the internal `afterPending` option. The final pass must
+  start after an earlier pending destroy settles (including an uncertain failure): its local kill
+  may have observed absence before the late create, while its second socket was still pending.
+  Ordinary duplicate deletes still coalesce, and IPC cannot request the internal option. Keep this
+  two-pass guard when moving work outside the lock or removed cards leak tmux husks.
   Capability preflight is separately bounded at 5s. Server boot now refreshes the real shared-Codex
   capability after arming its identity secret, and canvas control consumes that boot-populated
   answer behind the bound. A missing or failed refresh degrades only that launch to bare Codex;

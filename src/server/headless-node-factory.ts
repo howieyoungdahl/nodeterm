@@ -95,7 +95,7 @@ export interface HeadlessPty {
   destroySession(
     clientId: number | null,
     persistKey: string,
-    opts?: { everySocket?: boolean }
+    opts?: { everySocket?: boolean; afterPending?: boolean }
   ): Promise<void>
 }
 
@@ -2401,11 +2401,12 @@ export class HeadlessNodeFactory {
           completed.add(node.id)
         } finally {
           // A close/stop can race either the attach or command await. Its first destroy may have
-          // run before this non-cancellable create established a backend, so repeat the exact-id
-          // destroy after the late operation settles. PtyManager coalesces concurrent destroys.
+          // run before this non-cancellable create established a backend, so request a new exact-id
+          // destroy pass after any pending destroy settles; sharing its old acknowledgement can
+          // miss the backend that appeared after its local kill.
           if (this.cancelledLaunches.has(node.id)) {
             await this.deps.ptyManager
-              .destroySession(null, node.id, { everySocket: true })
+              .destroySession(null, node.id, { everySocket: true, afterPending: true })
               .catch(() => undefined)
             failed.add(node.id)
             this.attached.delete(node.id)

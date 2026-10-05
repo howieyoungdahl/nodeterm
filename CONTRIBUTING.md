@@ -172,7 +172,11 @@ probes, preserves `unknown` on every read failure, and shares one mutation engin
 reaper. Server-owned operator and agent workspace transactions also share one FIFO; separate
 load/save queues can overwrite each other with stale snapshots. `/opsapi/health` must snapshot
 spawn-handler state without awaiting the preparation or parallel external launches it diagnoses;
-timed-out non-cancellable launches remain visible until they actually settle. Credentials still
+timed-out non-cancellable launches remain visible until they actually settle. A cancelled launch's
+final backend cleanup must request a destroy pass after any pending destroy settles: sharing an
+earlier kill's acknowledgement can miss a backend created while its other socket was still pending.
+Ordinary repeated deletes keep coalescing; the internal `afterPending` flag is not an IPC option.
+Credentials still
 never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
 
 **Assistant Kanban placement requires explicit creation attestation.** Owner/workstream/functional
