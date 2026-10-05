@@ -77,7 +77,8 @@ describe('/opsapi', () => {
       receiptPublication: { version: 1, platform: process.platform,
         guarantee: process.platform === 'win32' ? 'file-flush-visibility' : 'file-and-directory-sync' }, assistantCreation: { version: 1,
       taskId: 'required', creationKey: 'exact-required', metadata: 'owner-project-workstream-functionalRole-required',
-      privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true } })
+      privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true,
+      taskPlanning: 'category-urgency-reason-relationship-before-save-and-spawn' } })
     expect((await fetch(`${base}/opsapi/creation-contract`, { method: 'POST', headers: auth })).status).toBe(405)
     expect(createCalls).toEqual([])
   })

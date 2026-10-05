@@ -1,6 +1,11 @@
 # Local NodeTerm command access
 
 Use this guide with the matching helper version and a compatible NodeTerm server.
+The matching creation contract also records category, urgency, reason and independent/support
+intent before save/launch. Pass `--task-planning-file` for explicit planning and evidence using
+the schema in `docs/task-planning.md`; a supporting session names its exact parent task ID.
+An older contract refuses before POST. Unknown roles enter an explained Needs classification
+queue; never infer category, urgency or parent work from a title or model.
 The helper and guide must be reviewed and installed together before activating the
 assistant creation contract. Installation is coordinated by the operator; this
 guide does not install files or authorize live actions. Prerequisites are Python 3,

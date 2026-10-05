@@ -4,6 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { initPlatform, resetPlatformForTests } from '../../src/core/platform'
 import { fakePlatform } from '../../src/core/platform-fake'
@@ -25,6 +26,7 @@ import { useProjects } from '../../src/renderer/state/projects'
 import { resolveWorkspaceConflict, saveWorkspace } from '../../src/renderer/lib/workspacePersistence'
 import { mergeOrganizationProject } from '../../src/renderer/lib/workspacePersistence'
 import { toKanbanSession } from '../../src/renderer/canvas/toKanbanSession'
+import { defaultTaskPlanning } from '../../src/shared/task-planning'
 
 const metadata = (functionalRole = 'ops') => ({ owner: 'Test assistant', projectId: 'p1', workstream: 'ics', functionalRole })
 const human: CanvasNodeState = { id: 'human', kind: 'terminal', title: 'Manual card', role: 'primary',
@@ -116,6 +118,96 @@ afterEach(async () => {
 })
 
 describe('native organization through HTTP, store and renderer', () => {
+  it('replays an unchanged historical creation without adding defaults to its immutable fingerprint', async () => {
+    const input = createInput()
+    const { idempotencyKey: _key, ...historicalDeclaration } = input
+    const fingerprint = createHash('sha256').update(JSON.stringify(historicalDeclaration, (_key, value) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)).digest('hex')
+    const receipts = new AssistantCreationReceipts(path.join(data, 'assistant-creation-receipts'))
+    await receipts.record({ principal: 'ops-bearer', sourceNodeId: 'ops-operator', projectId: 'p1' },
+      input.creation, [{ nodeId: 'historical-node-001', organization: input.organization }], fingerprint, 'historical-receipt-001')
+    const state = await journal.read()
+    state.creations[input.idempotencyKey] = { id: 'historical-receipt-001', nodeId: 'historical-node-001',
+      projectId: 'p1', fingerprint, assistant: true, stage: 'finished', outcome: 'success' }
+    await journal.write(state)
+    const before = await store.load({ sideline: false })
+    const result = await request('/opsapi/nodes', input)
+    expect(result.status).toBe(201)
+    expect(result.body).toMatchObject({ id: 'historical-node-001', replayed: true })
+    expect(await store.load({ sideline: false })).toEqual(before)
+    expect(createSession).not.toHaveBeenCalled(); expect(sendText).not.toHaveBeenCalled()
+  })
+  it('binds planning updates to immutable private task identity when public declarations are altered', async () => {
+    const created = await create(), id = created.body.id
+    const workspace = await store.load({ sideline: false }), node = workspace.projects[0].nodes.find(n => n.id === id)!
+    node.assistantCreation = { ...node.assistantCreation!, taskId: 'altered-public-task', planning: undefined }
+    node.taskPlanning = { ...node.taskPlanning!, taskId: 'altered-public-task' }
+    await rpcSave(workspace)
+    const before = (await store.load({ sideline: false })).projects[0]
+    const result = await request(`/opsapi/nodes/${id}?force=1`, { taskPlanning: node.taskPlanning,
+      expectedRevision: before.revision }, 'PATCH')
+    expect(result.status).toBe(403)
+    expect(result.body.error).toBe('task_planning_immutable_task_identity_required')
+    expect((await store.load({ sideline: false })).projects[0]).toEqual(before)
+    expect(createSession).toHaveBeenCalledTimes(1); expect(destroy).not.toHaveBeenCalled()
+  })
+  it('records category, evidence-based urgency and explicit parent intent before launch, with stable retry identity', async () => {
+    const input = createInput()
+    const planning = defaultTaskPlanning(input.creation.taskId, 'ops')
+    planning.relationship = 'support'; planning.parentTaskId = 'parent-task-1234'
+    planning.urgency.signals = [{ kind: 'dependency-unblock', evidence: 'Unblocks the approved integration test task' }]
+    input.creation = { ...input.creation, planning } as typeof input.creation
+    createSession.mockImplementationOnce(async ({ persistKey }: { persistKey: string }) => {
+      const saved = (await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === persistKey)!
+      expect(saved.taskPlanning).toMatchObject({ taskId: input.creation.taskId, category: 'operations',
+        relationship: 'support', parentTaskId: 'parent-task-1234',
+        urgency: { level: 'high', reason: 'Unblocks the approved integration test task' } })
+      expect(sendText).not.toHaveBeenCalled()
+      return { sessionId: 'private-fixture', fresh: true }
+    })
+    const first = await request('/opsapi/nodes', input)
+    expect(first.status).toBe(201)
+    expect(first.body.id).toEqual(expect.any(String))
+    const repeat = await request('/opsapi/nodes', input)
+    expect(repeat.body.id).toBe(first.body.id)
+    expect(createSession).toHaveBeenCalledTimes(1)
+  })
+  it('rejects malformed creation planning before any save or launch', async () => {
+    const input = createInput()
+    const response = await request('/opsapi/nodes', { ...input, creation: { ...input.creation,
+      planning: { ...defaultTaskPlanning(input.creation.taskId, 'ops'), categoryReason: '' } } })
+    expect(response.status).toBe(400)
+    expect(createSession).not.toHaveBeenCalled()
+    expect((await store.load({ sideline: false })).projects[0].nodes).toEqual([human])
+  })
+  it('reconciles attested task metadata with revision checks while preserving manual board intent and priority', async () => {
+    const created = await create(), id = created.body.id
+    expect(created.status).toBe(201)
+    const workspace = await store.load({ sideline: false }), project = workspace.projects[0]
+    const node = project.nodes.find(n => n.id === id)!
+    node.pinned = true; node.manualPlacement = true
+    project.kanban = assignNode(project.kanban!, id, null, null)
+    project.kanban.meta = [{ nodeId: id, priority: 'low' }]
+    await rpcSave(workspace)
+    const fresh = (await store.load({ sideline: false })).projects[0]
+    const beforeBoard = structuredClone(fresh.kanban)
+    const planning = { ...fresh.nodes.find(n => n.id === id)!.taskPlanning!, category: 'security' as const,
+      categoryReason: 'Explicit verified privacy incident work item' }
+    planning.urgency.signals = [{ kind: 'live-privacy-security', evidence: 'Verified live privacy incident' }]
+    const stale = await request(`/opsapi/nodes/${id}`, { taskPlanning: planning, expectedRevision: '0'.repeat(64) }, 'PATCH')
+    expect(stale.status).toBe(409)
+    const result = await request(`/opsapi/nodes/${id}`, { taskPlanning: planning, expectedRevision: fresh.revision }, 'PATCH')
+    expect(result.status).toBe(200)
+    const after = (await store.load({ sideline: false })).projects[0]
+    expect(after.kanban).toEqual(beforeBoard)
+    expect(after.nodes.find(n => n.id === id)).toMatchObject({ pinned: true, manualPlacement: true,
+      taskPlanning: { category: 'security', urgency: { level: 'urgent' } } })
+    expect(createSession).toHaveBeenCalledTimes(1)
+    const denied = await request('/opsapi/nodes/human?force=1', { taskPlanning: defaultTaskPlanning('human-task-1234'), expectedRevision: after.revision }, 'PATCH')
+    expect(denied.status).toBe(403)
+    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === 'human')).toEqual(human)
+  })
   it('preserves exact placement and untouched receipts for same-column metadata updates', async () => {
     const a = await create(), b = await create({ idempotencyKey: 'same-column-card-b' })
     const before = (await store.load()).projects[0]

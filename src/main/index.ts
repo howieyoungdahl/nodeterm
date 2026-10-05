@@ -7,6 +7,7 @@ import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
 import { IPC } from '../shared/ipc'
+import { desktopPlanningRefusal } from '../shared/task-planning'
 
 // Debug log ring (issue #78): capture the process console from the first line — a packaged app
 // swallows it entirely, and the boot path is where the interesting warnings are. The ring is
@@ -3155,6 +3156,8 @@ app.whenReady().then(async () => {
   const projectIdOfNode = (id: string): string | undefined =>
     workspaceStore.persistedCanvases().find((c) => c.nodes.some((n) => n.id === id))?.id
   hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
+    const planningRefusal = desktopPlanningRefusal(args)
+    if (planningRefusal) return { ok: false, error: planningRefusal, message: planningRefusal }
     // `browser` is answered in MAIN and never forwarded to the renderer's agent-control dispatch:
     // the debugger handle and the CDP allowlist are main-side, and the renderer is the more
     // attackable half. Every other verb still round-trips to the renderer below.

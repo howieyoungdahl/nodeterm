@@ -4,6 +4,7 @@ import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stac
 import { IconChat, IconMic, IconSearch } from '../icons'
 import { ContextMeter } from '../ContextMeter'
 import { OrganizationBadge } from '../OrganizationBadge'
+import { TaskPlanningBadge } from '../TaskPlanningBadge'
 import { AccountChip, useAccountChip } from '../AccountChip'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useCardPanel } from '../../state/cardPanel'
@@ -263,6 +264,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           <div className="kanban-modal__toolbar">
           <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>
           <OrganizationBadge organization={session.organization} nodeId={session.id} />
+          <TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} />
           {isTerminal && <AccountChip chip={accountChip} />}
           {/* The driving chip, so a user watching a browser card THROUGH the modal is not
               driving-blind. The lease is keyed by node id (not by webview object), so this shows

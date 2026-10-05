@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { BoardLogAuthor, KanbanPriority, ProjectKanban } from '@shared/types'
-import { cardMeta, labelsForCard, setCardDue, setCardPriority, toggleAssignee } from '../../lib/kanban'
+import { cardMeta, labelsForCard, setCardCategory, setCardDue, setCardPriority, toggleAssignee } from '../../lib/kanban'
+import { TASK_CATEGORIES, type TaskCategory } from '@shared/task-planning'
 import { LabelChips } from './LabelChips'
 import { LabelPicker } from './LabelPicker'
 import { useShallow } from 'zustand/react/shallow'
@@ -39,6 +40,7 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
   const meta = cardMeta(board, nodeId)
   const labels = labelsForCard(board, nodeId)
   const projectId = useProjects((s) => s.activeProjectId)
+  const plannedCategory = useProjects(s => s.projects.find(p => p.id === projectId)?.nodes.find(n => n.id === nodeId)?.taskPlanning?.category)
   const logEntries = useBoardLog((s) => s.entriesFor(projectId))
   // selectFaces + useShallow, NOT selectOthers: the pool only needs name+color, and applyDiff
   // replaces the whole PeerState on every cursor patch (~20/s per peer) — subscribing to
@@ -63,6 +65,13 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
 
   return (
     <div className="kanban-meta">
+      <div className="kanban-meta__group">
+        <label className="kanban-meta__label" htmlFor={`work-category-${nodeId}`}>Category</label>
+        <select id={`work-category-${nodeId}`} value={meta?.category ?? plannedCategory ?? 'needs-classification'}
+          onChange={e => onChange(setCardCategory(board, nodeId, e.target.value as TaskCategory))}>
+          {TASK_CATEGORIES.map(category => <option key={category} value={category}>{category.replaceAll('-', ' ')}</option>)}
+        </select>
+      </div>
       <div className="kanban-meta__group">
         <span className="kanban-meta__label">Members</span>
         <div className="kanban-meta__row">
