@@ -93,6 +93,10 @@ registry is missing a field.
   including paths embedded in generated SSH commands or handed to scp, which the `fs` scan cannot
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
+  For private configuration, create staging files with mode 0600 before writing
+  content and preserve the destination's mode before publication. A default
+  0666 staging mode widens a private file under a permissive server umask.
+  Only ENOENT proves a missing destination; an unreadable mode must fail closed.
 
 - **Never write to a child's stdin without an `'error'` listener on that stream.** A pipe write's
   failure is not a throw at the call site: when the child exits before draining stdin (a CLI handed

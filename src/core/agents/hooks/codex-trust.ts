@@ -9,11 +9,15 @@
  * modules); the rename itself goes through core/fs-atomic.ts.
  */
 import {
+  closeSync,
   copyFileSync,
   existsSync,
+  fchmodSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
+  statSync,
   unlinkSync,
   writeFileSync
 } from 'fs'
@@ -525,11 +529,31 @@ function skipTomlLiteralString(line: string, startIndex: number): number {
 export function writeConfigAtomically(configPath: string, contents: string): void {
   const dir = dirname(configPath)
   mkdirSync(dir, { recursive: true })
+  let mode = 0o600
+  let hadConfig = false
+  try {
+    mode = statSync(configPath).mode & 0o777
+    hadConfig = true
+  } catch (error) {
+    if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') {
+      throw error
+    }
+  }
   const tmpPath = join(dir, `.${Date.now()}-${randomUUID()}.tmp`)
   let renamed = false
+  let ownsTemp = false
   try {
-    writeFileSync(tmpPath, contents, 'utf-8')
-    if (existsSync(configPath)) {
+    // A server umask of 0002 must not expose private config bytes, even during
+    // staging. Preserve the destination's permissions independently of umask.
+    const fd = openSync(tmpPath, 'wx', 0o600)
+    ownsTemp = true
+    try {
+      writeFileSync(fd, contents, 'utf-8')
+      fchmodSync(fd, mode)
+    } finally {
+      closeSync(fd)
+    }
+    if (hadConfig) {
       // Why: rotate a .bak before overwriting so a user can recover if our
       // edit ever goes wrong. (on macOS
       // a plain copyFileSync is sufficient.)
@@ -538,7 +562,7 @@ export function writeConfigAtomically(configPath: string, contents: string): voi
     renameAtomicSync(tmpPath, configPath)
     renamed = true
   } finally {
-    if (!renamed && existsSync(tmpPath)) {
+    if (ownsTemp && !renamed && existsSync(tmpPath)) {
       try {
         unlinkSync(tmpPath)
       } catch {
