@@ -6,11 +6,13 @@ import hashlib
 import http.client
 import json
 import os
+import queue
 from pathlib import Path
 import re
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -187,6 +189,88 @@ def posix_path(value):
     if re.match(r'^[A-Za-z]:[\\/]', value):
         return '/mnt/' + value[0].lower() + '/' + value[3:].replace('\\', '/')
     return value
+
+
+# No target, body or operation reaches this process until the Windows caller receives readiness.
+# Retrying a WSL service startup timeout is safe here because the helper has not been invoked.
+WSL_BOOTSTRAP = '''import json, runpy, sys
+sys.stdout.buffer.write(('FERN_NODETERM_READY:' + sys.argv[2] + '\\n').encode())
+sys.stdout.buffer.flush()
+line = sys.stdin.buffer.readline(1048577)
+if not line:
+    sys.exit(0)
+arguments = json.loads(line)
+if not isinstance(arguments, list) or not all(isinstance(v, str) for v in arguments):
+    sys.exit(2)
+script = sys.argv[1]
+sys.argv = [script, *arguments]
+runpy.run_path(script, run_name='__main__')
+'''
+
+
+def windows_stdin_required(arguments):
+    # Only the positional command following the global options selects stdin delivery.
+    index = 0
+    while index < len(arguments):
+        value = arguments[index]
+        if value in ('--url', '--socket', '--data-dir'):
+            index += 2
+        elif any(value.startswith(flag + '=') for flag in ('--url', '--socket', '--data-dir')):
+            index += 1
+        else:
+            return value == 'send' and not any(arg == '--body-file' or arg.startswith('--body-file=')
+                                              for arg in arguments[index + 1:])
+    return False
+
+
+def run_windows(arguments, body=b'', *, popen=None, startup_timeout=12):
+    launch = popen or subprocess.Popen
+    payload = json.dumps([posix_path(value) for value in arguments]).encode() + b'\n' + body
+    for attempt in range(2):
+        nonce = uuid.uuid4().hex
+        ready = ('FERN_NODETERM_READY:' + nonce + '\n').encode()
+        process = launch(['wsl.exe', '-d', 'Ubuntu', '--exec', 'python3', '-u', '-c', WSL_BOOTSTRAP,
+                          posix_path(str(Path(__file__).resolve())), nonce],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        observed = queue.Queue(maxsize=1)
+
+        def read_ready(child=process, expected=ready, output=observed):
+            try:
+                result = b''
+                while len(result) < len(expected):
+                    chunk = child.stdout.read(len(expected) - len(result))
+                    if not chunk:
+                        break
+                    result += chunk
+                output.put(result)
+            except OSError:
+                output.put(b'')
+
+        reader = threading.Thread(target=read_ready, daemon=True)
+        reader.start()
+        timed_out = False
+        try:
+            greeting = observed.get(timeout=startup_timeout)
+        except queue.Empty:
+            greeting = b''
+            timed_out = True
+        if greeting == ready:
+            # After dispatch, never retry, even if the command reports the same WSL error.
+            stdout, stderr = process.communicate(payload)
+            return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+        # We own only this launcher. Close its empty input and stop it, never the WSL service.
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        reader.join(timeout=1)
+        stdout, stderr = process.communicate(timeout=5)
+        diagnostic = (greeting + stdout + stderr).replace(b'\x00', b'').lower()
+        transient = timed_out or b'0x8007274c' in diagnostic
+        if attempt == 0 and transient:
+            time.sleep(0.5)
+            continue
+        raise ControlError('WSL startup unavailable before command dispatch; nothing was sent. '
+                           'No target, input, permission or service was changed.')
 
 
 def emit(value):
@@ -662,12 +746,15 @@ def main():
 
 
 if __name__ == '__main__':
-    if os.name == 'nt':
-        # Native Windows callers use the same local Linux credentials without copying secrets.
-        command = ['wsl.exe', '-d', 'Ubuntu', '--exec', 'python3', posix_path(str(Path(__file__).resolve()))]
-        command.extend(posix_path(value) for value in sys.argv[1:])
-        sys.exit(subprocess.call(command))
     try:
+        if os.name == 'nt':
+            # Native Windows callers keep the configured Ubuntu route and Linux-only credentials.
+            arguments = sys.argv[1:]
+            body = sys.stdin.buffer.read(1048577) if windows_stdin_required(arguments) else b''
+            result = run_windows(arguments, body)
+            sys.stdout.buffer.write(result.stdout)
+            sys.stderr.buffer.write(result.stderr)
+            sys.exit(result.returncode)
         main()
     except (ControlError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         details = error.details if isinstance(error, (CreationUncertain, CleanupUncertain)) else {'error': str(error)}

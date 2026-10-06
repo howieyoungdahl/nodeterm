@@ -433,6 +433,11 @@ and Behavior settings. Topic-based grouping still needs an operator or supervisi
 the user resolves a conflict, retain cards missing from disk with their ids and positions, and save
 the merged result. A conflict can pause autosave while more terminals are opened. The old disk
 snapshot cannot be used as a deletion list; closing a card is a separate explicit action.
+Honor the retained store's explicit deletion records when resolving Reload or Keep my version.
+Missing cards without such evidence still survive. Deleted groups release surviving new cards at
+their original canvas position, and deleted links and board assignments must not return. Preserve
+`workspace_conflict` through partial-save errors so the renderer pauses instead of retrying an
+unresolvable deletion conflict. Runtime deletion evidence must never become client-written metadata.
 
 Messaging queue changes must preserve deadlines at the actual send boundary and keep transport delivery separate from recipient work acceptance. The opt-in assignment adapter, receipt bounds, and remaining legacy integration are documented in `docs/message-delivery-integrity.md`.
 

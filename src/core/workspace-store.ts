@@ -1024,12 +1024,12 @@ export class WorkspaceStore {
         throw new Error('workspace_conflict: storage changed during content adoption')
       const clean = (p: Project): Project => {
         const { revision: _revision, loadedKanban: _baseline, organizationChange: _organization,
-          workspaceChange: _publication, ...content } = p
+          workspaceChange: _publication, deletedEntities: _deletions, ...content } = p
         return content
       }
       const changes = afterContent.projects.flatMap(p => {
         const old = beforeContent?.projects.find(b => b.id === p.id)
-        return old && JSON.stringify(clean(old)) !== JSON.stringify(clean(p)) ? [{ before: clean(old), after: { ...clean(p), revision: p.revision } }] : []
+        return old && JSON.stringify(clean(old)) !== JSON.stringify(clean(p)) ? [{ before: clean(old), after: { ...clean(p), revision: p.revision, deletedEntities: p.deletedEntities } }] : []
       })
       // A project-set mutation cannot be acknowledged by a project-only consumer.
       if (beforeRevision && beforeContent && beforeContent.projects.length === afterContent.projects.length &&
@@ -1231,7 +1231,15 @@ export class WorkspaceStore {
     }
 
     this.onPersist?.()
-    if (writeFailures.length) throw new AggregateError(writeFailures, 'Canvas project writes failed')
+    if (writeFailures.length) {
+      // The RPC transports the outer message only. Preserve authoritative conflicts so the
+      // renderer suspends retries instead of treating a rejected resurrection as a transient IO error.
+      const conflict = writeFailures.find(error => error.cause instanceof Error &&
+        error.cause.message.includes('workspace_conflict:') &&
+        !error.cause.message.startsWith('workspace_conflict: retained publication unavailable'))
+      if (conflict) throw new Error((conflict.cause as Error).message, { cause: new AggregateError(writeFailures) })
+      throw new AggregateError(writeFailures, 'Canvas project writes failed')
+    }
   }
 
   /**

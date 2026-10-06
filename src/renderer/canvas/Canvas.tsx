@@ -12135,7 +12135,7 @@ export function Canvas() {
         )}
         {revisionConflict && (
           <ConflictBar
-            message="The workspace changed in another client. Your edits are unsaved. Reload or keep your edits while preserving server organization and manual board choices."
+            message="The saved workspace changed. Your edits are unsaved. Reload or keep your edits while preserving server organization and manual board choices."
             onReload={() => void resolveSaveConflict(false)}
             onKeepMine={() => void resolveSaveConflict(true)}
           />
