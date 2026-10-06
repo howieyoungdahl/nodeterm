@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
@@ -10,6 +10,11 @@ import { sessionName, TMUX_SOCKET } from '../../src/core/tmux-naming'
 import { privateTmuxSocketReason } from '../../src/core/tmux-test-socket'
 import { startServer } from '../../src/server/index'
 import type { Workspace } from '../../src/shared/types'
+const managedCreate = (projectId: string, creationId = randomUUID(), owner = 'E2E fixture') => ({
+  projectId, idempotencyKey: creationId,
+  creation: { version: 1, taskId: 'explicit-e2e-task', creationId, declaredOwner: owner },
+  organization: { owner, projectId, workstream: 'test', functionalRole: 'ops' }
+})
 
 const hasTmux = (() => {
   try {
@@ -51,11 +56,8 @@ function tmuxSendKeys(target: string, ...keys: string[]): void {
 }
 
 /**
- * `createHeadless` awaits the tmux `new-session` it runs before resolving, but under this suite's
- * full-file/full-suite CPU load a `has-session` probe from a SEPARATE `execFileSync` immediately
- * after can still observe the socket a beat before the OS finishes making the session visible on
- * it — measured directly against this file: a bare probe flakes under load, a few-hundred-ms bounded
- * retry does not. Bounded, never unbounded.
+ * Observe backend visibility behind a bounded deadline. Headless creation now probes the
+ * named tmux backend before command delivery; this also accommodates asynchronous teardown.
  */
 function backendExists(persistKey: string, timeoutMs = 2_000): boolean {
   const deadline = Date.now() + timeoutMs
@@ -226,6 +228,7 @@ describe.skipIf(!canDriveTmux)('operator node creation (POST/PATCH/DELETE /opsap
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
       body: JSON.stringify({
+        ...managedCreate('op-project'),
         projectId: 'op-project',
         cwd: projectDir,
         title: 'Operator E2E Terminal',
@@ -288,39 +291,23 @@ describe.skipIf(!canDriveTmux)('operator node creation (POST/PATCH/DELETE /opsap
     expect(nodesAfterDelete.find((n) => n.id === createdBody.id)).toBeUndefined()
   }, 20_000)
 
-  // The initial `--cmd` delivery is `sendText`'s tmux `paste-buffer` write to a session this same
-  // request just spawned — the identical write `canvas-control-spawn-liveness-e2e.test.ts` already
-  // tolerates failing in a constrained CI tmux (its `open-agent` assertion accepts `[200, 400]`,
-  // i.e. either the command landed or the launch reported it did not). This test holds the SAME
-  // tolerance for the operator plane: either the command is delivered and the node is created, or
-  // the delivery is reported honestly as a 502 with the card left in place — never a silent drop
-  // and never a crash.
-  it('accepts an initial --cmd, tolerating this environment’s tmux paste-buffer flakiness', async () => {
+  it('delivers an initial --cmd after headless backend readiness', async () => {
     const res = await fetch(`${base}/opsapi/nodes`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ projectId: 'op-project', cmd: 'echo hello-from-operator' })
+      body: JSON.stringify({ ...managedCreate('op-project'), cmd: 'echo hello-from-operator' })
     })
-    expect([201, 502]).toContain(res.status)
     const body = (await res.json()) as { id?: string; tmuxSession?: string; error?: string }
-    if (res.status === 201) {
-      expect(backendExists(body.id as string)).toBe(true)
-      await fetch(`${base}/opsapi/nodes/${body.id}`, { method: 'DELETE', headers: auth })
-    } else {
-      // Structured, not just prose: the CLI can retry the command or clean up by id without
-      // parsing the error string.
-      expect(body.error).toContain('pty_command_failed')
-      expect(body.id).toBeTruthy()
-      expect(body.tmuxSession).toBe(`nt-${body.id}`)
-      await fetch(`${base}/opsapi/nodes/${body.id}`, { method: 'DELETE', headers: auth })
-    }
+    expect(res.status, JSON.stringify(body)).toBe(201)
+    expect(backendExists(body.id as string)).toBe(true)
+    await fetch(`${base}/opsapi/nodes/${body.id}`, { method: 'DELETE', headers: auth })
   }, 20_000)
 
   it('rejects a create with no known project and an out-of-range size', async () => {
     const badProject = await fetch(`${base}/opsapi/nodes`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ projectId: 'no-such-project' })
+      body: JSON.stringify(managedCreate('no-such-project'))
     })
     expect(badProject.status).toBe(400)
     expect((await badProject.json()).error).toContain('no-such-project')
@@ -328,7 +315,7 @@ describe.skipIf(!canDriveTmux)('operator node creation (POST/PATCH/DELETE /opsap
     const badSize = await fetch(`${base}/opsapi/nodes`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ width: 1 })
+      body: JSON.stringify({ ...managedCreate('op-project'), width: 1 })
     })
     expect(badSize.status).toBe(400)
   })
@@ -346,7 +333,7 @@ describe.skipIf(!canDriveTmux)('operator node creation (POST/PATCH/DELETE /opsap
   })
 
   it('places a keyed assistant card and retries without replacing its real private tmux pane', async () => {
-    const input = { projectId: 'op-project', title: 'Disposable organization fixture', idempotencyKey: 'org-real-tmux-0001',
+    const input = { ...managedCreate('op-project', 'org-real-tmux-0001'), projectId: 'op-project', title: 'Disposable organization fixture', idempotencyKey: 'org-real-tmux-0001',
       organization: { owner: 'E2E fixture', projectId: 'op-project', workstream: 'test', functionalRole: 'ops' } }
     const post = () => fetch(`${base}/opsapi/nodes`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(input) })
     const first = await post()
@@ -462,7 +449,7 @@ describe.skipIf(!canDriveTmux)('operator-created node canvas identity', () => {
     const created = await fetch(`${base}/opsapi/nodes`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ projectId: 'identity-project', cwd: projectDir })
+      body: JSON.stringify({ ...managedCreate('identity-project'), cwd: projectDir })
     })
     expect(created.status).toBe(201)
     const { id: nodeId } = (await created.json()) as { id: string }

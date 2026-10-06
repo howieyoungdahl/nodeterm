@@ -90,6 +90,7 @@ import { codexThreadIdentityRoot } from '../../codex-identity-proxy'
 import { HOOK_CURL_HEADERS_SH } from '../hook-curl-config-sh'
 import { NODE_TOKEN_READ_SH } from '../node-token-sh'
 import { HOOK_ENDPOINT_FALLBACK_SH } from '../hook-endpoint-failover-sh'
+import { CLEANUP_PROCESS_STAMP_SH } from './cleanup-process-sh'
 
 /**
  * Bumped by hand whenever this script's CONTRACT with the server changes. Not a git sha and not a
@@ -110,7 +111,7 @@ import { HOOK_ENDPOINT_FALLBACK_SH } from '../hook-endpoint-failover-sh'
  *     and any session the PHONE spawns on that host, which runs the host's installed script — stay
  *     `legacy` until the project reconnects.
  */
-export const MANAGED_SCRIPT_REVISION = 4
+export const MANAGED_SCRIPT_REVISION = 6
 /** The first revision that reads NODETERM_NODE_TOKEN_DIR and sends the node token (PR #195). */
 export const MIN_TOKEN_AWARE_REVISION = 3
 /* rev 4 (issue #384): the token read moved to the shared resolver in `node-token-sh.ts`, which
@@ -157,6 +158,8 @@ export function buildManagedScript(
     '  cat >/dev/null 2>&1 || :',
     '  exit 0',
     'fi',
+    // Capture the Codex ancestor while the hook still belongs to it, before network backgrounding.
+    ...(agentId === 'codex' ? [CLEANUP_PROCESS_STAMP_SH] : []),
     '# Sourced with stdout swallowed, not only stderr: SessionStart and UserPromptSubmit are two of',
     '# the events where Claude ADDS hook stdout to the agent\'s context (#186). The endpoint files',
     '# nodeterm writes print nothing today — this guards the day one of the four candidate paths',
@@ -257,6 +260,7 @@ export function buildManagedScript(
     '      -H "Content-Type: application/x-www-form-urlencoded" \\',
     '      --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
     '      --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
+    '      --data-urlencode "nodeterm_cleanup_process=${nt_cleanup_process}" \\',
     '      --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
     '      --data-urlencode "payload@${nt_payload_file}" >/dev/null 2>&1',
     '  elif [ -n "$NODETERM_HOOK_PORT" ]; then',
@@ -266,6 +270,7 @@ export function buildManagedScript(
     '      -H "Content-Type: application/x-www-form-urlencoded" \\',
     '      --data-urlencode "nodeId=${NODETERM_NODE_ID}" \\',
     '      --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
+    '      --data-urlencode "nodeterm_cleanup_process=${nt_cleanup_process}" \\',
     '      --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
     '      --data-urlencode "payload@${nt_payload_file}" >/dev/null 2>&1',
     '  else',

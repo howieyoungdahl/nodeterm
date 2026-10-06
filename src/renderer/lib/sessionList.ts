@@ -7,6 +7,7 @@ import type { ProjectIcon } from '@shared/project-icon'
 import { relativeTime } from './relativeTime'
 
 export interface SessionNodeInput {
+  cleanupArchiveId?: string
   id: string
   kind: NodeKind
   title: string
@@ -346,7 +347,7 @@ export function buildSessionList(
     const source = isActive && liveActiveNodes ? liveActiveNodes : p.nodes
     const groupNodes = source.filter((n) => n.kind === 'group')
     const groupById = new Map(groupNodes.map((n) => [n.id, n]))
-    const terminals = source.filter((n) => n.kind === 'terminal')
+    const terminals = source.filter((n) => n.kind === 'terminal' && !n.cleanupArchiveId)
 
     // A frame's parent, but only when that parent is a frame we know AND the chain terminates.
     // A cyclic parentId (hand-edited project.json, a bad merge) would otherwise recurse forever;
@@ -478,7 +479,7 @@ export function buildStatusList(
       // rest, the persisted node is already current. This mirrors buildSessionList's live-vs-store
       // choice without ever dropping the persisted set as the ownership key.
       const node = isActive && liveById.has(n.id) ? liveById.get(n.id)! : n
-      if (seen.has(node.id)) continue
+      if (node.cleanupArchiveId || seen.has(node.id)) continue
       seen.add(node.id)
       const row = toRow(node, statusById[node.id], p)
       if (keep(row)) tagged.push({ row, pidx })
@@ -492,7 +493,7 @@ export function buildStatusList(
     if (active) {
       const activePidx = projects.indexOf(active)
       for (const n of liveActiveNodes) {
-        if (n.kind !== 'terminal' || seen.has(n.id) || ownerById.has(n.id)) continue
+        if (n.kind !== 'terminal' || n.cleanupArchiveId || seen.has(n.id) || ownerById.has(n.id)) continue
         seen.add(n.id)
         const row = toRow(n, statusById[n.id], active)
         if (keep(row)) tagged.push({ row, pidx: activePidx })

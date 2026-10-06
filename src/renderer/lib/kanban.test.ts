@@ -188,12 +188,13 @@ describe('card meta', () => {
 
 describe('card priority', () => {
   const enes = { name: 'enes', color: '#0a84ff' }
-  it('setCardPriority sets, changes and clears; clearing the only field drops the entry', () => {
+  it('setCardPriority sets, changes and retains explicit clears against automatic assessment', () => {
     const k1 = setCardPriority(board(), 'n1', 'high')
     expect(cardMeta(k1, 'n1')?.priority).toBe('high')
     const k2 = setCardPriority(k1, 'n1', 'urgent')
     expect(cardMeta(k2, 'n1')?.priority).toBe('urgent')
-    expect(cardMeta(setCardPriority(k2, 'n1', null), 'n1')).toBeUndefined()
+    expect(cardMeta(setCardPriority(k2, 'n1', null), 'n1')).toMatchObject({ priorityManual: true })
+    expect(cardMeta(setCardPriority(k2, 'n1', null), 'n1')?.priority).toBeUndefined()
   })
   it('priority survives assignee/due edits (and vice versa)', () => {
     const k = setCardDue(toggleAssignee(setCardPriority(board(), 'n1', 'low'), 'n1', enes), 'n1', 9)

@@ -7,7 +7,7 @@ import WebSocket from 'ws'
 
 import { sessionName, TMUX_SOCKET } from '../../src/core/tmux-naming'
 import { startServer } from '../../src/server/index'
-import { WorkspaceStore } from '../../src/core/workspace-store'
+import { writeFileAtomic } from '../../src/core/fs-atomic'
 import { IPC } from '../../src/shared/ipc'
 import { decodePtyData } from '../../src/shared/rpc'
 import type { CanvasNodeState, Workspace } from '../../src/shared/types'
@@ -297,8 +297,13 @@ printf 'FAKE_AGENT_REGISTERED_%s\\n' "$nt_code"
 
     await expect(rpc(IPC.workspaceSave, [staleBeforeSource])).rejects.toThrow()
     expect((await loadWorkspace()).projects[0].nodes.some((node) => node.id === SOURCE_ID)).toBe(true)
-    // Exercise recovery after a real external store write, without disabling the Server's rescue.
-    await new WorkspaceStore().save({ ...staleBeforeSource, revision: undefined })
+    // A current retained writer correctly refuses an unobserved base. Simulate the actual old
+    // client/external raw writer instead, on this fixture's file only, without a delete tombstone
+    // that would mean an explicit current-version Close and prohibit recovery.
+    const file = path.join(projectDir, '.nodeterm', 'project.json')
+    const legacy = JSON.parse(fs.readFileSync(file, 'utf8'))
+    legacy.nodes = legacy.nodes.filter((node: CanvasNodeState) => node.id !== SOURCE_ID)
+    await writeFileAtomic(file, JSON.stringify(legacy))
     await until(async () => {
       const workspace = await loadWorkspace()
       return !workspace.projects[0].nodes.some((node) => node.id === SOURCE_ID)

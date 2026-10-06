@@ -1,3 +1,4 @@
+import type { AssistantCreation } from './assistant-creation'
 // Types shared across the main, preload, and renderer processes.
 
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
@@ -335,6 +336,11 @@ export interface PendingLaunch {
 }
 
 export interface CanvasNodeState {
+  /** Creation-time work intent; presentation only, never creator/session authority. */
+  taskPlanning?: import('./task-planning').TaskPlanning
+  assistantCreation?: AssistantCreation
+  /** Presentation only. Never changes backend or session identity. */
+  cleanupArchiveId?: string
   /** Descriptive organization content. Authority and undo history live only in the server ledger. */
   organization?: import('./kanban-organization').NodeOrganization
   id: string
@@ -513,8 +519,8 @@ export interface CanvasState {
  * The relay's host↔client mirror (src/main/remote) uses the same vocabulary and simply omits both.
  */
 export type CanvasMutation =
-  | { op: 'upsert'; node: CanvasNodeState; src?: string; seq?: number }
-  | { op: 'remove'; id: string; src?: string; seq?: number }
+  | { op: 'upsert'; node: CanvasNodeState; src?: string; seq?: number; workspaceRevision?: string }
+  | { op: 'remove'; id: string; src?: string; seq?: number; workspaceRevision?: string }
 
 /** Canvas pan/zoom state. */
 export interface Viewport {
@@ -556,11 +562,16 @@ export type KanbanPriority = 'low' | 'medium' | 'high' | 'urgent'
 
 export interface KanbanCardMeta {
   nodeId: string
+  /** Explicit user classification; independent from stage, priority and placement. */
+  category?: import('./task-planning').TaskCategory
+  categoryReason?: string
   assignees?: BoardLogAuthor[]
   /** Due timestamp (ms). Absent = no due date. */
   dueAt?: number
   /** Absent = no priority. */
   priority?: KanbanPriority
+  /** Includes explicit clear: automatic urgency must not replace a user decision. */
+  priorityManual?: true
   /** Ids of the board labels applied to this card (see ProjectKanban.labels). Absent/empty = none;
    *  ids that no longer resolve to a label are dropped by readers (dangling-safe). */
   labels?: string[]
@@ -723,6 +734,8 @@ export interface Project {
   loadedKanban?: ProjectKanban | null
   /** Runtime-only revision chain for a single-project organization publication. */
   organizationChange?: { before: string; after: string }
+  /** Runtime publication evidence. Never persisted or acknowledged before all content merges. */
+  workspaceChange?: WorkspacePublication
   /** Loaded content revision used by management CAS. Never creator authority. */
   revision?: string
   /** Exact existing column IDs, scoped to this machine's exact project ID. */
@@ -816,6 +829,12 @@ export interface Project {
    * peer's disk, so it must never land in this client's workspace.json.
    */
   remote?: boolean
+}
+
+export interface WorkspacePublication {
+  before: string
+  after: string
+  changes: Array<{ before: Project; after: Project }>
 }
 
 /** The full workspace written to / read from disk. */

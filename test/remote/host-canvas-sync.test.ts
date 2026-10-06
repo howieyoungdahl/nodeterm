@@ -33,6 +33,21 @@ function node(id: string): CanvasNodeState {
 const state = (nodes: CanvasNodeState[]): CanvasState => ({ nodes })
 
 describe('createHostCanvasSync', () => {
+  it('keeps host archive identity through an older phone upsert and refuses its archived-row removal', () => {
+    const { socket } = fakeNotifySocket(), received: CanvasMutation[] = []
+    const sync = createHostCanvasSync(socket, m => received.push(m))
+    const archived = { ...node('archived'), cleanupArchiveId: 'reviewed-receipt', agentSessionId: 'preserved-session',
+      agentModel: 'gpt-6.1-sol', pinned: true, manualPlacement: true }
+    sync.setState(state([archived, node('ordinary')]))
+    const result = sync.handleRpc({ id: '', method: CANVAS_MUTATE_METHOD,
+      params: { op: 'upsert', node: { ...node('archived'), title: 'Legacy cosmetic edit' } } }) as Extract<CanvasMutation, { op: 'upsert' }>
+    expect(result.node).toMatchObject({ cleanupArchiveId: 'reviewed-receipt', agentSessionId: 'preserved-session',
+      agentModel: 'gpt-6.1-sol', pinned: true, manualPlacement: true, title: 'Legacy cosmetic edit' })
+    expect(sync.handleRpc({ id: '', method: CANVAS_MUTATE_METHOD, params: { op: 'remove', id: 'archived' } })).toBeNull()
+    expect(received).toHaveLength(1)
+    expect(sync.handleRpc({ id: '', method: CANVAS_MUTATE_METHOD, params: { op: 'remove', id: 'ordinary' } })).toEqual({ op: 'remove', id: 'ordinary' })
+    expect(received).toHaveLength(2)
+  })
   it('broadcasts the state to the client on setState', () => {
     const { socket, sent } = fakeNotifySocket()
     const sync = createHostCanvasSync(socket, () => {})

@@ -152,7 +152,8 @@ hooks from replacing a resumed rollout. Recognized authenticated parent hooks ca
   `SpawnHandlerState` synchronously observes both serialized preparation and parallel external
   launches, so health remains readable while its oldest operation is wedged. Management node
   creation and rename/resize have separate strict `/opsapi/nodes` routes. Assistant organization
-  is an explicit creation opt-in, attested by the private creator ledger and durable journal;
+  requires an explicit task/creation envelope and complete organization metadata, attested by
+  the private creator ledger and acknowledged receipt journal;
   descriptive metadata never grants creator or conversation authority. Management HTTP is
   Server-only; shared metadata, board intent and revision handling also run on Desktop.
 - **`src/preload/`** — the only bridge. `index.ts` uses `contextBridge` to expose a
@@ -1572,8 +1573,11 @@ else, and its context links must keep classifying across restarts).
   timeout response; parallel launches have separate tickets and health names the oldest one.
   A concurrent close, operator removal, or Server stop marks an in-flight node cancelled; if the
   non-cancellable create resolves after the first destroy already found nothing, launch cleanup
-  destroys the exact backend again. Keep this two-pass guard when moving work outside the lock or
-  removed cards leak tmux husks.
+  destroys the exact backend again using the internal `afterPending` option. The final pass must
+  start after an earlier pending destroy settles (including an uncertain failure): its local kill
+  may have observed absence before the late create, while its second socket was still pending.
+  Ordinary duplicate deletes still coalesce, and IPC cannot request the internal option. Keep this
+  two-pass guard when moving work outside the lock or removed cards leak tmux husks.
   Capability preflight is separately bounded at 5s. Server boot now refreshes the real shared-Codex
   capability after arming its identity secret, and canvas control consumes that boot-populated
   answer behind the bound. A missing or failed refresh degrades only that launch to bare Codex;
@@ -2637,7 +2641,10 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   workstream/functional role and automatic/manual placement. It is separate from `role` and
   `parentId`/`group`. Exact `project.kanbanOrganization` role/override mappings reference existing
   column IDs; missing policy/board/column falls back to Ungrouped. Only new explicit management
-  opt-in plus private creator/journal attestation is eligible. Never adopt from saved content,
+  task/creation envelope plus private creator/journal attestation is eligible. Management callers
+  require complete owner/project/workstream/role metadata, a stable task ID and exact creation key,
+  then check authenticated read-only `/opsapi/creation-contract` and `receiptPublication` before
+  POST. Manual browser creation remains separate. Never adopt from saved content,
   titles/models or a shared operator label. Manual assignment/Ungrouped/order actions (including
   column deletion) write `manualAssignments` tombstones and distinct `manualAssignmentVersions`.
   Updates preserve pins, hand placement, primary cards, unknown provenance, drift and all process
@@ -2651,7 +2658,7 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   further automation. Browser merge applies placement
   deltas against the loaded board baseline, retaining untouched card order and local manual edits.
   Organization/ledger regressions also run in Windows CI. Uncertain launch is never replayed. Preview is an explicit read-only
-  allowlist, with no bulk apply route; backfill needs separate concrete approval. Undo rechecks
+  allowlist, with no bulk apply route or backfill of missing private creator/task evidence. Undo rechecks
   ownership/revision/placement and restores only one assignment/order, then records manual intent.
   Board-log events use stable receipt IDs after durable state. See `docs/kanban-organization.md`
   for limits, partial-write recovery, client use and native mobile follow-up.
@@ -2906,6 +2913,12 @@ the overlap tests exercise the resulting race.
 
 ## Conventions
 
+**Creation-time work planning:** every new task terminal records category, urgency and reason
+before save/launch. Keep work category, stage, blocked state and urgency independent. Supporting
+sessions fold only under an explicit uniquely present parent; retain manual placement, pins,
+priority/category overrides and the original sessions. See `docs/task-planning.md` for the shared
+schema, automatic evidence assessment, creation fingerprint boundary and bounded CAS updates.
+
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their
   reasoning and measurements; it is dense on purpose and is loaded automatically by coding agents.
   **`CONTRIBUTING.md` is the short human door**: setup, the process-boundary rules, the house rules
@@ -2964,3 +2977,16 @@ the overlap tests exercise the resulting race.
     follow-up note rather than same-PR work — but flag it so it isn't forgotten.
   When a change is genuinely desktop-only (native menus, auto-update, Keychain), say so; the
   point is to make the call consciously, not to leave the other surfaces to rot.
+
+Operational cleanup composition: `docs/session-cleanup.md` specifies automatic and
+separately authenticated operator-reviewed presentation archives. Exact dispositions,
+private ownership, retained raw revisions, generation/activity fencing and durable
+marker-only inverses are independent checks. No human receipt is a hook. Ordinary
+Server publications carry complete transaction content and revision evidence; a
+snapshot uses a separate store so it cannot weaken blind-write guards. An observed
+race keeps its receipt and never becomes success by refreshing a revision token.
+Native Windows ordinary creation/organization uses an explicit flushed-file receipt
+acknowledgment before save/spawn, without claiming directory/power-loss durability.
+Linux receipts retain directory sync. Receipt capabilities are read-only and explicit;
+Windows, copied and unconfirmed receipts never enroll Linux automatic cleanup.
+Windows retained archive/undo refuses before receipt preparation or file enrollment.

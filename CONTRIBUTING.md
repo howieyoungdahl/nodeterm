@@ -93,6 +93,10 @@ registry is missing a field.
   including paths embedded in generated SSH commands or handed to scp, which the `fs` scan cannot
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
+  For private configuration, create staging files with mode 0600 before writing
+  content and preserve the destination's mode before publication. A default
+  0666 staging mode widens a private file under a permissive server umask.
+  Only ENOENT proves a missing destination; an unreadable mode must fail closed.
 
 - **Never write to a child's stdin without an `'error'` listener on that stream.** A pipe write's
   failure is not a throw at the call site: when the child exits before draining stdin (a CLI handed
@@ -172,7 +176,11 @@ probes, preserves `unknown` on every read failure, and shares one mutation engin
 reaper. Server-owned operator and agent workspace transactions also share one FIFO; separate
 load/save queues can overwrite each other with stale snapshots. `/opsapi/health` must snapshot
 spawn-handler state without awaiting the preparation or parallel external launches it diagnoses;
-timed-out non-cancellable launches remain visible until they actually settle. Credentials still
+timed-out non-cancellable launches remain visible until they actually settle. A cancelled launch's
+final backend cleanup must request a destroy pass after any pending destroy settles: sharing an
+earlier kill's acknowledgement can miss a backend created while its other socket was still pending.
+Ordinary repeated deletes keep coalescing; the internal `afterPending` flag is not an IPC option.
+Credentials still
 never ride argv — operator clients feed curl headers via stdin or another non-argv channel.
 
 **Assistant Kanban placement requires explicit creation attestation.** Owner/workstream/functional
@@ -192,6 +200,11 @@ preserving manual choices and the relative order of untouched cards. Run the org
 suites in both Linux and Windows CI; terminal integration tests use private disposable sockets.
 No automatic column creation, backfill or background reshuffling. See
 [Assistant Kanban organization](docs/kanban-organization.md) for the API, client and surface limits.
+Every new task terminal also records category, urgency and reason before save/launch. Work
+category, stage, blocked state and urgency are independent. Supporting sessions fold only
+through explicit task/parent intent; preserve pins, manual placement and user metadata overrides.
+Use [Creation-time work planning](docs/task-planning.md) for the schema and bounded CAS updates.
+
 The conversation principal is separate from management and has a small external CLI;
 see `docs/operator-conversations.md` for credential handling, policy provisioning boundaries,
 receipt meaning, and WSL use. Policy v1 keeps exact grants. Policy v2 also accepts the explicit
@@ -285,7 +298,9 @@ finish late, and tell the caller not to repeat. Any capability promise used on t
 own bounded fail-safe; an edition-specific `false` answer must not be replaced with a getter whose
 initializer that edition never runs. When close can race the unlocked external phase, retain a
 per-node cancellation until the late operation settles and destroy its exact backend again; the
-first destroy may have run before anything existed.
+first destroy may have run before anything existed. Recheck cancellation after an awaited attach
+before registering a fresh agent or sending its initial command. Final destruction cannot undo
+effects of a command already sent.
 
 **A new keyboard chord has to survive the shells, not just the renderer.** The application menu is
 ours (`buildAppMenu` in `main/index.ts`), but its command-style accelerators — ⌘Q, ⌘M, ⌘W, ⌘0, ⌘⇧B,
@@ -467,3 +482,31 @@ Two files, two audiences:
 **If you change or discover something other contributors must know, update this file too.** An
 invariant that only lives in a commit message is one refactor away from being violated by someone
 who never saw it.
+
+Operational presentation cleanup uses retained raw marker writes and durable inverse
+receipts, separate from destructive sweep and agent task control. Human reviewed
+receipts never establish hook completion. Serialized Server publications must carry
+complete changed content and contiguous workspace revision evidence; acknowledge
+only after safe content adoption, including background projects. Read-only publication
+snapshots must not enroll the saving store in files it has never read. Preserve opaque
+raw fields and manual board/pin/order intent. See `docs/session-cleanup.md`.
+Automatic cleanup also requires host-private task/creator receipts: a human card
+with verified completion history is still excluded. Ordinary saves cannot clear
+archive markers or drop hidden archived cards, including older-client round trips.
+On Windows, never-enrolled ordinary files have a separate exclusive admission
+fence and visibility-only save path; retained metadata, pending requests or crash
+evidence forbid downgrade. Native Windows archive enrollment explicitly refuses
+until directory durability has a real adapter. Do not replace that refusal with
+an atomic-overwrite fallback.
+Native Windows creation/organization uses an explicit private flushed-file receipt
+acknowledgment before save/spawn; it does not claim directory or power-loss durability.
+Linux receipts also sync directories. The read-only creation contract reports the
+platform guarantee. Unknown, copied, legacy and Windows receipts cannot supply
+Linux automatic cleanup admission. Interrupted receipts retain intent/fences and
+refuse replay. Native Windows tests must prove ordinary creation/organization/saves
+and retained/history/race refusal; Linux platform simulations are not native evidence.
+Management creation callers must validate the explicit stable task envelope,
+complete owner/project/workstream/role metadata and exact matching creation key
+before POST, then require the authenticated read-only creation capability and
+truthful receipt publication guarantee. Manual browser creation uses its ordinary
+workspace/terminal path. Never infer task/creator evidence or backfill legacy cards.

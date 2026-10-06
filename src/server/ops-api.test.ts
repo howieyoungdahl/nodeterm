@@ -66,6 +66,22 @@ describe('/opsapi', () => {
   afterEach(async () => new Promise<void>((resolve) => server.close(() => resolve())))
 
   const auth = { authorization: 'Bearer ops-secret' }
+  const managed = (over: Record<string, unknown> = {}) => ({ projectId: 'p1', idempotencyKey: 'stable-creation',
+    organization: { owner: 'Declared assistant', projectId: 'p1', workstream: 'fixture', functionalRole: 'ops' },
+    creation: { version: 1, taskId: 'stable-task', creationId: 'stable-creation', declaredOwner: 'Declared assistant' }, ...over })
+
+  it('advertises the authenticated read-only creation receipt contract without invoking creation', async () => {
+    expect((await fetch(`${base}/opsapi/creation-contract`)).status).toBe(401)
+    const response = await fetch(`${base}/opsapi/creation-contract`, { headers: auth })
+    expect(await response.json()).toEqual({ version: 1,
+      receiptPublication: { version: 1, platform: process.platform,
+        guarantee: process.platform === 'win32' ? 'file-flush-visibility' : 'file-and-directory-sync' }, assistantCreation: { version: 1,
+      taskId: 'required', creationKey: 'exact-required', metadata: 'owner-project-workstream-functionalRole-required',
+      privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true,
+      taskPlanning: 'category-urgency-reason-relationship-before-save-and-spawn' } })
+    expect((await fetch(`${base}/opsapi/creation-contract`, { method: 'POST', headers: auth })).status).toBe(405)
+    expect(createCalls).toEqual([])
+  })
 
   it('recognizes only real loopback TCP peers', () => {
     expect(isLoopbackPeer('127.0.0.1')).toBe(true)
@@ -217,18 +233,30 @@ describe('/opsapi', () => {
     expect(createCalls).toHaveLength(0)
   })
 
+  it('refuses incomplete or mismatched management task admission before calling creation', async () => {
+    const bodies = [managed({ creation: undefined }), managed({ organization: undefined }), managed({ idempotencyKey: undefined }),
+      managed({ creation: { version: 1, taskId: 'stable-task', creationId: 'changed-key', declaredOwner: 'Declared assistant' } }),
+      managed({ creation: { version: 1, taskId: 'stable-task', creationId: 'stable-creation', declaredOwner: 'Different assistant' } })]
+    for (const body of bodies) {
+      const response = await fetch(`${base}/opsapi/nodes`, { method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      expect(response.status).toBe(400)
+    }
+    expect(createCalls).toHaveLength(0)
+  })
+
   it('passes a valid create body through and returns 201 with the created shape', async () => {
     const res = await fetch(`${base}/opsapi/nodes`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(managed({
         projectId: 'p1',
         cmd: 'echo hi',
         cwd: '/tmp',
         title: 'My Terminal',
         width: 700,
         height: 500
-      })
+      }))
     })
     expect(res.status).toBe(201)
     expect(await res.json()).toEqual({
@@ -238,7 +266,7 @@ describe('/opsapi', () => {
       tmuxSession: 'nt-term-abc'
     })
     expect(createCalls).toEqual([
-      { projectId: 'p1', cmd: 'echo hi', cwd: '/tmp', title: 'My Terminal', width: 700, height: 500 }
+      managed({ projectId: 'p1', cmd: 'echo hi', cwd: '/tmp', title: 'My Terminal', width: 700, height: 500 })
     ])
   })
 
@@ -247,7 +275,7 @@ describe('/opsapi', () => {
     const res = await fetch(`${base}/opsapi/nodes`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ projectId: 'nope' })
+      body: JSON.stringify(managed({ projectId: 'nope', organization: { owner: 'Declared assistant', projectId: 'nope', workstream: 'fixture', functionalRole: 'ops' } }))
     })
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual({ error: 'unknown_project_id: no project "nope"' })
@@ -264,7 +292,7 @@ describe('/opsapi', () => {
     const res = await fetch(`${base}/opsapi/nodes`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({})
+      body: JSON.stringify(managed())
     })
     expect(res.status).toBe(502)
     expect(await res.json()).toEqual({

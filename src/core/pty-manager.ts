@@ -981,18 +981,21 @@ export class PtyManager {
   /** The child-process seam for shadow clients. Undefined in production, where `ControlModeClient`
    *  uses `child_process` (see tmux-control-client.ts); tests inject a fake spawner. */
   private readonly controlSpawn: ControlSpawn | undefined
+  private readonly cleanupBootId: string | undefined
   private readonly confirmedProcessRun: ConfirmedProcessRun
   /** Injectable only so Windows-only routing stays behavior-testable on every CI host. */
   private readonly runtimePlatform: NodeJS.Platform
 
   constructor(
     deps: {
+      cleanupBootId?: string
       controlSpawn?: ControlSpawn
       confirmedProcessRun?: ConfirmedProcessRun
       runtimePlatform?: NodeJS.Platform
     } = {}
   ) {
     this.controlSpawn = deps.controlSpawn
+    this.cleanupBootId = deps.cleanupBootId
     this.confirmedProcessRun = deps.confirmedProcessRun ?? runAsync
     this.runtimePlatform = deps.runtimePlatform ?? os.platform()
   }
@@ -1922,8 +1925,27 @@ export class PtyManager {
    * id 0 is simply dropped by a platform with no such UI. All spawn policy, node-auth env,
    * account scoping, project env and ownership recording still run through `create` unchanged.
    */
-  createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult> {
-    return this.create(0, options)
+  async createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult> {
+    const result = await this.create(0, options)
+    const live = this.sessions.get(result.sessionId)
+    if (!options.persistKey || !live?.persistKey || live.sshRemote || live.sessionHost || !this.tmuxPath)
+      return result
+    // node-pty returns the tmux CLIENT before its new-session has created the backend.
+    // Headless callers immediately send their one initial command by name; racing that
+    // creation used to save the card then return command_failed. Probe before delivery,
+    // never retry the command itself or create a second backend on uncertainty.
+    const deadline = Date.now() + 5_000
+    for (;;) {
+      if (this.sessions.get(result.sessionId) !== live)
+        throw new Error('The terminal session exited before it became ready.')
+      const present = await this.confirmedTmuxSessionExists(options.persistKey)
+      if (this.sessions.get(result.sessionId) !== live)
+        throw new Error('The terminal session exited before it became ready.')
+      if (present) return result
+      if (Date.now() >= deadline)
+        throw new Error('Could not confirm the headless terminal session before command delivery.')
+      await new Promise<void>((resolve) => setTimeout(resolve, 25))
+    }
   }
 
   private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
@@ -2780,6 +2802,15 @@ export class PtyManager {
     // advertise it — without this, zsh themes and TUIs quietly clamp to the 256 palette and
     // the canvas terminals never match the user's real terminal colors (issue #78).
     const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<string, string>
+    // The app/server may itself run inside an agent pane. Child terminals receive their OWN
+    // discovery below; inheriting the parent's identity/control markers or hook credentials
+    // turns ordinary human terminals into mislabeled agent panes (and misroutes their hooks).
+    for (const key of Object.keys(env)) if (key.startsWith('NODETERM_HOOK_') ||
+      ['NODETERM_NODE_ID', 'NODETERM_AGENT_ID', 'NODETERM_CANVAS_CONTROL', 'NODETERM_PERM_WAIT_SECS',
+        'NODETERM_CODEX_NODE_ID', 'NODETERM_CODEX_NODE_TOKEN'].includes(key)) delete env[key]
+    delete env.CODEX_THREAD_ID
+    delete env.NODETERM_CLEANUP_BOOT
+    if (this.cleanupBootId) env.NODETERM_CLEANUP_BOOT = this.cleanupBootId
     // The Server Edition may receive a first-boot password through its own environment. That
     // bootstrap credential belongs to the server process, never to the interactive shells and
     // agent CLIs it launches; inheriting it here would expose it to every terminal node.
@@ -3145,7 +3176,8 @@ export class PtyManager {
       const langEnvArgs = env.LANG ? ['-e', `LANG=${env.LANG}`] : []
       // And for COLORTERM: panes read the SESSION env, not the client's, so the truecolor
       // handshake must ride `-e` to reach programs on a shared/stale server (issue #78).
-      const colortermEnvArgs = ['-e', 'COLORTERM=truecolor']
+      const colortermEnvArgs = ['-e', 'COLORTERM=truecolor',
+        ...(this.cleanupBootId ? ['-e', `NODETERM_CLEANUP_BOOT=${this.cleanupBootId}`] : [])]
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
       const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
@@ -4494,9 +4526,17 @@ export class PtyManager {
   destroySession(
     clientId: ClientId | null,
     persistKey: string,
-    opts?: { everySocket?: boolean }
+    opts?: { everySocket?: boolean; afterPending?: boolean }
   ): Promise<void> {
-    return this.endSession(clientId, persistKey, 'delete', opts?.everySocket === true)
+    const destroy = (): Promise<void> =>
+      this.endSession(clientId, persistKey, 'delete', opts?.everySocket === true)
+    // A cancelled, non-cancellable create may establish a backend AFTER an earlier destroy's
+    // local kill, while that destroy still awaits another socket. That earlier acknowledgement
+    // cannot cover this late generation. Internal cancellation cleanup requests a pass started
+    // after the pending operation settles, even if its outcome was uncertain. Ordinary deletes
+    // retain their identical-request coalescing; this option is never exposed over IPC.
+    const pending = opts?.afterPending === true ? this.ending.get(persistKey)?.promise : undefined
+    return pending ? pending.then(destroy, destroy) : destroy()
   }
 
   /** Register shell cleanup after end processing (and the session-host acknowledgement). Failures are

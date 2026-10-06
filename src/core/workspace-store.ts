@@ -1,3 +1,7 @@
+import { preserveRawProject, preserveRawIndex } from './cleanup-raw-preservation'
+import { CleanupRetainedWriter } from './cleanup-retained-writer'
+import { readPublicationFile, isPublicationReadError, type PublicationPhase } from './project-commit-store'
+import { publishWorkspaceFile } from './workspace-retained-publication'
 import { promises as fs } from 'fs'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'path'
@@ -91,6 +95,16 @@ interface LoadedEntry {
 }
 
 export async function writeAtomic(filePath: string, content: string): Promise<void> {
+  // Project/index producers MUST use explicit retained publication, even before enrollment.
+  // Checking for enrollment then overwriting could race the first retained observation.
+  if (path.basename(filePath) === 'workspace.json' || path.basename(filePath) === 'project.json')
+    throw new Error('E_RETAINED_PRODUCER_REQUIRED')
+  // Other legacy producers may never replace an enrolled destination.
+  const recovery = path.join(path.dirname(filePath), '.recovery', path.basename(filePath))
+  try {
+    await fs.lstat(recovery)
+    throw new Error(`E_EXPECTED_REVISION_REQUIRED: recovery at ${recovery}`)
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   // Unique temp per write: writers that bypass each other's queue (a second app instance, the SSH
   // poll's index write) must never share a tmp file — interleaved writes into one shared tmp
   // published spliced JSON under the atomic rename. writeFileAtomic also removes its own temp on
@@ -199,6 +213,37 @@ export class WorkspaceStore {
     return path.join(platform().userDataDir, 'workspace.json')
   }
 
+  /** Exact read evidence, separate from the speculative index model. */
+  private indexRaw: string | null | undefined
+  /** Disposable test seam; no HTTP/client path can install this callback. */
+  publicationPhase?: (phase: PublicationPhase, file: string) => Promise<void>
+
+  private async publishIndex(content: string): Promise<void> {
+    const raw = await publishWorkspaceFile(this.indexPath, content, this.indexRaw, this.publicationPhase)
+    this.indexRaw = raw
+    this.index = JSON.parse(raw)
+  }
+
+  private cleanupWriter?: CleanupRetainedWriter
+  private retainedCleanupWriter() {
+    return this.cleanupWriter ??= new CleanupRetainedWriter(this.indexPath,
+      () => this.load({ sideline: false }), work => {
+        const run = this.saveChain.then(work)
+        this.saveChain = run.catch(() => {})
+        return run
+      }, () => this.storageRevision(), (file, raw) => {
+        if (file === this.indexPath) { this.indexRaw = raw; this.index = JSON.parse(raw) }
+        else { this.lastWritten.set(file, raw); this.revs.set(this.index?.entries.find(e => e.cwd && projectFilePath(e.cwd) === file)?.id ?? file, JSON.parse(raw).rev) }
+        this.onPersist?.()
+      }, (phase, file) => this.publicationPhase?.(phase, file) ?? Promise.resolve(), async () => {
+        const before = await this.storageRevision(), workspace = await this.loadInner(false)
+        if (before !== await this.storageRevision()) throw new Error('workspace_conflict: storage changed during cleanup adoption')
+        return { ...workspace, revision: before }
+      })
+  }
+  loadReconciled() { return this.retainedCleanupWriter().enroll() }
+  organizerCoordinator() { return this.retainedCleanupWriter() }
+
   registerIpc(): void {
     platform().handle(IPC.workspaceLoad, () => this.load())
     // handleWithSender, not handle: the save rescue's log line has to name WHICH client published
@@ -252,7 +297,7 @@ export class WorkspaceStore {
   /** Read failures reject. Only ENOENT is definite absence. The digest includes background files. */
   private async storageRevision(expected?: { index: string; files: Map<string, string> }): Promise<string> {
     const read = async (file: string): Promise<string | null> => {
-      try { return await fs.readFile(file, 'utf8') }
+      try { return await readPublicationFile(file) }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
     }
     const raw = await read(this.indexPath)
@@ -279,9 +324,11 @@ export class WorkspaceStore {
     if (sideline) await sweepStaleTmp(this.indexPath)
     let raw: string
     try {
-      raw = await fs.readFile(this.indexPath, 'utf-8')
+      raw = await readPublicationFile(this.indexPath)
+      this.indexRaw = raw
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      this.indexRaw = null
       // No index. Usually a first run — but it is also what a crash BETWEEN the sideline rename
       // below and the next index write leaves behind, and that case owes the user the note. Only
       // this branch pays for the readdir, and only for a load that may touch disk anyway.
@@ -418,7 +465,9 @@ export class WorkspaceStore {
     const active = projects.some((p) => p.id === index.activeProjectId && !p.unavailable)
       ? index.activeProjectId
       : (projects.find((p) => !p.closed && !p.unavailable)?.id ?? '')
-    return { version: 2, activeProjectId: active, projects }
+    // Inline/cache metadata must not alias the retained index. Older clients may mutate
+    // assignments or omit marker fields in their loaded object before submitting a save.
+    return structuredClone({ version: 2, activeProjectId: active, projects })
   }
 
   /**
@@ -482,7 +531,7 @@ export class WorkspaceStore {
     // next boot reads the old index and repairs again (harmlessly, but forever).
     if (!repaired || !sideline) return
     try {
-      await writeAtomic(this.indexPath, JSON.stringify(this.index))
+      await this.publishIndex(JSON.stringify(this.index))
     } catch { /* the next save writes it anyway */ }
   }
 
@@ -811,7 +860,7 @@ export class WorkspaceStore {
       const index = this.index
       if (!index) return
       this.applySettingsToIndex(index)
-      await writeAtomic(this.indexPath, JSON.stringify(index))
+      await this.publishIndex(JSON.stringify(index))
     })
     this.saveChain = run.catch(() => {})
     return run
@@ -828,8 +877,9 @@ export class WorkspaceStore {
     const file = projectFilePath(cwd)
     let raw: string
     try {
-      raw = await fs.readFile(file, 'utf-8')
-    } catch {
+      raw = await readPublicationFile(file)
+    } catch (error) {
+      if (isPublicationReadError(error)) throw error
       return null
     }
     try {
@@ -842,6 +892,10 @@ export class WorkspaceStore {
       // parses but isn't a ProjectFileV1 — sideline it too, so a later save can't overwrite the only copy.
     } catch { /* not JSON — sideline below */ }
     if (sideline) {
+      // Enrolled corruption stays at its exact destination; retained readers must never see it
+      // as virgin absence. The unavailable tab reports invalid content without discarding bytes.
+      try { await fs.lstat(path.join(path.dirname(file), '.recovery', path.basename(file))); return null }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
       try {
         await renameAtomic(file, `${file}.corrupt-${Date.now()}`)
       } catch { /* best effort — never destroy data */ }
@@ -855,8 +909,9 @@ export class WorkspaceStore {
   private async emptyOrAbsentOnDisk(file: string): Promise<boolean> {
     let raw: string
     try {
-      raw = await fs.readFile(file, 'utf-8')
-    } catch {
+      raw = await readPublicationFile(file)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       return true
     }
     try {
@@ -938,6 +993,14 @@ export class WorkspaceStore {
     const run = this.saveChain.then(async () => {
       if (opts?.requireRevision && !workspace.revision) throw new Error('workspace_conflict: loaded revision required')
       if (workspace.revision && workspace.revision !== await this.storageRevision()) throw new Error('workspace_conflict: storage changed; reload before saving')
+      // A snapshot must not enroll this writer in files it never read. Doing so would turn
+      // an observational publication read into authority to blind-overwrite a saved canvas.
+      let beforeContent: Workspace | undefined
+      try { beforeContent = await new WorkspaceStore(this.remoteIO).load({ sideline: false }) }
+      catch { /* No acknowledgment evidence; the existing save failure/guard path still owns errors. */ }
+      const beforeRevision = beforeContent?.revision
+      if (workspace.revision && beforeRevision && workspace.revision !== beforeRevision)
+        throw new Error('workspace_conflict: storage changed during publication snapshot')
       await this.saveNow(workspace, opts?.client ?? 'internal', enqueuedAt)
       const written = new Map<string, string>()
       for (const p of workspace.projects) {
@@ -946,7 +1009,8 @@ export class WorkspaceStore {
         const content = this.lastWritten.get(file)
         if (content !== undefined) written.set(file, content)
       }
-      const revision = await this.storageRevision(this.index ? { index: JSON.stringify(this.index), files: written } : undefined)
+      const expectedPublication = this.index ? { index: this.indexRaw!, files: written } : undefined
+      const revision = await this.storageRevision(expectedPublication)
       const projectRevisions: Record<string, string> = {}
       for (const p of workspace.projects) {
         const e = this.index?.entries.find((entry) => entry.id === p.id)
@@ -955,6 +1019,22 @@ export class WorkspaceStore {
           e?.project ? createHash('sha256').update(JSON.stringify(e.project)).digest('hex') : undefined
         if (rev) { p.revision = rev; projectRevisions[p.id] = rev }
       }
+      const afterContent = await this.loadInner(false)
+      if (revision !== await this.storageRevision(expectedPublication))
+        throw new Error('workspace_conflict: storage changed during content adoption')
+      const clean = (p: Project): Project => {
+        const { revision: _revision, loadedKanban: _baseline, organizationChange: _organization,
+          workspaceChange: _publication, ...content } = p
+        return content
+      }
+      const changes = afterContent.projects.flatMap(p => {
+        const old = beforeContent?.projects.find(b => b.id === p.id)
+        return old && JSON.stringify(clean(old)) !== JSON.stringify(clean(p)) ? [{ before: clean(old), after: { ...clean(p), revision: p.revision } }] : []
+      })
+      // A project-set mutation cannot be acknowledged by a project-only consumer.
+      if (beforeRevision && beforeContent && beforeContent.projects.length === afterContent.projects.length &&
+        beforeContent.projects.every(p => afterContent.projects.some(a => a.id === p.id)))
+        for (const p of workspace.projects) p.workspaceChange = { before: beforeRevision, after: revision, changes }
       return { revision, projectRevisions }
     })
     this.saveChain = run.catch(() => {})
@@ -966,6 +1046,16 @@ export class WorkspaceStore {
     client = 'internal',
     enqueuedAt = Date.now()
   ): Promise<void> {
+    if (this.indexRaw === undefined) {
+      try {
+        const raw = await readPublicationFile(this.indexPath)
+        // A legacy initial save can open an existing index, but never invent project evidence.
+        this.indexRaw = raw
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        this.indexRaw = null
+      }
+    }
     const startedAt = Date.now()
     const queuedMs = startedAt - enqueuedAt
     if (!workspace.projects.length && !this.index) {
@@ -974,13 +1064,16 @@ export class WorkspaceStore {
       // projects, and its unconditional boot save would atomically erase every ref. A fresh
       // install has no readable index and falls through.
       try {
-        const disk = JSON.parse(await fs.readFile(this.indexPath, 'utf-8')) as
+        const disk = JSON.parse(await readPublicationFile(this.indexPath)) as
           { entries?: unknown[]; projects?: unknown[] }
         if ((disk.entries?.length ?? 0) > 0 || (disk.projects?.length ?? 0) > 0) return
       } catch { /* absent or unparsable (loadInner sidelines corruption) — an empty write is fresh */ }
     }
     const savedAt = new Date().toISOString()
-    const { index, files } = splitWorkspace(workspace, (id) => this.revs.get(id) ?? 0, savedAt)
+    const split = splitWorkspace(workspace, (id) => this.revs.get(id) ?? 0, savedAt)
+    const protectedEntries = new Set(this.index?.entries.filter(e => e.cwd && !e.ssh &&
+      (JSON.parse(this.lastWritten.get(projectFilePath(e.cwd)) ?? '{"nodes":[]}') as ProjectFileV1).nodes.some(n => n.cleanupArchiveId)).map(e => e.id))
+    const index = preserveRawIndex(this.index, split.index, protectedEntries), files = split.files
 
     for (const entry of index.entries) {
       const previous = this.index?.entries.find((candidate) => candidate.id === entry.id)
@@ -1041,12 +1134,13 @@ export class WorkspaceStore {
       const file = projectFilePath(cwd)
       const prev = this.lastWritten.get(file)
       const prevParsed = prev ? (JSON.parse(prev) as ProjectFileV1) : null
-      if (prevParsed && sameProjectContent(prevParsed, candidate)) continue
+      const retainedCandidate = preserveRawProject(prevParsed, candidate)
+      if (prevParsed && sameProjectContent(prevParsed, retainedCandidate)) continue
       // LOCAL projects only (`files` never holds an ssh project — splitWorkspace puts those in
       // `cache`, which has its own rescue below).
       const kept = prevParsed
-        ? await this.rescueOmittedLocalNodes(prevParsed, candidate, client, probedBackends)
-        : candidate
+        ? await this.rescueOmittedLocalNodes(prevParsed, retainedCandidate, client, probedBackends)
+        : retainedCandidate
       // The omission was the ONLY difference: nothing to write, and no rev to bump.
       if (prevParsed && sameProjectContent(prevParsed, kept)) continue
       if (!prevParsed && kept.nodes.length === 0 && !(await this.emptyOrAbsentOnDisk(file))) {
@@ -1060,9 +1154,17 @@ export class WorkspaceStore {
       const content = serializeProjectFile(next)
       try {
         await fs.mkdir(path.dirname(file), { recursive: true })
-        await writeAtomic(file, content)
-        this.lastWritten.set(file, content)
-        this.revs.set(projectId, next.rev)
+        let expected: string | null | undefined = prev
+        if (expected === undefined) {
+          try { await readPublicationFile(file) } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') expected = null
+            else throw error
+          }
+        }
+        const committed = await publishWorkspaceFile(file, content, expected, this.publicationPhase,
+          new Set(workspace.projects.flatMap(p => p.nodes.map(n => n.id))), path.dirname(this.indexPath))
+        this.lastWritten.set(file, committed)
+        this.revs.set(projectId, JSON.parse(committed).rev)
         logNodeSetChange(client, projectId, next, prevParsed, {
           queuedMs,
           wroteMs: Date.now() - startedAt
@@ -1120,8 +1222,7 @@ export class WorkspaceStore {
     }
 
     // Compact index, atomic — same reasoning as the old single-file store.
-    await writeAtomic(this.indexPath, JSON.stringify(index))
-    this.index = index
+    await this.publishIndex(JSON.stringify(index))
 
     if (migrating) platform().broadcast(IPC.workspaceMigrated, 'v2')
     if (this.pendingExecNote) {
@@ -1149,9 +1250,10 @@ export class WorkspaceStore {
     // anywhere), so its nodes come up with no custom shell and no extra ssh args — the safe
     // defaults. Only values this machine typed itself are ever restored (@shared/node-exec).
     if (!read) return null
+    this.lastWritten.set(projectFilePath(folder), read.raw)
     const project = fileToProject(read.file, { id: freshProjectId(), cwd: folder })
     // A cloned/imported file supplies content, never another project's management receipts.
-    project.nodes = project.nodes.map(({ organization: _origin, ...node }) => node)
+    project.nodes = project.nodes.map(({ organization: _origin, assistantCreation: _task, taskPlanning: _planning, ...node }) => node)
     delete project.kanbanOrganization
     return project
   }
@@ -1168,7 +1270,7 @@ export class WorkspaceStore {
    */
   async projectFileState(cwd: string): Promise<'present' | 'absent' | 'unreadable'> {
     try {
-      await fs.stat(projectFilePath(cwd))
+      await readPublicationFile(projectFilePath(cwd))
       return 'present'
     } catch (err) {
       return (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unreadable'
@@ -1227,7 +1329,7 @@ export class WorkspaceStore {
     // Persist the index only when the reconcile moved something — a quiet poll must not churn
     // workspace.json every tick.
     if (adopted || e.cache?.rev !== revBefore) {
-      await writeAtomic(this.indexPath, JSON.stringify(this.index))
+      await this.publishIndex(JSON.stringify(this.index))
     }
     return adopted
   }
@@ -1492,22 +1594,23 @@ export class WorkspaceStore {
     const file = projectFilePath(e.cwd)
     let raw: string
     try {
-      raw = await fs.readFile(file, 'utf-8')
+      raw = await readPublicationFile(file)
     } catch {
       return false
     }
     const updated = appendProjectNode(raw, input, now)
     if (updated === null) return false
     try {
-      await writeAtomic(file, updated)
+      const committed = await publishWorkspaceFile(file, updated, raw, this.publicationPhase, undefined, path.dirname(this.indexPath))
+      this.lastWritten.set(file, committed)
     } catch {
       return false
     }
-    this.lastWritten.set(file, updated)
+    const committed = this.lastWritten.get(file)!
     // appendProjectNode only returns a string it produced from a valid ProjectFileV1, so this parse
     // cannot realistically fail — but a throw here would turn a landed write into a `false`.
     try {
-      const parsed = JSON.parse(updated) as ProjectFileV1
+      const parsed = JSON.parse(committed) as ProjectFileV1
       this.revs.set(e.id, parsed.rev)
       platform().broadcast(
         IPC.workspaceExternalChange,
@@ -1550,20 +1653,20 @@ export class WorkspaceStore {
       const file = projectFilePath(e.cwd)
       let raw: string
       try {
-        raw = await fs.readFile(file, 'utf-8')
+        raw = await readPublicationFile(file)
       } catch {
         continue
       }
       const updated = removeProjectNode(raw, nodeId, now)
       if (updated === null) continue // not in this project (or unreadable file) — keep looking
       try {
-        await writeAtomic(file, updated)
+        const committed = await publishWorkspaceFile(file, updated, raw, this.publicationPhase, undefined, path.dirname(this.indexPath))
+        this.lastWritten.set(file, committed)
       } catch {
         return false
       }
-      this.lastWritten.set(file, updated)
       try {
-        const parsed = JSON.parse(updated) as ProjectFileV1
+        const parsed = JSON.parse(this.lastWritten.get(file)!) as ProjectFileV1
         this.revs.set(e.id, parsed.rev)
         platform().broadcast(
           IPC.workspaceExternalChange,

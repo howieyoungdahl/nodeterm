@@ -1,4 +1,5 @@
 import type { Node } from '@xyflow/react'
+import { defaultTaskPlanning } from '@shared/task-planning'
 import type {
   CanvasMutation,
   CanvasNodeState,
@@ -75,6 +76,10 @@ export const COLLAPSED_HEIGHT = 40
 
 /** User data carried in the React Flow node's data field. */
 export interface NodeData {
+  /** Presentation only. Never changes backend or session identity. */
+  cleanupArchiveId?: string
+  assistantCreation?: CanvasNodeState['assistantCreation']
+  taskPlanning?: CanvasNodeState['taskPlanning']
   organization?: import('@shared/kanban-organization').NodeOrganization
   title: string
   /**
@@ -374,8 +379,9 @@ export function createTerminalNode(
   ssh?: Project['ssh']
 ): CanvasNode {
   const size = terminalNodeSize()
+  const id = nextId('term')
   return {
-    id: nextId('term'),
+    id,
     type: 'terminal',
     position: placeAt(center, index, size.width, size.height),
     width: size.width,
@@ -383,6 +389,7 @@ export function createTerminalNode(
     style: { width: size.width, height: size.height },
     data: {
       title: `Terminal ${index + 1}`,
+      taskPlanning: defaultTaskPlanning(id),
       color: NODE_COLORS[index % NODE_COLORS.length],
       group: null,
       tags: [],
@@ -403,8 +410,9 @@ export function createSshTerminalNode(
   center?: { x: number; y: number }
 ): CanvasNode {
   const size = terminalNodeSize()
+  const id = nextId('ssh')
   return {
-    id: nextId('ssh'),
+    id,
     type: 'terminal',
     position: placeAt(center, index, size.width, size.height),
     width: size.width,
@@ -412,6 +420,7 @@ export function createSshTerminalNode(
     style: { width: size.width, height: size.height },
     data: {
       title: server.label,
+      taskPlanning: defaultTaskPlanning(id),
       color: NODE_COLORS[index % NODE_COLORS.length],
       group: null,
       tags: [],
@@ -762,8 +771,9 @@ export function createAgentNode(
     )
   }
   const size = controlGeometry?.size ?? terminalNodeSize()
+  const id = nextId('term')
   return {
-    id: nextId('term'),
+    id,
     type: 'terminal',
     position: placeAt(center, index, size.width, size.height),
     width: size.width,
@@ -771,6 +781,7 @@ export function createAgentNode(
     style: { width: size.width, height: size.height },
     data: {
       title: label,
+      taskPlanning: defaultTaskPlanning(id),
       // Adopt the agent's own session name into the title until the user renames it by hand.
       titleAuto: true,
       color,
@@ -1635,14 +1646,16 @@ export function groupSelectedNodes(
 export function duplicateNode(node: CanvasNode, offset = 28): CanvasNode {
   const kind: NodeKind = node.type === 'sticky' ? 'sticky' : node.type === 'group' ? 'group' : 'terminal'
   const prefix = kind === 'terminal' ? 'term' : kind
+  const id = nextId(prefix)
   return {
     ...node,
-    id: nextId(prefix),
+    id,
     position: { x: node.position.x + offset, y: node.position.y + offset },
     selected: true,
     parentId: undefined,
     extent: undefined,
-    data: { ...node.data, initialCommand: undefined, organization: undefined }
+    data: { ...node.data, initialCommand: undefined, organization: undefined, assistantCreation: undefined,
+      taskPlanning: kind === 'terminal' ? defaultTaskPlanning(id) : undefined }
   }
 }
 
@@ -1897,6 +1910,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       id: n.id,
       // Default to 'terminal' for nodes saved before the kind field existed.
       type: n.kind ?? 'terminal',
+      hidden: !!n.cleanupArchiveId,
       ...((n.kind ?? 'terminal') === 'group' ? { dragHandle: '.group-node__label' } : {}),
       position: n.position,
       width: n.size.width,
@@ -1905,6 +1919,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
       ...(n.parentId ? { parentId: n.parentId, extent: 'parent' as const } : {}),
       data: {
         title: n.title,
+        cleanupArchiveId: n.cleanupArchiveId,
         // Default true for older agent nodes saved before titleAuto existed, so they start
         // tracking the session name; non-agent nodes ignore it.
         titleAuto: n.titleAuto ?? true,
@@ -1917,6 +1932,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         role: n.role,
         taskSummary: n.taskSummary,
         organization: n.organization,
+        assistantCreation: n.assistantCreation,
+        taskPlanning: n.taskPlanning,
         taskFrame: n.taskFrame,
         pinned: n.pinned,
         manualPlacement: n.manualPlacement,
@@ -1990,6 +2007,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
             : n.measured?.height ?? n.height ?? sizeFor(kind).height
         },
         title: n.data.title,
+        cleanupArchiveId: n.data.cleanupArchiveId,
         titleAuto: n.data.titleAuto,
         color: n.data.color,
         group: n.data.group,
@@ -2002,6 +2020,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         role: n.data.role,
         taskSummary: n.data.taskSummary,
         organization: n.data.organization,
+        assistantCreation: n.data.assistantCreation,
+        taskPlanning: n.data.taskPlanning,
         taskFrame: n.data.taskFrame,
         pinned: n.data.pinned,
         manualPlacement: n.data.manualPlacement,

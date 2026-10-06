@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import * as atomic from '../../src/core/fs-atomic'
+import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { initPlatform, resetPlatformForTests } from '../../src/core/platform'
 import { fakePlatform } from '../../src/core/platform-fake'
@@ -15,6 +15,7 @@ import { ServerNodeOps } from '../../src/server/node-ops'
 import { createOpsApiHandler } from '../../src/server/ops-api'
 import { createPersistentHeadlessNodeOwnership } from '../../src/server/node-ownership-store'
 import { OrganizationJournal, ORGANIZATION_AUDIT_LIMIT } from '../../src/server/organization-journal'
+import { AssistantCreationReceipts } from '../../src/server/assistant-creation-receipts'
 import { WorkspaceMutationQueue } from '../../src/server/workspace-mutation-queue'
 import { IPC } from '../../src/shared/ipc'
 import type { CanvasNodeState, Project, Workspace, WorkspaceSaveAck } from '../../src/shared/types'
@@ -25,6 +26,7 @@ import { useProjects } from '../../src/renderer/state/projects'
 import { resolveWorkspaceConflict, saveWorkspace } from '../../src/renderer/lib/workspacePersistence'
 import { mergeOrganizationProject } from '../../src/renderer/lib/workspacePersistence'
 import { toKanbanSession } from '../../src/renderer/canvas/toKanbanSession'
+import { defaultTaskPlanning } from '../../src/shared/task-planning'
 
 const metadata = (functionalRole = 'ops') => ({ owner: 'Test assistant', projectId: 'p1', workstream: 'ics', functionalRole })
 const human: CanvasNodeState = { id: 'human', kind: 'terminal', title: 'Manual card', role: 'primary',
@@ -40,6 +42,10 @@ let published: Project[]
 let pendingRequests: Set<Promise<void>>
 const token = 'disposable-test-token-000000000000'
 const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+// These cases perform several serial durable publications, not a latency benchmark.
+// Keep their semantic checks on Windows while allowing bounded scanner/retry overhead.
+const serialIoTimeout = process.platform === 'win32' ? 15_000 : 5_000
+const auditIoTimeout = process.platform === 'win32' ? 30_000 : 5_000
 
 function service() {
   store = new WorkspaceStore()
@@ -51,6 +57,7 @@ function service() {
   ops = new ServerNodeOps({ workspaceStore: store, mutationQueue: queue,
     ownerOf: (id) => ownership.ownerOf(id), recordOwnership: (id, owner) => ownership.record(id, owner),
     flushOwnership: () => ownership.flush(), organizationJournal: journal,
+    creationReceipts: new AssistantCreationReceipts(path.join(data, 'assistant-creation-receipts')),
     appendBoardLog: (_id, entry) => log.appendOnce(cwd, entry),
     publishProject: (project) => published.push(structuredClone(project)),
     createSession, sendText, destroySession: destroy, sessionPresence: async () => 'unknown', statusOf: () => undefined })
@@ -61,9 +68,12 @@ const request = async (route: string, body?: unknown, method = body === undefine
   const response = await fetch(base + route, { method, headers: auth, body: body === undefined ? undefined : JSON.stringify(body) })
   return { status: response.status, body: await response.json() as any }
 }
-const create = async (over: Record<string, unknown> = {}) => request('/opsapi/nodes', {
-  projectId: 'p1', organization: metadata(), idempotencyKey: 'create-test-0001', ...over
-})
+const createInput = (over: Record<string, unknown> = {}) => {
+  const input = { projectId: 'p1', organization: metadata(), idempotencyKey: 'create-test-0001', ...over }
+  return { creation: { version: 1 as const, taskId: 'organization-fixture-task', creationId: input.idempotencyKey,
+    declaredOwner: input.organization.owner }, ...input }
+}
+const create = async (over: Record<string, unknown> = {}) => request('/opsapi/nodes', createInput(over))
 const patch = async (id: string, role = 'security', over: Record<string, unknown> = {}) => {
   const project = (await store.load()).projects[0]
   return request(`/opsapi/nodes/${id}`, { organization: metadata(role), expectedRevision: project.revision, ...over }, 'PATCH')
@@ -109,9 +119,99 @@ afterEach(async () => {
   await Promise.allSettled([...pendingRequests])
   await ownership.flush()
   resetPlatformForTests(); await fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
-})
+}, process.platform === 'win32' ? 30_000 : 10_000)
 
 describe('native organization through HTTP, store and renderer', () => {
+  it('replays an unchanged historical creation without adding defaults to its immutable fingerprint', async () => {
+    const input = createInput()
+    const { idempotencyKey: _key, ...historicalDeclaration } = input
+    const fingerprint = createHash('sha256').update(JSON.stringify(historicalDeclaration, (_key, value) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)).digest('hex')
+    const receipts = new AssistantCreationReceipts(path.join(data, 'assistant-creation-receipts'))
+    await receipts.record({ principal: 'ops-bearer', sourceNodeId: 'ops-operator', projectId: 'p1' },
+      input.creation, [{ nodeId: 'historical-node-001', organization: input.organization }], fingerprint, 'historical-receipt-001')
+    const state = await journal.read()
+    state.creations[input.idempotencyKey] = { id: 'historical-receipt-001', nodeId: 'historical-node-001',
+      projectId: 'p1', fingerprint, assistant: true, stage: 'finished', outcome: 'success' }
+    await journal.write(state)
+    const before = await store.load({ sideline: false })
+    const result = await request('/opsapi/nodes', input)
+    expect(result.status).toBe(201)
+    expect(result.body).toMatchObject({ id: 'historical-node-001', replayed: true })
+    expect(await store.load({ sideline: false })).toEqual(before)
+    expect(createSession).not.toHaveBeenCalled(); expect(sendText).not.toHaveBeenCalled()
+  })
+  it('binds planning updates to immutable private task identity when public declarations are altered', async () => {
+    const created = await create(), id = created.body.id
+    const workspace = await store.load({ sideline: false }), node = workspace.projects[0].nodes.find(n => n.id === id)!
+    node.assistantCreation = { ...node.assistantCreation!, taskId: 'altered-public-task', planning: undefined }
+    node.taskPlanning = { ...node.taskPlanning!, taskId: 'altered-public-task' }
+    await rpcSave(workspace)
+    const before = (await store.load({ sideline: false })).projects[0]
+    const result = await request(`/opsapi/nodes/${id}?force=1`, { taskPlanning: node.taskPlanning,
+      expectedRevision: before.revision }, 'PATCH')
+    expect(result.status).toBe(403)
+    expect(result.body.error).toBe('task_planning_immutable_task_identity_required')
+    expect((await store.load({ sideline: false })).projects[0]).toEqual(before)
+    expect(createSession).toHaveBeenCalledTimes(1); expect(destroy).not.toHaveBeenCalled()
+  })
+  it('records category, evidence-based urgency and explicit parent intent before launch, with stable retry identity', async () => {
+    const input = createInput()
+    const planning = defaultTaskPlanning(input.creation.taskId, 'ops')
+    planning.relationship = 'support'; planning.parentTaskId = 'parent-task-1234'
+    planning.urgency.signals = [{ kind: 'dependency-unblock', evidence: 'Unblocks the approved integration test task' }]
+    input.creation = { ...input.creation, planning } as typeof input.creation
+    createSession.mockImplementationOnce(async ({ persistKey }: { persistKey: string }) => {
+      const saved = (await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === persistKey)!
+      expect(saved.taskPlanning).toMatchObject({ taskId: input.creation.taskId, category: 'operations',
+        relationship: 'support', parentTaskId: 'parent-task-1234',
+        urgency: { level: 'high', reason: 'Unblocks the approved integration test task' } })
+      expect(sendText).not.toHaveBeenCalled()
+      return { sessionId: 'private-fixture', fresh: true }
+    })
+    const first = await request('/opsapi/nodes', input)
+    expect(first.status).toBe(201)
+    expect(first.body.id).toEqual(expect.any(String))
+    const repeat = await request('/opsapi/nodes', input)
+    expect(repeat.body.id).toBe(first.body.id)
+    expect(createSession).toHaveBeenCalledTimes(1)
+  })
+  it('rejects malformed creation planning before any save or launch', async () => {
+    const input = createInput()
+    const response = await request('/opsapi/nodes', { ...input, creation: { ...input.creation,
+      planning: { ...defaultTaskPlanning(input.creation.taskId, 'ops'), categoryReason: '' } } })
+    expect(response.status).toBe(400)
+    expect(createSession).not.toHaveBeenCalled()
+    expect((await store.load({ sideline: false })).projects[0].nodes).toEqual([human])
+  })
+  it('reconciles attested task metadata with revision checks while preserving manual board intent and priority', async () => {
+    const created = await create(), id = created.body.id
+    expect(created.status).toBe(201)
+    const workspace = await store.load({ sideline: false }), project = workspace.projects[0]
+    const node = project.nodes.find(n => n.id === id)!
+    node.pinned = true; node.manualPlacement = true
+    project.kanban = assignNode(project.kanban!, id, null, null)
+    project.kanban.meta = [{ nodeId: id, priority: 'low' }]
+    await rpcSave(workspace)
+    const fresh = (await store.load({ sideline: false })).projects[0]
+    const beforeBoard = structuredClone(fresh.kanban)
+    const planning = { ...fresh.nodes.find(n => n.id === id)!.taskPlanning!, category: 'security' as const,
+      categoryReason: 'Explicit verified privacy incident work item' }
+    planning.urgency.signals = [{ kind: 'live-privacy-security', evidence: 'Verified live privacy incident' }]
+    const stale = await request(`/opsapi/nodes/${id}`, { taskPlanning: planning, expectedRevision: '0'.repeat(64) }, 'PATCH')
+    expect(stale.status).toBe(409)
+    const result = await request(`/opsapi/nodes/${id}`, { taskPlanning: planning, expectedRevision: fresh.revision }, 'PATCH')
+    expect(result.status).toBe(200)
+    const after = (await store.load({ sideline: false })).projects[0]
+    expect(after.kanban).toEqual(beforeBoard)
+    expect(after.nodes.find(n => n.id === id)).toMatchObject({ pinned: true, manualPlacement: true,
+      taskPlanning: { category: 'security', urgency: { level: 'urgent' } } })
+    expect(createSession).toHaveBeenCalledTimes(1)
+    const denied = await request('/opsapi/nodes/human?force=1', { taskPlanning: defaultTaskPlanning('human-task-1234'), expectedRevision: after.revision }, 'PATCH')
+    expect(denied.status).toBe(403)
+    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === 'human')).toEqual(human)
+  })
   it('preserves exact placement and untouched receipts for same-column metadata updates', async () => {
     const a = await create(), b = await create({ idempotencyKey: 'same-column-card-b' })
     const before = (await store.load()).projects[0]
@@ -142,7 +242,7 @@ describe('native organization through HTTP, store and renderer', () => {
     expect(createSession).toHaveBeenCalledTimes(2); expect(destroy).not.toHaveBeenCalled()
     service() // Expected positions survive restart as well as receipt history.
     expect((await patch(b.body.id, 'ops')).status).toBe(200)
-  })
+  }, serialIoTimeout)
 
   it.each(['manual', 'unmarked', 'duplicate'])('blocks a %s reorder after automatic sibling shifts', async (kind) => {
     const a = await create(), b = await create({ idempotencyKey: 'reorder-card-b' })
@@ -183,14 +283,12 @@ describe('native organization through HTTP, store and renderer', () => {
   })
 
   it('rechecks durable ownership before launching an already persisted partial creation', async () => {
-    const write = atomic.writeFileAtomic
-    const failure = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async (file, ...args) => {
-      if (file === path.join(data, 'workspace.json')) throw new Error('fixture_index_full')
-      return write(file, ...args)
-    })
+    store.publicationPhase = async (phase, file) => {
+      if (file === path.join(data, 'workspace.json') && phase === 'before-displace') throw new Error('fixture_index_full')
+    }
     const partial = await create()
     expect(partial.status).toBe(503); expect(createSession).not.toHaveBeenCalled()
-    failure.mockRestore()
+    store.publicationPhase = undefined
     expect((await store.load()).projects[0].nodes.some((n) => n.id === partial.body.id)).toBe(true)
     vi.spyOn(ownership, 'flush').mockRejectedValueOnce(new Error('fixture_retry_ledger_full'))
     const failed = await create()
@@ -310,15 +408,13 @@ describe('native organization through HTTP, store and renderer', () => {
   })
 
   it('recovers a project write followed by an index failure without another card', async () => {
-    const original = atomic.writeFileAtomic
-    const write = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async (file, content, options) => {
-      if (file === path.join(data, 'workspace.json')) throw new Error('fixture_index_disk_full')
-      return original(file, content, options)
-    })
+    store.publicationPhase = async (phase, file) => {
+      if (file === path.join(data, 'workspace.json') && phase === 'before-displace') throw new Error('fixture_index_disk_full')
+    }
     const failed = await create()
     expect(failed.status).toBe(503); expect(createSession).not.toHaveBeenCalled()
     expect(JSON.parse(await fs.readFile(path.join(cwd, '.nodeterm/project.json'), 'utf8')).nodes).toHaveLength(2)
-    write.mockRestore()
+    store.publicationPhase = undefined
     service()
     const recovered = await create()
     expect(recovered.body.id).toBe(failed.body.id); expect(recovered.status).toBe(201)
@@ -350,7 +446,7 @@ describe('native organization through HTTP, store and renderer', () => {
   it('releases the workspace queue while a launch hangs, and never sends a command after timeout', async () => {
     let finish!: (v: { sessionId: string; fresh: boolean }) => void
     createSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
-    const task = ops.create({ projectId: 'p1', organization: metadata(), idempotencyKey: 'create-timeout-0001', cmd: 'once' })
+    const task = ops.create(createInput({ idempotencyKey: 'create-timeout-0001', cmd: 'once' }))
     await vi.waitFor(() => expect(createSession).toHaveBeenCalledTimes(1))
     const workspace = await store.load(); workspace.projects[1].name = 'queue stays available'
     await rpcSave(workspace)
@@ -360,7 +456,7 @@ describe('native organization through HTTP, store and renderer', () => {
     await Promise.resolve(); await Promise.resolve()
     expect(sendText).not.toHaveBeenCalled()
     service()
-    expect(await ops.create({ projectId: 'p1', organization: metadata(), idempotencyKey: 'create-timeout-0001', cmd: 'once' }))
+    expect(await ops.create(createInput({ idempotencyKey: 'create-timeout-0001', cmd: 'once' })))
       .toMatchObject({ ok: false, status: 502, replayed: true })
     expect(createSession).toHaveBeenCalledTimes(1)
   }, 35_000)
@@ -556,18 +652,31 @@ describe('native organization through HTTP, store and renderer', () => {
 
   it('does not acknowledge an external edit that races a successful file publication', async () => {
     const snapshot = await store.load(); snapshot.projects[0].name = 'browser edit'
-    const original = atomic.writeFileAtomic
-    const spy = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async (file, content, options) => {
-      await original(file, content, options)
-      if (file === path.join(data, 'workspace.json')) {
+    store.publicationPhase = async (phase, file) => {
+      if (file === path.join(data, 'workspace.json') && phase === 'published') {
         const projectFile = path.join(cwd, '.nodeterm/project.json')
         const changed = JSON.parse(await fs.readFile(projectFile, 'utf8')); changed.name = 'external after publication'
         await fs.writeFile(projectFile, JSON.stringify(changed))
       }
+    }
+    await expect(rpcSave(snapshot)).rejects.toThrow('workspace_conflict: project changed during save')
+    store.publicationPhase = undefined
+    expect((await store.load()).projects[0].name).toBe('external after publication')
+  })
+
+  it('refuses revision acknowledgment when external content changes during final content adoption', async () => {
+    const snapshot = await store.load(); snapshot.projects[0].name = 'browser edit'
+    const inner = (store as any).loadInner.bind(store)
+    vi.spyOn(store as any, 'loadInner').mockImplementationOnce(async (...args: unknown[]) => {
+      const adopted = await inner(...args)
+      const projectFile = path.join(cwd, '.nodeterm/project.json')
+      const external = JSON.parse(await fs.readFile(projectFile, 'utf8'))
+      external.name = 'external during final adoption'
+      await fs.writeFile(projectFile, JSON.stringify(external))
+      return adopted
     })
     await expect(rpcSave(snapshot)).rejects.toThrow('workspace_conflict: project changed during save')
-    spy.mockRestore()
-    expect((await store.load()).projects[0].name).toBe('external after publication')
+    expect((await store.load()).projects[0].name).toBe('external during final adoption')
   })
 
   it('preserves geometry, group, CLI and session identity in CAS metadata updates', async () => {
@@ -666,7 +775,7 @@ describe('native organization through HTTP, store and renderer', () => {
     expect(createSession).toHaveBeenCalledTimes(1); expect(destroy).not.toHaveBeenCalled()
     const boards = await request('/opsapi/boards')
     expect(boards.body.boards[0].columns.map((c: any) => c.id)).toEqual(['col-a', 'col-b'])
-  })
+  }, serialIoTimeout)
 
   it('undo restores only the affected assignment, preserves unrelated edits and becomes manual', async () => {
     const created = await create(), update = await patch(created.body.id)
@@ -683,7 +792,7 @@ describe('native organization through HTTP, store and renderer', () => {
     expect((await patch(created.body.id)).status).toBe(409)
     expect((await request(`/opsapi/nodes/${created.body.id}/organization-undo`, { receiptId: update.body.receiptId, expectedRevision: saved.revision })).status).toBe(409)
     expect(createSession).toHaveBeenCalledTimes(1); expect(destroy).not.toHaveBeenCalled()
-  })
+  }, serialIoTimeout)
 
   it('rejects stale undo and undone placements changed by a user', async () => {
     const created = await create(), before = (await store.load()).projects[0]
@@ -706,7 +815,7 @@ describe('native organization through HTTP, store and renderer', () => {
     const entries = await new BoardLogStore({}).read(cwd, { all: true })
     expect(new Set(entries.map((e) => e.id)).size).toBe(entries.length)
     expect(entries).toHaveLength(ORGANIZATION_AUDIT_LIMIT + 4)
-  })
+  }, auditIoTimeout)
 
   it('reports events as still pending when durable board-log publication refuses', async () => {
     const created = await create()
@@ -751,7 +860,7 @@ describe('native organization through HTTP, store and renderer', () => {
   it('runs the repository client against the disposable HTTP API without automatic retries', async () => {
     const credential = path.join(root, 'credential'), body = path.join(root, 'request.json')
     await fs.writeFile(credential, token, { mode: 0o600 })
-    await fs.writeFile(body, JSON.stringify({ projectId: 'p1', organization: metadata(), idempotencyKey: 'helper-create-0001' }))
+    await fs.writeFile(body, JSON.stringify(createInput({ idempotencyKey: 'helper-create-0001' })))
     const run = (command: string) => promisify(execFile)(process.execPath, [path.resolve('scripts/nodeterm-organization.mjs'), command,
       '--url', base, '--credential-file', credential, ...(command === 'create' ? ['--body-file', body] : [])], { timeout: 10_000 })
     const created = JSON.parse((await run('create')).stdout)

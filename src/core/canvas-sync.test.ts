@@ -214,3 +214,8 @@ describe('initCanvasSync (reflector)', () => {
     expect(t.registrations).toEqual([IPC.canvasMut])
   })
 })
+
+it('browser mutations cannot forge an already persisted workspace revision',()=> {
+  const m: CanvasMutation={op:'upsert',node:node('foreign'),workspaceRevision:'a'.repeat(64)}
+  expect(stampMutation(m,1).workspaceRevision).toBeUndefined()
+})

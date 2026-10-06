@@ -10,6 +10,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { AssistantCreationReceipts } from './assistant-creation-receipts'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -100,6 +101,7 @@ describe('Server Edition read-only canvas control', () => {
     await store.save(workspace)
     factory = new HeadlessNodeFactory({
       workspaceStore: store,
+      creationReceipts: new AssistantCreationReceipts(path.join(dataDir, 'creation-receipts')),
       ptyManager: pty,
       settings,
       cliCaps: async () => ({
@@ -369,7 +371,9 @@ describe('Server Edition read-only canvas control', () => {
       return new Promise<PtyCreateResult>((resolve) => (release = resolve))
     })
 
-    const spawn = factory.openTerminal('term-caller', { cwd: projectDir }, true)
+    const spawn = factory.openTerminal('term-caller', { cwd: projectDir, 'task-id': 'explicit-liveness-task',
+      'creation-id': 'explicit-liveness-creation', owner: 'Fixture assistant', workstream: 'test',
+      'functional-role': 'review', 'organization-project': 'project-1' }, true)
     await hasEntered
 
     const stuck = Symbol('read queued behind the hung spawn')

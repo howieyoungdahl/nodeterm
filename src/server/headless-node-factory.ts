@@ -1,3 +1,8 @@
+import { createHash } from 'node:crypto'
+import { creationAdmission, creationFlags, creationFromArgs } from '../shared/assistant-creation'
+import { planningAtCreation } from '../shared/task-planning'
+import type { AssistantCreationReceipts } from './assistant-creation-receipts'
+import { planOrganization, placeNode } from '../core/kanban-organization'
 import { randomBytes, randomUUID } from 'node:crypto'
 import path from 'node:path'
 
@@ -91,7 +96,7 @@ export interface HeadlessPty {
   destroySession(
     clientId: number | null,
     persistKey: string,
-    opts?: { everySocket?: boolean }
+    opts?: { everySocket?: boolean; afterPending?: boolean }
   ): Promise<void>
 }
 
@@ -127,6 +132,7 @@ export interface HeadlessNodeFactoryDeps {
   mutationQueue?: WorkspaceMutationQueue
   /** Injectable so tests can seed creator facts and so the Server shell can supply the DURABLE
    *  ledger (`createPersistentHeadlessNodeOwnership`); the default is the in-memory one. */
+  creationReceipts?: AssistantCreationReceipts
   ownership?: HeadlessNodeOwnership
 }
 
@@ -723,6 +729,8 @@ function ptyOptions(project: Project, node: CanvasNodeState): PtyCreateOptions {
   }
 }
 
+class CreationReceiptRefusal extends Error {}
+
 /**
  * Server-side canvas authoring and launch scheduler.
  *
@@ -775,6 +783,53 @@ export class HeadlessNodeFactory {
     this.ownership = deps.ownership ?? createHeadlessNodeOwnership()
     this.spawnHandlerState = deps.spawnHandlerState ?? new SpawnHandlerState({ now: deps.now })
     this.mutationQueue = deps.mutationQueue ?? new WorkspaceMutationQueue()
+  }
+
+  private async creationReady(sourceNodeId: string, project: Project, args: Record<string, string>, verified: boolean): Promise<string | undefined> {
+    const { creation, organization } = creationFromArgs(args)
+    if (!verified) return 'assistant_creation_verified_source_required'
+    const refusal = creationAdmission(creation, organization, project.id)
+    if (refusal) return refusal
+    if (!this.deps.creationReceipts) return 'assistant_creation_evidence_unavailable'
+    try {
+      const held = await this.deps.creationReceipts.find({ principal: 'verified-node', sourceNodeId, projectId: project.id }, creation!.creationId)
+      if (held) return 'assistant_creation_receipt_exists_inspect_do_not_repeat'
+    } catch { return 'assistant_creation_receipt_unconfirmed_inspect_do_not_repeat' }
+  }
+
+  private async recordCreation(sourceNodeId: string, project: Project, args: Record<string, string>, nodes: CanvasNodeState[]) {
+    const { creation, organization } = creationFromArgs(args)
+    if (creationAdmission(creation, organization, project.id) || !this.deps.creationReceipts) throw new Error('assistant_creation_admission_failed')
+    const fingerprint = createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(args).sort(([a], [b]) => a.localeCompare(b))))).digest('hex')
+    let receipt
+    try {
+      receipt = await this.deps.creationReceipts.record({ principal: 'verified-node', sourceNodeId, projectId: project.id },
+        creation!, nodes.map(n => ({ nodeId: n.id, organization: organization! })), fingerprint)
+    } catch (error) { throw new CreationReceiptRefusal('assistant_creation_receipt_unconfirmed_inspect_do_not_repeat', { cause: error }) }
+    for (const node of nodes) {
+      node.assistantCreation = creation
+      node.taskPlanning = planningAtCreation(creation!.taskId, organization!.functionalRole, creation!.planning)
+      // Structural nodes carry the same immutable ownership intent, but are not terminal
+      // organization targets. Receipt admission must not depend on Kanban eligibility.
+      if (node.kind !== 'terminal') {
+        node.organization = { version: 1, mode: 'manual', metadata: organization!, columnId: null,
+          sequence: 1, receiptId: receipt.id }
+        continue
+      }
+      const plan = planOrganization(project, node, organization!, { attested: true, creating: true })
+      if (!plan.organization) throw new Error('assistant_creation_organization_failed')
+      node.organization = { ...plan.organization, receiptId: receipt.id }
+      project.kanban = placeNode(project.kanban, node.id, { columnId: plan.to, index: -1, previous: null, next: null })
+    }
+    return receipt
+  }
+
+  private async runCreationExclusive<T>(operation: string, work: () => Promise<T>): Promise<T | ServerControlReply> {
+    try { return await this.runExclusive(operation, work) }
+    catch (error) {
+      if (error instanceof CreationReceiptRefusal) return { ok: false, error: error.message }
+      throw error
+    }
   }
 
   private runExclusive<T>(operation: string, work: () => Promise<T>): Promise<T> {
@@ -1010,10 +1065,10 @@ export class HeadlessNodeFactory {
   ): void {
     this.deps.publishProject?.(project)
     const publishNode = this.deps.publishNode ?? ((projectId: string, node: CanvasNodeState) => {
-      publishCanvasMutation(projectId, { op: 'upsert', node })
+      publishCanvasMutation(projectId, { op: 'upsert', node }, project.workspaceChange?.after)
     })
     const publishRemoval = this.deps.publishRemoval ?? ((projectId: string, nodeId: string) => {
-      publishCanvasMutation(projectId, { op: 'remove', id: nodeId })
+      publishCanvasMutation(projectId, { op: 'remove', id: nodeId }, project.workspaceChange?.after)
     })
     for (const node of nodes) {
       this.rememberRuntimeNode(project.id, node)
@@ -1508,9 +1563,9 @@ export class HeadlessNodeFactory {
     })
   }
 
-  group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive('group', async () => {
-      const flagError = unsupportedFlags(args, new Set(['nodes', 'label', 'color']))
+  group(sourceNodeId: string, args: Record<string, string>, verified = false): Promise<ServerControlReply> {
+    return this.runCreationExclusive('group', async () => {
+      const flagError = unsupportedFlags(args, new Set(['nodes', 'label', 'color', ...creationFlags]))
       if (flagError) return { ok: false, error: `group: ${flagError}` }
       let color: NodeColor | undefined
       if (args.color !== undefined) {
@@ -1524,6 +1579,8 @@ export class HeadlessNodeFactory {
         return { ok: false, error: 'source node is not a control-capable agent' }
       }
 
+      const admission = await this.creationReady(sourceNodeId, source.project, args, verified)
+      if (admission) return { ok: false, error: admission }
       const ids = (args.nodes ?? '').split(',').map((id) => id.trim()).filter(Boolean)
       const unowned = this.unownedMutation(sourceNodeId, ids)
       if (unowned) return this.ownershipRefusal('group', sourceNodeId, unowned)
@@ -1547,10 +1604,11 @@ export class HeadlessNodeFactory {
       }
 
       source.project.nodes = grouped.nodes
+      const receipt = await this.recordCreation(sourceNodeId, source.project, args, source.project.nodes.filter(n => n.id === grouped.groupId))
       await this.deps.workspaceStore.save(workspace)
       this.ownership.record(grouped.groupId, {
         sourceNodeId,
-        projectId: source.project.id
+        projectId: source.project.id, assistantCreationId: receipt.id
       })
       this.publish(source.project, grouped.changed)
       const skipped = ids.length - resolvable.length
@@ -2023,7 +2081,7 @@ export class HeadlessNodeFactory {
       const flagError = unsupportedFlags(
         args,
         verb === 'open-terminal'
-          ? new Set(['count', 'cwd', 'cmd', 'after', 'project'])
+          ? new Set(['count', 'cwd', 'cmd', 'after', 'project', ...creationFlags])
           : new Set([
               'agent',
               'count',
@@ -2033,7 +2091,8 @@ export class HeadlessNodeFactory {
               'project',
               'model',
               'remote-control',
-              'size'
+              'size',
+              ...creationFlags
             ])
       )
       if (flagError) return { ok: false, error: `${verb}: ${flagError}` }
@@ -2043,6 +2102,10 @@ export class HeadlessNodeFactory {
           error: `${verb}-identity-refused: Server Edition ${verb} requires verified node identity`
         }
       }
+
+      const declaration = creationFromArgs(args)
+      const declarationRefusal = creationAdmission(declaration.creation, declaration.organization, args['organization-project'])
+      if (declarationRefusal) return { ok: false, error: declarationRefusal }
 
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
       const source = await this.resolveSource(workspace, sourceNodeId)
@@ -2057,6 +2120,8 @@ export class HeadlessNodeFactory {
       const unownedAfter = this.unownedMutation(sourceNodeId, after)
       if (unownedAfter) return this.ownershipRefusal(verb, sourceNodeId, unownedAfter)
 
+      const admission = await this.creationReady(sourceNodeId, target, args, verified)
+      if (admission) return { ok: false, error: admission }
       const settings = this.deps.settings()
       const normalNodeSize = terminalSize(settings)
       const nodeSizeName = verb === 'open-agent'
@@ -2243,13 +2308,14 @@ export class HeadlessNodeFactory {
       // Runs INSIDE the same transaction as the append, so the frame and its members are one
       // save and one publish — a burst of spawns must not become a burst of merges.
       const framed = this.applyWorkerFrame(target, source.node, created, sourceNodeId)
+      const receipt = await this.recordCreation(sourceNodeId, target, args, [...created, ...(framed.groupId ? target.nodes.filter(n => n.id === framed.groupId) : [])])
       await this.deps.workspaceStore.save(workspace)
       for (const node of created) {
-        this.ownership.record(node.id, { sourceNodeId, projectId: target.id })
+        this.ownership.record(node.id, { sourceNodeId, projectId: target.id, assistantCreationId: receipt.id })
         this.launchesInFlight.add(node.id)
       }
       if (framed.groupId) {
-        this.ownership.record(framed.groupId, { sourceNodeId, projectId: target.id })
+        this.ownership.record(framed.groupId, { sourceNodeId, projectId: target.id, assistantCreationId: receipt.id })
       }
       // Publish in the project's own order, which `groupsFirst` has already made parent-first:
       // React Flow requires a frame to arrive before the children parented to it.
@@ -2270,7 +2336,7 @@ export class HeadlessNodeFactory {
         agentId
       }
     }
-    const prepared = await this.runExclusive(verb, prepare)
+    const prepared = await this.runCreationExclusive(verb, prepare)
 
     if ('ok' in prepared) return prepared
     return this.launchPrepared(prepared)
@@ -2308,6 +2374,13 @@ export class HeadlessNodeFactory {
           // answers, keep the attached index honest but never type a command after reporting an
           // unknown launch outcome to the caller.
           if (expired) break
+          // Close/stop may have won while attach was pending. Final cleanup is too late to
+          // prevent a command's effects, so suppress both agent registration and command send.
+          if (this.cancelledLaunches.has(node.id)) {
+            failed.add(node.id)
+            completed.add(node.id)
+            continue
+          }
           if (!result.sessionId) {
             failed.add(node.id)
             completed.add(node.id)
@@ -2330,11 +2403,12 @@ export class HeadlessNodeFactory {
           completed.add(node.id)
         } finally {
           // A close/stop can race either the attach or command await. Its first destroy may have
-          // run before this non-cancellable create established a backend, so repeat the exact-id
-          // destroy after the late operation settles. PtyManager coalesces concurrent destroys.
+          // run before this non-cancellable create established a backend, so request a new exact-id
+          // destroy pass after any pending destroy settles; sharing its old acknowledgement can
+          // miss the backend that appeared after its local kill.
           if (this.cancelledLaunches.has(node.id)) {
             await this.deps.ptyManager
-              .destroySession(null, node.id, { everySocket: true })
+              .destroySession(null, node.id, { everySocket: true, afterPending: true })
               .catch(() => undefined)
             failed.add(node.id)
             this.attached.delete(node.id)
@@ -2420,9 +2494,9 @@ export class HeadlessNodeFactory {
     }
   }
 
-  sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
-    return this.runExclusive('sticky', async () => {
-      const parsed = parseStickyArgs(args)
+  sticky(sourceNodeId: string, args: Record<string, string>, verified = false): Promise<ServerControlReply> {
+    return this.runCreationExclusive('sticky', async () => {
+      const parsed = parseStickyArgs(Object.fromEntries(Object.entries(args).filter(([key]) => !creationFlags.includes(key))))
       if ('error' in parsed) return { ok: false, error: `sticky: ${parsed.error}` }
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
       const source = await this.resolveSource(workspace, sourceNodeId)
@@ -2443,6 +2517,8 @@ export class HeadlessNodeFactory {
       let created = false
       if ('id' in resolved) node = source.project.nodes.find((candidate) => candidate.id === resolved.id)
       else if (parsed.create) {
+        const admission = await this.creationReady(sourceNodeId, source.project, args, verified)
+        if (admission) return { ok: false, error: admission }
         created = true
         node = {
           id: nextId('sticky'),
@@ -2474,9 +2550,10 @@ export class HeadlessNodeFactory {
       node.text = write.text
       node.textUpdatedAt = (this.deps.now ?? Date.now)()
       node.textUpdatedBy = source.node.title || source.node.id
+      const receipt = created ? await this.recordCreation(sourceNodeId, source.project, args, [node]) : undefined
       await this.deps.workspaceStore.save(workspace)
       if (created) {
-        this.ownership.record(node.id, { sourceNodeId, projectId: source.project.id })
+        this.ownership.record(node.id, { sourceNodeId, projectId: source.project.id, assistantCreationId: receipt!.id })
       }
       this.publish(source.project, [node])
       return {

@@ -334,8 +334,18 @@ activate a live service or provision credentials.
 
 ### Assistant Kanban organization
 
-`POST /opsapi/nodes` supports explicit descriptive organization metadata, exact per-project
-column-ID policy and durable idempotency. The private creator ledger attests new assistant opt-in;
+`POST /opsapi/nodes` requires an explicit `projectId`, exact caller `idempotencyKey`,
+complete `organization:{owner,projectId,workstream,functionalRole}` and
+`creation:{version:1,taskId,creationId,declaredOwner}`. The stable explicit task ID
+and creation key use the 8–128-character key grammar; `creationId` equals the key,
+`declaredOwner` equals `organization.owner`, and the project IDs match. No title/model
+or shared bearer identity supplies these fields; keyless/legacy bodies refuse.
+Before POST, callers authenticate read-only `GET /opsapi/creation-contract` and
+require its private receipt-before-save/spawn promise plus `receiptPublication`:
+Linux `file-and-directory-sync`, native Windows `file-flush-visibility` with no
+directory/power-loss claim. Missing or weaker capabilities refuse before launch.
+Manual browser creation stays on its ordinary workspace/terminal path.
+Exact per-project column-ID policy remains optional. The private creator ledger attests new assistant opt-in;
 old operator cards and hand-edited metadata are not adopted. Missing policy/columns stay Ungrouped.
 Managed `PATCH` uses expected project revisions and preserves manual choices, order, pins, geometry
 and session identity. Browser workspace saves carry loaded/acknowledged revision evidence and

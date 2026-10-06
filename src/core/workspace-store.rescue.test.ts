@@ -7,7 +7,6 @@ import { fakePlatform } from './platform-fake'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { WorkspaceStore, type WorkspaceBackendGuards } from './workspace-store'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
-import * as atomic from './fs-atomic'
 
 /**
  * The 2026-09-01 loss, pinned.
@@ -84,11 +83,9 @@ describe('local save rescue', () => {
       { ...workspace, revision: (await store.load()).revision })
     await save(ws([project({ cwd: projRoot })]))
     const target = path.join(projRoot, '.nodeterm/project.json')
-    const write = atomic.writeFileAtomic
-    const refused = vi.spyOn(atomic, 'writeFileAtomic').mockImplementation(async (file, content) => {
-      if (file === target) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' })
-      await write(file, content)
-    })
+    store.publicationPhase = async (phase, file) => {
+      if (file === target && phase === 'before-displace') throw Object.assign(new Error('disk full'), { code: 'ENOSPC' })
+    }
     const latest = ws([
       project({ cwd: projRoot, nodes: [node('term-1'), node('term-2'), node('term-3')] }),
       project({ id: 'inline', name: 'other canvas' })
@@ -97,7 +94,7 @@ describe('local save rescue', () => {
     expect(await readNodes(projRoot)).toEqual(['term-1', 'term-2'])
     // Other projects and the index still save; one unavailable disk must not freeze them too.
     expect((await new WorkspaceStore().load()).projects[1].name).toBe('other canvas')
-    refused.mockRestore()
+    store.publicationPhase = undefined
     await save(latest)
     const refreshed = await new WorkspaceStore().load()
     expect(refreshed.projects[0].nodes.map((n) => n.id)).toEqual(['term-1', 'term-2', 'term-3'])

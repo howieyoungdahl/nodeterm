@@ -302,26 +302,32 @@ describe('unavailable & corrupt refs', () => {
     expect(loaded.projects[0]).toMatchObject({ id: 'p1', name: 'foo', unavailable: true, nodes: [] })
   })
 
-  it('sets aside a corrupt project file and marks the project unavailable', async () => {
+  it('preserves enrolled corrupt project bytes and marks the project unavailable', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
     const p = path.join(projRoot, '.nodeterm/project.json')
+    // Windows ordinary saves are never enrolled. Simulate imported retained history to
+    // exercise this preservation contract on both native platforms.
+    if (process.platform === 'win32') await fs.mkdir(path.join(path.dirname(p), '.recovery', 'project.json'), { recursive: true })
     await fs.writeFile(p, '{ not json')
     const loaded = await new WorkspaceStore().load()
     expect(loaded.projects[0].unavailable).toBe(true)
     const dir = await fs.readdir(path.join(projRoot, '.nodeterm'))
-    expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(true)
+    expect(dir).toContain('project.json')
+    expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(false)
   })
 
-  it('sets aside a valid-JSON but wrong-shape project file and marks it unavailable', async () => {
+  it('preserves enrolled wrong-shape project bytes and marks it unavailable', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
     const p = path.join(projRoot, '.nodeterm/project.json')
+    if (process.platform === 'win32') await fs.mkdir(path.join(path.dirname(p), '.recovery', 'project.json'), { recursive: true })
     await fs.writeFile(p, '{"version": 99}') // parses, but not a ProjectFileV1
     const loaded = await new WorkspaceStore().load()
     expect(loaded.projects[0].unavailable).toBe(true)
     const dir = await fs.readdir(path.join(projRoot, '.nodeterm'))
-    expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(true)
+    expect(dir).toContain('project.json')
+    expect(dir.some((f) => f.startsWith('project.json.corrupt-'))).toBe(false)
   })
 
   it('load({ sideline: false }) marks a corrupt ref unavailable WITHOUT sidelining it', async () => {
@@ -1099,18 +1105,20 @@ describe('save corruption hardening', () => {
     expect(index.entries[0].name).toBe('renamed')
   })
 
-  it('no two atomic writes ever share a tmp path (concurrent writers cannot splice)', async () => {
-    const tmpPaths: string[] = []
-    const realWrite = fs.writeFile.bind(fs)
-    vi.spyOn(fs, 'writeFile').mockImplementation(async (p, data, enc) => {
-      if (String(p).includes('.tmp')) tmpPaths.push(String(p))
-      return realWrite(p as string, data as string, enc as BufferEncoding)
-    })
+  it.skipIf(process.platform === 'win32')('ordinary retained producers use separate immutable operation/publication leaves', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
     await store.save(ws([project({ cwd: projRoot, name: 'renamed' })]))
-    expect(tmpPaths.length).toBeGreaterThanOrEqual(2) // both saves really wrote
-    expect(new Set(tmpPaths).size).toBe(tmpPaths.length)
+    for (const file of [path.join(userData, 'workspace.json'), path.join(projRoot, '.nodeterm', 'project.json')]) {
+      const operations = path.join(path.dirname(file), '.recovery', path.basename(file), 'operations')
+      const ids = await fs.readdir(operations)
+      expect(ids.length).toBeGreaterThanOrEqual(2)
+      expect(new Set(ids).size).toBe(ids.length)
+      for (const id of ids) {
+        expect(JSON.parse(await fs.readFile(path.join(operations, id, 'receipt.json'), 'utf8')).kind).toBe('committed')
+        expect(await fs.readFile(path.join(operations, id, 'request.json'), 'utf8')).toContain('workspace-producer')
+      }
+    }
   })
 
   it('an empty canvas never blind-overwrites a populated project.json it has not read', async () => {
@@ -1186,8 +1194,13 @@ describe('save corruption hardening', () => {
     await new WorkspaceStore().save(ws([project({ cwd: projRoot })]))
     await new WorkspaceStore().load() // healthy index
     expect(fake.sent.some((m) => m.channel === 'workspace:corrupt-recovered')).toBe(false)
+    // Imported retained history must remain distinguishable from untouched first-run absence
+    // even on native Windows, where ordinary saves themselves create no retained history.
+    if (process.platform === 'win32') await fs.mkdir(path.join(userData, '.recovery', 'workspace.json'), { recursive: true })
     await fs.rm(path.join(userData, 'workspace.json'))
-    await new WorkspaceStore().load() // first run: nothing on disk at all
+    await expect(new WorkspaceStore().load()).rejects.toThrow('E_PUBLICATION_UNAVAILABLE') // retained history is not first-run absence
+    await fs.rm(path.join(userData, '.recovery'), { recursive: true })
+    await new WorkspaceStore().load() // genuinely virgin index
     expect(fake.sent.some((m) => m.channel === 'workspace:corrupt-recovered')).toBe(false)
   })
 

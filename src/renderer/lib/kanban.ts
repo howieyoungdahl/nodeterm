@@ -1,6 +1,7 @@
 import type { BoardLogAuthor, CanvasNodeState, KanbanAssignment, KanbanCardMeta, KanbanColumn, KanbanLabel, KanbanLabelColor, KanbanPriority, Project, ProjectKanban } from '@shared/types'
 import { NODE_COLORS } from '../state/workspace'
 import { withManualAssignment } from '@shared/kanban-organization'
+import type { TaskCategory } from '@shared/task-planning'
 
 // Pure kanban board transforms — the ONLY place board structure changes. The UI computes
 // the next board here and hands it whole to setProjectKanban (no second live source).
@@ -193,16 +194,28 @@ function withCardMeta(
   nodeId: string,
   next: Omit<KanbanCardMeta, 'nodeId'> | null
 ): ProjectKanban {
+  if (next) {
+    const current = cardMeta(k, nodeId)
+    next = { category: current?.category, categoryReason: current?.categoryReason, ...next }
+  }
   const rest = metaList(k).filter((m) => m && m.nodeId !== nodeId)
   const keep =
     next &&
     ((next.assignees?.length ?? 0) > 0 ||
       next.dueAt !== undefined ||
       next.priority !== undefined ||
+      next.priorityManual === true ||
+      next.category !== undefined ||
       (next.labels?.length ?? 0) > 0)
   const meta = keep ? [...rest, { nodeId, ...next }] : rest
   const { meta: _m, ...bare } = k
   return meta.length ? { ...bare, meta } : bare
+}
+
+/** User classification is an override; it never moves the card or changes task/session identity. */
+export function setCardCategory(k: ProjectKanban, nodeId: string, category: TaskCategory): ProjectKanban {
+  return withCardMeta(k, nodeId, { ...cardMeta(k, nodeId), category,
+    categoryReason: `User selected ${category.replaceAll('-', ' ')} on the board.` })
 }
 
 /** Adds the person to the card (or removes them if already assigned — matched by NAME, the
@@ -219,6 +232,7 @@ export function toggleAssignee(
     : [...(cur?.assignees ?? []), person]
   return withCardMeta(k, nodeId, {
     assignees,
+    priorityManual: cur?.priorityManual,
     dueAt: cur?.dueAt,
     priority: cur?.priority,
     labels: cur?.labels
@@ -230,6 +244,7 @@ export function setCardDue(k: ProjectKanban, nodeId: string, dueAt: number | nul
   const cur = cardMeta(k, nodeId)
   return withCardMeta(k, nodeId, {
     assignees: cur?.assignees,
+    priorityManual: cur?.priorityManual,
     priority: cur?.priority,
     labels: cur?.labels,
     ...(dueAt === null ? {} : { dueAt })
@@ -245,6 +260,7 @@ export function setCardPriority(
   const cur = cardMeta(k, nodeId)
   return withCardMeta(k, nodeId, {
     assignees: cur?.assignees,
+    ...(priority === null || cur?.priorityManual ? { priorityManual: true as const } : {}),
     dueAt: cur?.dueAt,
     labels: cur?.labels,
     ...(priority === null ? {} : { priority })
@@ -322,6 +338,8 @@ export function deleteLabel(k: ProjectKanban, id: string): ProjectKanban {
         (m.assignees?.length ?? 0) > 0 ||
         m.dueAt !== undefined ||
         m.priority !== undefined ||
+        m.priorityManual === true ||
+        m.category !== undefined ||
         (m.labels?.length ?? 0) > 0
     )
   const { labels: _l, meta: _m, ...bare } = k
@@ -353,6 +371,7 @@ export function toggleCardLabel(k: ProjectKanban, nodeId: string, labelId: strin
     : [...(cur?.labels ?? []), labelId]
   return withCardMeta(k, nodeId, {
     assignees: cur?.assignees,
+    priorityManual: cur?.priorityManual,
     dueAt: cur?.dueAt,
     priority: cur?.priority,
     labels
@@ -377,6 +396,7 @@ export function setCardLabels(k: ProjectKanban, nodeId: string, ids: string[]): 
   const labels = [...new Set(ids)]
   return withCardMeta(k, nodeId, {
     assignees: cur?.assignees,
+    priorityManual: cur?.priorityManual,
     dueAt: cur?.dueAt,
     priority: cur?.priority,
     ...(labels.length ? { labels } : {})
