@@ -17,6 +17,7 @@
  *  keeping its documented meaning ("the disk side is re-fetchable") intact.
  */
 import type { CanvasNodeState, Project } from '@shared/types'
+import { applyDeletedEntities } from './deletedEntities'
 
 export type ExternalChangeDecision =
   /** No unsaved local edits: load disk edits, retaining open cards missing from that snapshot. */
@@ -50,7 +51,8 @@ const NOT_SHARED_STATE: ReadonlySet<string> = new Set([
   'defaultAccountId',
   'closed',
   'unavailable',
-  'remote'
+  'remote',
+  'deletedEntities'
 ])
 
 /** Stable JSON (object keys sorted at every depth) so two structurally equal values compare equal
@@ -112,6 +114,7 @@ export function reloadKeepingOpenNodes(current: Project, incoming: Project): {
   retained: number
 } {
   if (current.id !== incoming.id) return { project: incoming, retained: 0 }
+  current = applyDeletedEntities(current, incoming)
   const savedIds = new Set(incoming.nodes.map((node) => node.id))
   const retained = current.nodes.filter((node) => !savedIds.has(node.id))
   if (!retained.length) return { project: incoming, retained: 0 }

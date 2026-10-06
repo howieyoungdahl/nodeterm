@@ -730,6 +730,8 @@ export interface NavStop {
 
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
+  /** Loaded deletion evidence for conflict resolution. Runtime only; clients cannot grant deletion. */
+  deletedEntities?: { nodes: string[]; bridges: string[]; ropes: string[] }
   /** Renderer-only acknowledged board baseline for preserving independent manual edits. */
   loadedKanban?: ProjectKanban | null
   /** Runtime-only revision chain for a single-project organization publication. */

@@ -14,6 +14,7 @@ export function useSavePersistence() {
     } catch (error) {
       console.warn('[canvas] workspace save failed', error)
       if (error instanceof Error && error.message.includes('workspace_conflict:')) {
+        setDelivery(undefined)
         setRevisionConflict(true)
         return false
       }

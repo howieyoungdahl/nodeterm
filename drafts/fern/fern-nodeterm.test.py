@@ -3,6 +3,8 @@ import importlib.util
 import copy
 import io
 import json
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -358,6 +360,75 @@ class CleanupCompatibility(unittest.TestCase):
             fern.main()
         self.assertEqual([m for m, _, _ in self.calls], ['POST', 'POST'])
         self.assertEqual(json.loads(self.output.read_text(encoding='utf-8'))['operation'], 'archive')
+
+
+class WindowsStartup(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.script = Path(self.temp.name) / 'synthetic-helper.py'
+        self.calls = []
+        self.script.write_text('import json,sys\nprint(json.dumps({"args":sys.argv[1:],"body":sys.stdin.buffer.read().decode()}))\n')
+
+    def launch(self, command, **options):
+        self.calls.append(command)
+        return subprocess.Popen([sys.executable, '-u', '-c', fern.WSL_BOOTSTRAP, str(self.script), command[-1]], **options)
+
+    def test_startup_retry_preserves_payload_and_paths(self):
+        def transient(command, **options):
+            if not self.calls:
+                self.calls.append(command)
+                return subprocess.Popen([sys.executable, '-c', 'import sys;sys.stderr.write("Wsl/Service/0x8007274c");sys.exit(1)'], **options)
+            return self.launch(command, **options)
+        with patch.object(fern.time, 'sleep'):
+            result = fern.run_windows(['send', '--target-file', 'C:\\Temp\\target.json'], b'synthetic body', popen=transient)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(json.loads(result.stdout), {'args': ['send', '--target-file', '/mnt/c/Temp/target.json'], 'body': 'synthetic body'})
+        for command in self.calls:
+            self.assertNotIn('send', command)
+            self.assertNotIn('synthetic body', command)
+
+    def test_never_retries_after_dispatch_even_when_the_command_reports_the_same_timeout(self):
+        self.script.write_text('import sys\nsys.stdin.buffer.read()\nsys.stderr.write("Wsl/Service/0x8007274c")\nsys.exit(2)\n')
+        result = fern.run_windows(['send'], b'synthetic body', popen=self.launch)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b'0x8007274c', result.stderr)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_denied_startup_is_terminal_without_dispatch(self):
+        def denied(command, **options):
+            self.calls.append(command)
+            return subprocess.Popen([sys.executable, '-c', 'import sys;sys.stderr.write("Access is denied.");sys.exit(1)'], **options)
+        with self.assertRaisesRegex(fern.ControlError, 'before command dispatch; nothing was sent'):
+            fern.run_windows(['send'], b'synthetic body', popen=denied)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_hung_startup_has_a_bounded_retry_without_sending_the_payload(self):
+        def hung_then_ready(command, **options):
+            if not self.calls:
+                self.calls.append(command)
+                return subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'], **options)
+            return self.launch(command, **options)
+        with patch.object(fern.time, 'sleep'):
+            result = fern.run_windows(['health'], popen=hung_then_ready, startup_timeout=0.5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_exhausted_startup_never_submits_a_command(self):
+        def timeout(command, **options):
+            self.calls.append(command)
+            return subprocess.Popen([sys.executable, '-c', 'import sys;sys.stderr.write("Wsl/Service/0x8007274c");sys.exit(1)'], **options)
+        with patch.object(fern.time, 'sleep'), self.assertRaisesRegex(fern.ControlError, 'nothing was sent'):
+            fern.run_windows(['send'], b'synthetic body', popen=timeout)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_read_only_and_body_file_calls_do_not_wait_for_interactive_stdin(self):
+        self.assertFalse(fern.windows_stdin_required(['health']))
+        self.assertFalse(fern.windows_stdin_required(['send', '--body-file', 'C:\\Temp\\body.txt']))
+        self.assertFalse(fern.windows_stdin_required(['send', '--body-file=C:\\Temp\\body.txt']))
+        self.assertFalse(fern.windows_stdin_required(['--data-dir', 'send', 'health']))
+        self.assertTrue(fern.windows_stdin_required(['--url', 'http://127.0.0.1:8443', 'send', '--enter']))
 
 
 if __name__ == '__main__':

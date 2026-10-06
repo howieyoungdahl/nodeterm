@@ -1,6 +1,7 @@
 import type { Project, Workspace, WorkspaceApi } from '@shared/types'
 import { useProjects } from '../state/projects'
 import { reloadKeepingOpenNodes } from './externalChange'
+import { applyDeletedEntities } from './deletedEntities'
 
 // Build each snapshot AFTER the preceding acknowledgment. A racing edit stays unsaved;
 // acknowledgments advance revision evidence, never overwrite content with an old snapshot.
@@ -22,6 +23,7 @@ export function saveWorkspace(api: WorkspaceApi): Promise<void> {
 
 /** Keep manual assignments while adopting organization content and newly made cards. */
 export function mergeOrganizationProject(local: Project, incoming: Project): Project {
+  local = applyDeletedEntities(local, incoming)
   const byId = new Map(incoming.nodes.map((n) => [n.id, n]))
   const localIds = new Set(local.nodes.map((n) => n.id))
   let kanban = local.kanban ?? incoming.kanban

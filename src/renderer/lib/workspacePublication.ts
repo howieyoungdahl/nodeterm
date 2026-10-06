@@ -9,7 +9,7 @@ const equal = (a: unknown, b: unknown): boolean => {
     Object.keys(a).every(k => Object.hasOwn(b, k) && equal(a[k], b[k]))
 }
 const clean = (p: Project): Project => {
-  const { revision: _revision, loadedKanban: _baseline, workspaceChange: _change, organizationChange: _organization, ...content } = p
+  const { revision: _revision, loadedKanban: _baseline, workspaceChange: _change, organizationChange: _organization, deletedEntities: _deletions, ...content } = p
   return content
 }
 
@@ -62,7 +62,7 @@ export function mergeWorkspacePublication(revision: string | undefined, projects
       const i = result.findIndex(p => p.id === delta.after.id)
       if (i < 0 || result.filter(p => p.id === delta.after.id).length !== 1) throw new Error('foreign-project')
       result[i] = { ...merge(clean(delta.before), clean(result[i]), clean(delta.after)) as Project,
-        revision: delta.after.revision, loadedKanban: delta.after.kanban ?? null }
+        revision: delta.after.revision, deletedEntities: delta.after.deletedEntities, loadedKanban: delta.after.kanban ?? null }
     }
     return { kind: 'adopt', projects: result, revision: change.after }
   } catch (error) { return { kind: 'conflict', reason: (error as Error).message } }

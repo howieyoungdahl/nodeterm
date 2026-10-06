@@ -195,6 +195,15 @@ Flow array back over it before the reload effect lands. Closing a node is the ex
 path. The same behavior applies to desktop and Server Edition; the separate native mobile client
 needs equivalent handling for any future disk-reload control.
 
+Explicit retained deletions are the exception to open-card preservation. `fileToProject` projects
+the loaded `_reconciliation.deleted` records into runtime `deletedEntities`. Both conflict choices
+exclude only those recorded nodes and links, remove their board references, and release surviving
+children of deleted groups at their original canvas position. Absence alone still preserves a new
+unsaved card. The renderer never edits the retained metadata, and `splitWorkspace` strips its runtime
+projection from inline content as well as referenced files. Partial project-save aggregation must
+preserve the `workspace_conflict` prefix across RPC; losing it caused a retry followed by another
+revision conflict, with both conflict choices proposing the same deleted cards again.
+
 The optional browser-server updater (`core/server-updater.ts`, `server/update-main.ts`) builds
 one configured integration ref in detached release worktrees. It uses an updater-private fetched
 ref because FETCH_HEAD is shared with concurrent worktrees. Activation checks browser/spawn/message

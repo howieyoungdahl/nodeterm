@@ -92,11 +92,11 @@ export function saveFailureMessage(delivery: SaveDelivery | undefined): string |
   const tries = `${delivery.attempts} attempt${delivery.attempts === 1 ? '' : 's'}`
   if (delivery.kind === 'retrying')
     return (
-      `Canvas changes are not being saved — ${tries} refused so far. Retrying. ` +
+      `Canvas changes are not being saved. ${tries} failed so far. Retrying. ` +
       'Your terminals keep running either way.'
     )
   return (
-    `Canvas changes are NOT being saved — ${tries} refused and nothing will retry on its own. ` +
+    `Canvas changes are NOT being saved. ${tries} failed and nothing will retry on its own. ` +
     'Cards opened since then will be gone on reload; your terminals keep running either way.'
   )
 }

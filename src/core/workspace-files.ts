@@ -160,6 +160,8 @@ export const PROJECT_FILE = 'project.json'
  * Node cwds inside the root are stored relative ("./sub").
  */
 export interface ProjectFileV1 {
+  /** Retained publication metadata. Only the commit store writes these deletion records. */
+  _reconciliation?: { version: number; deleted?: Partial<NonNullable<Project['deletedEntities']>> }
   kanbanOrganization?: import('../shared/kanban-organization').OrganizationPolicy
   version: 1
   /** Monotonic save counter; picks a winner when an offline cache and the file diverge (SSH). */
@@ -443,9 +445,16 @@ export function fileToProject(
   const defaultAccountId = base.defaultAccountId ?? f.defaultAccountId
   const icon = sanitizeProjectIcon(f.icon)
   const layoutRules = sanitizeLayoutRulesBlock(f.layoutRules)
+  const deleted = f._reconciliation?.version === 1 ? f._reconciliation.deleted : undefined
+  const deletedIds = (key: 'nodes' | 'bridges' | 'ropes') => {
+    const ids = deleted?.[key]
+    return Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : []
+  }
+  const deletedEntities = { nodes: deletedIds('nodes'), bridges: deletedIds('bridges'), ropes: deletedIds('ropes') }
   return {
     id: base.id,
     revision: projectFileRevision(f),
+    ...(Object.values(deletedEntities).some(ids => ids.length) ? { deletedEntities } : {}),
     ...(parseOrganizationPolicy(f.kanbanOrganization) ? { kanbanOrganization: parseOrganizationPolicy(f.kanbanOrganization) } : {}),
     name: f.name,
     color: f.color,
@@ -569,7 +578,7 @@ export function splitWorkspace(
       ? derivedProjectId(incoming.id, collisionSeed(incoming), (candidate) => seenIds.has(candidate))
       : incoming.id
     seenIds.add(id)
-    const { revision: _evidence, organizationChange: _publication, workspaceChange: _workspacePublication, loadedKanban: _baseline, ...content } = incoming
+    const { revision: _evidence, organizationChange: _publication, workspaceChange: _workspacePublication, loadedKanban: _baseline, deletedEntities: _deletions, ...content } = incoming
     const p = { ...content, id, nodes: sanitizeOrganizationNodes(content.nodes, content.kanban) }
     const header = { id: p.id, name: p.name, color: p.color, ...(p.closed ? { closed: true } : {}) }
     // The machine-local half of a REF'd project (a folder or an ssh endpoint), which used to ride

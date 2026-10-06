@@ -36,6 +36,13 @@ python3 "$HOME/.local/bin/fern-nodeterm.py" nodes
 The Windows wrapper launches Ubuntu through the configured execution mode. A
 platform denial is terminal for that action; do not change permission settings,
 reroute execution, or substitute another conversation's identity.
+The wrapper first waits up to twelve seconds for a private readiness handshake.
+No command arguments or body reach Ubuntu before that handshake. A service startup
+timeout (including `0x8007274c`) gets one bounded startup retry, still without a command.
+After readiness, the command is submitted exactly once. A later timeout or failure is
+never automatically replayed. Failed startup reports that nothing was sent; it never
+restarts WSL, changes permissions or selects another node. Generation and screen checks
+remain mandatory inside the same helper after dispatch.
 
 `nodes` inventories all cards, including plain shell/helper nodes that are absent
 from the agent-conversation API. `controlAvailable` identifies live terminal
