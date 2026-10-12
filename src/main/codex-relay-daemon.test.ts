@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { createServer } from 'http'
+import { describe, expect, it, vi } from 'vitest'
+import { ClientRequest, createServer } from 'http'
 import { spawnSync } from 'child_process'
 import {
   closeSync,
@@ -570,15 +570,58 @@ describe('Codex shared relay thread observation', () => {
     expect(acquireProcessLock(lock)).toBe(false)
   })
 
+  it('configures the stale control deadline and destroys the request on timeout', async () => {
+    let acceptRequest!: () => void
+    let closeSocket!: () => void
+    const accepted = new Promise<void>((resolve) => {
+      acceptRequest = resolve
+    })
+    const socketClosed = new Promise<void>((resolve) => {
+      closeSocket = resolve
+    })
+    const server = createServer((req) => {
+      req.socket.once('close', closeSocket)
+      acceptRequest()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const timeout = vi.spyOn(ClientRequest.prototype, 'setTimeout')
+    let request: ClientRequest | undefined
+    try {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('missing test port')
+      const result = relayControlPost(address.port, 'token', '/ping', {})
+      const rejected = expect(result).rejects.toThrow('relay request timed out')
+      request = timeout.mock.contexts[0] as ClientRequest
+      await accepted
+      expect(request.destroyed).toBe(false)
+      // Emit Node's actual timeout event after a real HTTP accept. This pins both the
+      // configured deadline and its abort listener without relying on scheduler speed.
+      request.emit('timeout')
+      await rejected
+      expect(timeout).toHaveBeenCalledExactlyOnceWith(1_000, expect.any(Function))
+      expect(request.destroyed).toBe(true)
+      await socketClosed
+    } finally {
+      request?.destroy()
+      timeout.mockRestore()
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
   it('times out a stale control port that accepts but never answers', async () => {
     const server = createServer(() => {})
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const address = server.address()
-    if (!address || typeof address === 'string') throw new Error('missing test port')
-    const started = Date.now()
-    await expect(relayControlPost(address.port, 'token', '/ping', {})).rejects.toThrow('timed out')
-    expect(Date.now() - started).toBeLessThan(2_000)
-    await new Promise<void>((resolve) => server.close(() => resolve()))
+    try {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('missing test port')
+      // Node's socket timeout must fire for real here. Total wall time also includes
+      // event-loop contention, so it cannot prove the configured one-second deadline.
+      await expect(relayControlPost(address.port, 'token', '/ping', {})).rejects.toThrow('timed out')
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 })
 
