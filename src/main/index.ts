@@ -149,6 +149,7 @@ import {
   registerAgentStatusSnapshotIpc,
   recordRawToolEvent,
   recordContextUsage,
+  recordCodexContext,
   setMirrorSettingsProvider,
   setMirrorUsageProvider,
   buildMirrorUsage,
@@ -238,7 +239,8 @@ import {
   setCodexThreadIdentityAuthSecret,
   writeCodexThreadIdentity
 } from '../core/codex-identity-proxy'
-import { codexThreadExists, startCodexThread } from '../core/codex-session-name'
+import { resolveCodexHomeRouting, isBoundCodexTranscript } from '../core/codex-home-routing'
+import { codexThreadExistsAt, startCodexThreadAt } from '../core/codex-session-name'
 import { codexUsageAccounts } from '../core/codex-accounts-core'
 import { codexHomeFor } from '../core/codex-config-dir'
 import { externalCodexUsageAccounts } from '../core/usage/external-profile-dir'
@@ -1733,18 +1735,18 @@ app.whenReady().then(async () => {
   // workspace that no longer holds it) is free to be re-claimed; one whose owner is still there is
   // not, and the launcher then falls back rather than putting two clients on one conversation.
   const codexNodeIsLive = (nodeId: string): boolean => !!workspaceStore.getNode(nodeId)
-  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint, accountId, permissions }) => {
-    const threadId = await startCodexThread(cwd, permissions)
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint, accountId, codexHome, permissions }) => {
+    const threadId = await startCodexThreadAt(resolveCodexHomeRouting(codexHome, accountId).socket, cwd, undefined, permissions)
     writeCodexThreadIdentity(threadId, nodeId, hookEndpoint, undefined, accountId)
     return threadId
   })
-  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint, accountId }) => {
+  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint, accountId, codexHome }) => {
     // Ask the app-server whether this conversation exists BEFORE recording that a node owns it.
     // The id reaching us is whatever the node persisted — it can be stale, or from a session that
     // ran under plain codex and the shared server has never heard of. Binding it anyway writes a
     // record and then execs `codex --remote unix:// resume <id>`, which dies with "no rollout
     // found" AFTER exec, where nothing can fall back any more. Refusing here IS the fallback.
-    if (!(await codexThreadExists(threadId))) {
+    if (!(await codexThreadExistsAt(resolveCodexHomeRouting(codexHome, accountId).socket, threadId))) {
       throw new Error('Codex thread is unknown to the shared app-server')
     }
     bindCodexThreadIdentity(threadId, nodeId, hookEndpoint, codexNodeIsLive, undefined, accountId)
@@ -2133,6 +2135,7 @@ app.whenReady().then(async () => {
     for (const [nid, sid] of nodeContextSession) {
       if (sid === cw.sessionId && typeof cw.usedPercent === 'number') {
         recordContextUsage(nid, cw.usedPercent)
+        recordCodexContext(nid, payload)
         break
       }
     }
@@ -2602,9 +2605,10 @@ app.whenReady().then(async () => {
   // — see isSafeLocalTranscriptPath). Phase 2a does NOT tail remote transcripts (that's 2b), so we
   // jail transcript_path to those roots and skip the read otherwise. Returns the path only when it
   // resolves under an allowed root.
-  const safeTranscriptPath = (tp: string | undefined): string | undefined => {
+  const safeTranscriptPath = (tp: string | undefined, nodeId?: string, sessionId?: unknown): string | undefined => {
     if (!tp) return undefined
     const abs = resolve(tp)
+    if (nodeId && isBoundCodexTranscript(nodeId, sessionId, abs)) return abs
     // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
     // before) would otherwise fail the jail and its meter would silently never fill.
     // Linked accounts' dirs come from SETTINGS, never from the POST — `<dir>/projects/**` only,
@@ -2715,7 +2719,7 @@ app.whenReady().then(async () => {
         }
         return
       }
-      const transcriptPath = safeTranscriptPath(p.transcript_path)
+      const transcriptPath = safeTranscriptPath(p.transcript_path, nodeId, p.session_id)
       const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
       if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)
       if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
@@ -2804,7 +2808,7 @@ app.whenReady().then(async () => {
       }
       return
     }
-    const transcriptPath = safeTranscriptPath(p.transcript_path)
+    const transcriptPath = safeTranscriptPath(p.transcript_path, nodeId, p.session_id)
     // Context-window meter: tail the session transcript (any event carrying both fields).
     if (p.session_id && transcriptPath) contextTail.track(p.session_id, transcriptPath)
     if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)

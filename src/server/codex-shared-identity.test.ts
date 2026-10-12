@@ -48,7 +48,7 @@ describe('Server Edition shared Codex identity wiring', () => {
     expect(start).toHaveBeenCalledWith('/repo', {
       approvalPolicy: 'never',
       sandbox: 'danger-full-access'
-    })
+    }, undefined)
     expect(write).toHaveBeenCalledWith(
       'thread-new',
       'node-new',

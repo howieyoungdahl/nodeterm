@@ -42,7 +42,15 @@ export const EXPIRE_MS = 6 * 60 * 60_000
 // Coalesce bursty hook POSTs (a single turn fires many tool events) into one disk write.
 export const WRITE_DEBOUNCE_MS = 300
 
-export interface MirrorEntry {
+export interface CodexStatusMetadata {
+  codexHome?: string
+  codexAccountId?: string | null
+  lastActivityAt?: number
+  stateSource?: 'hook' | 'idle-inferred' | 'stale' | 'restored'
+  context?: { usedTokens: number; windowTokens: number | null; model?: string; updatedAt: number }
+}
+
+export interface MirrorEntry extends CodexStatusMetadata {
   /** working/waiting/blocked/done; undefined = idle/unknown (e.g. after a session reset). */
   state?: AgentState
   agentId?: AgentId
@@ -168,6 +176,15 @@ export interface MirrorFile {
   nodes: Record<
     string,
     {
+      codexHome?: string
+      codexAccountId?: string | null
+      lastActivityAt?: number
+      stateSource?: CodexStatusMetadata['stateSource']
+      context?: CodexStatusMetadata['context']
+      stateVerified?: boolean
+      restored?: true
+      idleInferred?: true
+      clientRevision?: number
       state?: AgentState
       agentId?: AgentId
       sessionId?: string
@@ -401,6 +418,10 @@ export function reduceEntry(
     next.state = state
     next.updatedAt = now
     next.stateVerified = proof
+    if (ev.agentId === 'codex') {
+      next.stateSource = ev.idle ? 'idle-inferred' : 'hook'
+      if (proof) next.lastActivityAt = now
+    }
     if (proof) next.verifiedAt = now
     next.clientRevision = ev.clientRevision
     // Which KIND of `done` this is, recorded on the same edge as the state itself. `idle` is only
@@ -417,10 +438,26 @@ export function reduceEntry(
   }
   // Identity is captured off ANY event (mirrors the renderer's per-event setSessionId +
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
+  if (ev.agentId !== prev?.agentId || (ev.sessionId && ev.sessionId !== prev?.sessionId)) {
+    delete next.account
+    delete next.codexHome
+    delete next.codexAccountId
+    delete next.context
+    delete next.lastActivityAt
+  }
   if (ev.agentId) next.agentId = ev.agentId
+  if (ev.agentId === 'codex' && !ev.codexHome) {
+    delete next.codexHome
+    delete next.codexAccountId
+    delete next.context
+  }
+  if (ev.codexHome && ev.verified) {
+    next.codexHome = ev.codexHome
+    next.codexAccountId = ev.codexAccountId ?? null
+  }
   if (ev.sessionId) next.sessionId = ev.sessionId
   // The observed Claude account is identity too, and follows the same rule as `agentId`: written
-  // by any event that carries one, never cleared by one that does not. Only claude events carry it
+  // by any event that carries one, retained within that provider/session only. Claude events carry it
   // (hook-server), and a claude session's config dir is fixed for the life of the process — an
   // event without the label is a codex/gemini event or a payload with no transcript_path, neither
   // of which is evidence that this node stopped being on the account it was last seen on.
@@ -526,6 +563,12 @@ export function buildFile(
     // Undefined fields drop out of JSON.stringify — an idle node keeps agentId/sessionId
     // without a `state` key.
     out.nodes[id] = {
+      ...(e.agentId === 'codex' ? {
+        codexHome: e.codexHome, codexAccountId: e.codexAccountId,
+        lastActivityAt: e.lastActivityAt, stateSource: e.stateSource,
+        context: e.context, stateVerified: e.stateVerified,
+        restored: e.restored, idleInferred: e.idleInferred, clientRevision: e.clientRevision
+      } : {}),
       state: e.state,
       agentId: e.agentId,
       sessionId: e.sessionId,
@@ -1169,11 +1212,12 @@ function loadPersisted(file: string): void {
           ...(isObservedAccount(e.account) ? { account: e.account } : {}),
           ...(e.name ? { name: e.name } : {}),
           updatedAt,
-          // Marked, and FORCED unverified whatever the file said. `buildFile` writes neither field
-          // — it is an allowlist, which is what keeps `stateVerified` off disk — but a file this
+          // Marked, and FORCED unverified whatever the file said. Codex exports proof as telemetry,
+          // never as restart authority. A file this
           // process did not write (hand-edited, downgraded, or from a future build) must not be
           // able to hand gate 2 a proof nothing presented this run. See `restored`.
           restored: true,
+          ...(e.agentId === 'codex' ? { stateSource: 'restored' as const } : {}),
           stateVerified: false
         })
       }
@@ -1574,6 +1618,17 @@ export function recordContextUsage(nodeId: string, percent: number): void {
   scheduleWrite()
 }
 
+/** Context is telemetry, never a warmth or idle-proof assertion. Only an exact bound session updates it. */
+export function recordCodexContext(nodeId: string, payload: unknown, now = Date.now()): void {
+  const e = state.get(nodeId)
+  const p = payload as { sessionId?: string; usedTokens?: number; windowTokens?: number; model?: string }
+  if (e?.agentId !== 'codex' || !e.codexHome || e.sessionId !== p.sessionId ||
+      !Number.isFinite(p.usedTokens) || (p.usedTokens ?? 0) <= 0) return
+  e.context = { usedTokens: p.usedTokens!, windowTokens: Number.isFinite(p.windowTokens) &&
+    (p.windowTokens ?? 0) > 0 ? p.windowTokens! : null, model: p.model, updatedAt: now }
+  scheduleWrite()
+}
+
 /**
  * Remove a node (call on permanent destroy — the `×`/delete path, NOT an unmount, park, offscreen
  * release or detach: those all leave the tmux session running and the node's status live). Its
@@ -1805,7 +1860,7 @@ export function sweepStaleWorking(
   const swept: string[] = []
   for (const [nodeId, e] of state) {
     if (!isStaleWorking(e.state, e.updatedAt, now, staleMs)) continue
-    state.set(nodeId, { ...e, state: 'done' })
+    state.set(nodeId, { ...e, state: 'done', ...(e.agentId === 'codex' ? { stateSource: 'stale', stateVerified: false } : {}) })
     clearActivity(nodeId, now)
     swept.push(nodeId)
     fireNodeStateChange({

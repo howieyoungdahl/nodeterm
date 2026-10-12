@@ -515,3 +515,19 @@ complete owner/project/workstream/role metadata and exact matching creation key
 before POST, then require the authenticated read-only creation capability and
 truthful receipt publication guarantee. Manual browser creation uses its ordinary
 workspace/terminal path. Never infer task/creator evidence or backfill legacy cards.
+
+### Codex local home routing and external status
+
+Canvas launches that select another Codex home must use a launcher advertising
+`nodeterm-codex-home-routing-v1`. Authenticated start/bind requests carry `codexHome`,
+validated against the host primary home, `~/.codex-2`, or the requested managed
+account's deterministic home. `local-home-2` is reserved for the second local login.
+The broker uses that home's socket and signed record scope. A bare remote TUI that
+was never bound cannot be adopted from cwd, recency, shared daemon PID, or neighboring
+rollout metadata. Existing sessions stay unknown until exact ownership is established.
+
+The mirror's additive Codex fields report exact home/account, activity, context and
+state provenance. `stateVerified` is telemetry from this server run, and is forced
+false with `stateSource: restored` on reload. `stateSource: stale` marks the quiet-time
+synthetic done transition. Context publication time never warms a target. The separate
+mobile consumer can ignore these optional fields; it must not turn them into authority.

@@ -31,6 +31,9 @@ export interface NormalizedAgentEvent {
    * copied into normalized state, mirrors, or logs. */
   submittedPromptSha256?: string
   sessionId?: string
+  /** Exact signed Codex binding, supplied only by the verified hook server. */
+  codexHome?: string
+  codexAccountId?: string | null
   lastMessage?: string
   // blocked (Claude PermissionRequest) only: the deterministic-approval ticket the managed hook
   // generated and is polling for an answer file. Rides from the raw POST body's
