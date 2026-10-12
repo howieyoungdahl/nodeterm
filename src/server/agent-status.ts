@@ -1,3 +1,4 @@
+import { isBoundCodexTranscript } from '../core/codex-home-routing'
 // Server-side agent-status wiring: a faithful transcription of the LOCAL (non-SSH) branch of
 // the hook-wiring block in `src/main/index.ts`, with the Electron seams swapped for the
 // headless server platform. Installs the hook server's normalized + raw listeners so agent
@@ -11,6 +12,7 @@ import { resolve } from 'path'
 import { homedir } from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { recordAgentEvent, recordRawToolEvent, recordContextUsage,
+  recordCodexContext,
   nodeState
 } from '../core/agent-status-mirror'
 import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
@@ -139,6 +141,7 @@ export function wireAgentStatus(
     for (const [nid, sid] of nodeContextSession) {
       if (sid === cw.sessionId && typeof cw.usedPercent === 'number') {
         recordContextUsage(nid, cw.usedPercent)
+        recordCodexContext(nid, payload)
         break
       }
     }
@@ -175,9 +178,10 @@ export function wireAgentStatus(
   // `~/.claude/projects` OR a managed account's `{userData}/claude-accounts/<id>/projects`
   // (id-validated so a forged POST can't traverse out — see isSafeLocalTranscriptPath). Jail
   // transcript_path to those roots and skip the read otherwise.
-  const safeTranscriptPath = (tp: unknown): string | undefined => {
+  const safeTranscriptPath = (tp: unknown, nodeId?: string, sessionId?: unknown): string | undefined => {
     if (typeof tp !== 'string' || !tp) return undefined
     const abs = resolve(tp)
+    if (nodeId && isBoundCodexTranscript(nodeId, sessionId, abs)) return abs
     // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
     // before) would otherwise fail the jail and its meter would silently never fill.
     // Linked accounts' dirs come from SETTINGS, never from the POST — `<dir>/projects/**` only,
@@ -202,7 +206,7 @@ export function wireAgentStatus(
     // Do this before any tail/mirror work can throw and before SessionStart rotates through
     // the UI listener. Child rollout metadata must never attach to the parent session.
     opts.onSessionHook?.(agentId, nodeId, payload, meta.verified,
-      agentId === 'codex' && payload.agent_id !== undefined ? undefined : safeTranscriptPath(payload.transcript_path))
+      agentId === 'codex' && payload.agent_id !== undefined ? undefined : safeTranscriptPath(payload.transcript_path, nodeId, payload.session_id))
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.
       // Everything the claude path does below hangs off `transcript_path`, and grok has none.
@@ -276,7 +280,7 @@ export function wireAgentStatus(
         }
         return
       }
-      const transcriptPath = safeTranscriptPath(p.transcript_path)
+      const transcriptPath = safeTranscriptPath(p.transcript_path, nodeId, p.session_id)
       if (meta.verified && nodeId && p.session_id && transcriptPath)
         opts.onTranscript?.(agentId, nodeId, p.session_id, transcriptPath)
       const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
@@ -304,7 +308,7 @@ export function wireAgentStatus(
     // An async subagent's PostToolUse is only the launch ack — keep tailing its transcript;
     // the real end (task-notification via the context tail) releases it.
     const asyncLaunch = p.hook_event_name === 'PostToolUse' && isAsyncSubagentLaunch(p.tool_response)
-    const transcriptPath = safeTranscriptPath(p.transcript_path)
+    const transcriptPath = safeTranscriptPath(p.transcript_path, nodeId, p.session_id)
     if (meta.verified && nodeId && p.session_id && transcriptPath)
       opts.onTranscript?.(agentId, nodeId, p.session_id, transcriptPath)
     // Context-window meter: tail the session transcript (any event carrying both fields).

@@ -1,3 +1,4 @@
+import { LOCAL_SECOND_CODEX_SCOPE } from '../shared/codex-account'
 /**
  * POSIX-sh identity prelude shared by local commands and managed hooks.
  *
@@ -61,7 +62,9 @@ if [ -n "\${CODEX_THREAD_ID-}" ]; then
     case "$1" in /|[!/]*) return 1 ;; /*) ;; *) return 1 ;; esac
     [ "$(printf %s "$1" | tr -cd 'A-Za-z0-9._/ -')" = "$1" ]
   }
+  # The local-login namespace is disjoint from the unchanged managed account alphabet.
   nt_codex_safe_account() {
+    [ "$1" = "${LOCAL_SECOND_CODEX_SCOPE}" ] && return 0
     case "$1" in ''|system|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;; esac
   }
   nt_codex_safe_id "$CODEX_THREAD_ID" || nt_codex_refuse invalid-thread-id

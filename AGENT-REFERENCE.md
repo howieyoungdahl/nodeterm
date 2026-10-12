@@ -3003,3 +3003,26 @@ acknowledgment before save/spawn, without claiming directory/power-loss durabili
 Linux receipts retain directory sync. Receipt capabilities are read-only and explicit;
 Windows, copied and unconfirmed receipts never enroll Linux automatic cleanup.
 Windows retained archive/undo refuses before receipt preparation or file enrollment.
+
+### Codex two-home supervision contract
+
+The launcher advertises `nodeterm-codex-home-routing-v1`, resets stale primary/secondary
+scope hints, and posts its explicit CODEX_HOME to authenticated start/bind. The broker
+selects the matching control socket, not its ambient server account. Primary and second
+local homes resolve to system and separate `@local-home-2` signed scopes; arbitrary
+caller-supplied filesystem roots are refused. Bound second-home rollouts widen the
+transcript jail only for the exact signed node/thread and matching rollout filename.
+Both shell listeners feed additive Codex mirror context metadata.
+
+The disk mirror publishes Codex `codexHome`, `codexAccountId`, `lastActivityAt`,
+`context`, `stateVerified`, `clientRevision`, `stateSource`, `restored`, and
+`idleInferred` when known. Hook activity and context clocks remain separate. Reload
+never restores proof, home or context authority, and quiet-time done is labeled stale.
+An account label inherited from a different provider/session is cleared. Missing
+Codex binding metadata is unknown, not an idle target or the most recent rollout.
+
+Local experimental protocol schemas expose remote-control client IDs/device labels
+and loaded thread IDs, but the inspected schemas have no local TUI PID or Nodeterm
+node association. UserMessage clientId alone does not bind that client to a local
+process. Activation cannot retroactively invent ownership for pre-existing bare
+remote TUIs. An explicit, independently established thread ID is required to bind.

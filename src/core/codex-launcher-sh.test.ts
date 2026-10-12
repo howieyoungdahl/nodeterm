@@ -14,6 +14,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { createHmac, randomBytes } from 'node:crypto'
+import { codexHomeFor } from './codex-config-dir'
 import { buildCodexLauncherScript } from './codex-identity-proxy'
 import { hookServer } from './agents/hook-server'
 import { nodeAuthKid, nodeAuthToken } from './agents/node-auth-token'
@@ -44,6 +45,7 @@ let started: Array<{
 }> = []
 let bound: Array<{ nodeId: string; threadId: string; accountId?: string }> = []
 let fallbacks: Array<{ nodeId: string; reason?: string }> = []
+let routedHome: string | undefined
 let startAnswer: (() => string) | null = null
 let startDelayMs = 0
 let bindAnswer: (() => void) | null = null
@@ -71,7 +73,8 @@ beforeAll(async () => {
   fs.writeFileSync(launcher, buildCodexLauncherScript('true', 'false'), { mode: 0o755 })
   await hookServer.start()
   hookServer.setNodeAuthSecret(SECRET)
-  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, accountId, permissions }) => {
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, accountId, codexHome, permissions }) => {
+    routedHome = codexHome
     started.push({ nodeId, cwd, accountId, permissions })
     if (startDelayMs) await new Promise((r) => setTimeout(r, startDelayMs))
     if (!startAnswer) throw new Error('start refused')
@@ -137,7 +140,13 @@ function callLauncher(
 ): Promise<{ stdout: string; stderr: string }> {
   const merged = { ...baseEnv(), ...env }
   for (const [k, v] of Object.entries(merged)) if (v === '') delete (merged as any)[k]
-  return run('/bin/sh', [script, ...args], { env: merged, cwd: dir })
+  // Relocated-home fixtures are the broker's trusted primary home for this invocation.
+  const previous = process.env.CODEX_HOME
+  if (env.CODEX_HOME) process.env.CODEX_HOME = env.CODEX_HOME
+  return run('/bin/sh', [script, ...args], { env: merged, cwd: dir }).finally(() => {
+    if (previous === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = previous
+  })
 }
 
 /** What the fake `codex` was exec'd with, one line per invocation. */
@@ -802,5 +811,40 @@ describe('per-node capability (the authorization the shared bearer cannot give)'
     expect(bound).toEqual([])
     expect(codexArgv()).toEqual(['resume thread-xyz'])
     expect(fallbacks).toEqual([{ nodeId: 'node-1', reason: 'thread-bind-refused' }])
+  })
+})
+
+
+describe('home-aware Codex launcher contract', () => {
+  it.each(['.codex', '.codex-2'])('starts and binds the selected %s home without inheriting the old scope', async (leaf) => {
+    const home = path.join(os.homedir(), leaf)
+    await callLauncher([], { HOME: os.homedir(), CODEX_HOME: home, NODETERM_CODEX_ACCOUNT_ID: 'old-account' })
+    expect(routedHome).toBe(home)
+    expect(started[0].accountId).toBe(leaf === '.codex-2' ? '@local-home-2' : undefined)
+    expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc'])
+    expect(fallbacks).toEqual([])
+    await callLauncher(['resume', 'thread-known'], { HOME: os.homedir(), CODEX_HOME: home, NODETERM_CODEX_ACCOUNT_ID: 'old-account' })
+    expect(bound[0].accountId).toBe(leaf === '.codex-2' ? '@local-home-2' : undefined)
+    expect(codexArgv()[1]).toBe('--remote unix:// resume thread-known')
+  })
+})
+
+
+describe('authenticated home namespace collision', () => {
+  it('starts and binds the valid managed local-home-2 home separately from the second local login', async () => {
+    const managedHome = codexHomeFor('local-home-2')
+    expect(await postCodexThread('start', { nodeId: 'node-1', cwd: dir, accountId: 'local-home-2', codexHome: managedHome })).toBe(200)
+    expect(started[0].accountId).toBe('local-home-2')
+    expect(routedHome).toBe(managedHome)
+    expect(await postCodexThread('bind', { nodeId: 'node-1', threadId: 'thread-known', accountId: 'local-home-2', codexHome: managedHome })).toBe(204)
+    expect(bound[0].accountId).toBe('local-home-2')
+    const secondary = path.join(os.homedir(), '.codex-2')
+    expect(await postCodexThread('start', { nodeId: 'node-1', cwd: dir, accountId: '@local-home-2', codexHome: secondary })).toBe(200)
+    expect(started[1].accountId).toBe('@local-home-2')
+    expect(routedHome).toBe(secondary)
+    expect(await postCodexThread('bind', { nodeId: 'node-1', threadId: 'local-thread', accountId: '@local-home-2', codexHome: secondary })).toBe(204)
+    expect(bound[1].accountId).toBe('@local-home-2')
+    expect(await postCodexThread('start', { nodeId: 'node-1', cwd: dir, accountId: '@local-home-2', codexHome: managedHome })).toBe(400)
+    expect(started).toHaveLength(2)
   })
 })

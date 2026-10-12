@@ -14,9 +14,10 @@ import type { CodexIdentityEvent, ObservedClaudeAccount } from '../../shared/typ
 import type { NodeTokenVerdict } from './node-auth-token'
 import { nodeTokenDir } from './node-token-files'
 import { isForeignKidToken, isSafeNodeId, verifyNodeToken } from './node-auth-token'
+import { observedCodexHome, resolveCodexHomeRouting } from '../codex-home-routing'
 import { isSafeThreadId } from '../codex-identity-proxy'
 import { parseCodexThreadPermissions, type CodexThreadPermissions } from '../codex-session-name'
-import { isSafeAccountId } from '../../shared/codex-account'
+import { isSafeCodexRecordScope } from '../../shared/codex-account'
 import {
   controlPolicy,
   CONTEXT_LINK_POLICY_VERB,
@@ -323,6 +324,7 @@ class HookServer {
         cwd: string
         hookEndpoint: string
         accountId?: string
+        codexHome?: string
         /** The policy the thread is born with — see `CodexThreadPermissions` for why it is not argv. */
         permissions?: CodexThreadPermissions
       }) => Promise<string>)
@@ -333,6 +335,7 @@ class HookServer {
         threadId: string
         hookEndpoint: string
         accountId?: string
+        codexHome?: string
       }) => Promise<void>)
     | null = null
   private codexIdentityListener: ((e: CodexIdentityEvent) => void) | null = null
@@ -766,6 +769,7 @@ class HookServer {
           // dir for claude alone (codex rollouts and gemini chats live in unrelated trees, and
           // those agents have their own identity spine).
           const account = observedClaudeAccount(agentId, payload)
+          const codex = verified && agentId === 'codex' ? observedCodexHome(nodeId, payload.session_id) : undefined
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
           const cleanupProcess = verified && clientRevision !== undefined && clientRevision >= 6 &&
             validCleanupProcess(form.nodeterm_cleanup_process) ? form.nodeterm_cleanup_process : undefined
@@ -774,7 +778,7 @@ class HookServer {
             ? createHash('sha256').update(submittedPromptForHash(agentId, payload.prompt).replace(/\r\n/g, '\n')).digest('hex')
             : undefined
           if (normalized && this.listener)
-            this.listener({ ...normalized, verified, clientRevision, ...(cleanupProcess ? { cleanupProcess } : {}),
+            this.listener({ ...normalized, verified, clientRevision, ...(codex ? { codexHome: codex.home, codexAccountId: codex.accountId ?? null } : {}), ...(cleanupProcess ? { cleanupProcess } : {}),
               ...(submittedPromptSha256 ? { submittedPromptSha256 } : {}), ...(account ? { account } : {}) })
         }
         res.writeHead(204)
@@ -1005,12 +1009,15 @@ class HookServer {
     // where it would become a directory component (Supply-chain guard, Constraint 7). Both routes
     // share the same normalisation so a managed thread is never mis-filed under `system`.
     const rawAccountId = form.accountId ?? ''
-    if (rawAccountId !== '' && !isSafeAccountId(rawAccountId)) {
+    if (rawAccountId !== '' && !isSafeCodexRecordScope(rawAccountId)) {
       res.writeHead(400)
       res.end()
       return
     }
-    const accountId = rawAccountId || undefined
+    let routing: ReturnType<typeof resolveCodexHomeRouting>
+    try { routing = resolveCodexHomeRouting(form.codexHome, rawAccountId || undefined) }
+    catch { res.writeHead(400); res.end(); return }
+    const accountId = routing.accountId
     if (verb === 'start') {
       const cwd = form.cwd ?? ''
       if (!path.isAbsolute(cwd)) {
@@ -1037,6 +1044,7 @@ class HookServer {
           cwd,
           hookEndpoint: this.endpointFilePath(),
           accountId,
+          codexHome: routing.home,
           permissions
         })
         // Same predicate the record store gates on, so a thread id the store would refuse can
@@ -1066,7 +1074,8 @@ class HookServer {
         nodeId,
         threadId,
         hookEndpoint: this.endpointFilePath(),
-        accountId
+        accountId,
+        codexHome: routing.home
       })
       this.codexIdentityListener?.({ nodeId, mode: 'shared' })
       res.writeHead(204)

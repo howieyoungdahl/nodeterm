@@ -39,3 +39,9 @@ export const ACCOUNT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 export function isSafeAccountId(id: string): boolean {
   return typeof id === 'string' && ACCOUNT_ID_RE.test(id)
 }
+
+/** Local login records use a namespace no valid managed account can occupy. */
+export const LOCAL_SECOND_CODEX_SCOPE = '@local-home-2'
+export function isSafeCodexRecordScope(scope: string): boolean {
+  return scope === LOCAL_SECOND_CODEX_SCOPE || isSafeAccountId(scope)
+}
