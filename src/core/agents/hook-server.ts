@@ -17,7 +17,7 @@ import { isForeignKidToken, isSafeNodeId, verifyNodeToken } from './node-auth-to
 import { observedCodexHome, resolveCodexHomeRouting } from '../codex-home-routing'
 import { isSafeThreadId } from '../codex-identity-proxy'
 import { parseCodexThreadPermissions, type CodexThreadPermissions } from '../codex-session-name'
-import { isSafeAccountId } from '../../shared/codex-account'
+import { isSafeCodexRecordScope } from '../../shared/codex-account'
 import {
   controlPolicy,
   CONTEXT_LINK_POLICY_VERB,
@@ -1009,7 +1009,7 @@ class HookServer {
     // where it would become a directory component (Supply-chain guard, Constraint 7). Both routes
     // share the same normalisation so a managed thread is never mis-filed under `system`.
     const rawAccountId = form.accountId ?? ''
-    if (rawAccountId !== '' && !isSafeAccountId(rawAccountId)) {
+    if (rawAccountId !== '' && !isSafeCodexRecordScope(rawAccountId)) {
       res.writeHead(400)
       res.end()
       return

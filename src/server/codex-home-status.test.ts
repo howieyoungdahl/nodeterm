@@ -29,7 +29,7 @@ afterEach(() => {
 })
 
 describe('disposable Server Codex home/status/context lifecycle', () => {
-  it.each([undefined, 'local-home-2'])('authenticates and meters exact home %s while preserving waiting/done proof', async (scope) => {
+  it.each([undefined, '@local-home-2'])('authenticates and meters exact home %s while preserving waiting/done proof', async (scope) => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-codex-status-'))
     sandbox.home = path.join(dir, 'home')
     vi.stubEnv('CODEX_HOME', path.join(sandbox.home, '.codex'))

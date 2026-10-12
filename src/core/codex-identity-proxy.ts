@@ -40,7 +40,7 @@ import path from 'path'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { renameAtomicSync } from './fs-atomic'
 import { platform } from './platform'
-import { ACCOUNT_ID_RE, isSafeAccountId } from '../shared/codex-account'
+import { ACCOUNT_ID_RE, isSafeCodexRecordScope, LOCAL_SECOND_CODEX_SCOPE } from '../shared/codex-account'
 
 /**
  * The scope string for the SYSTEM account (`~/.codex`, no managed id). Empty/undefined account ids
@@ -60,11 +60,12 @@ export const SAFE_ACCOUNT_ID = ACCOUNT_ID_RE
  * THROWS on an id that could escape the mapping directory (`..`, `a/b`, `/abs`, whitespace) — the
  * supply-chain guard, since account ids arrive from hand-editable `settings.json` / `project.json`.
  * A literal id of `system` is refused so the reserved bare-root scope can never be impersonated by
- * a managed subdirectory.
+ * a managed subdirectory. The exact @local-home-2 namespace is accepted as a record scope only;
+ * it remains invalid as a managed account id, keeping every existing managed scope unchanged.
  */
 export function accountScope(accountId?: string): string {
   if (!accountId) return SYSTEM_ACCOUNT_SCOPE
-  if (accountId === SYSTEM_ACCOUNT_SCOPE || !isSafeAccountId(accountId)) {
+  if (accountId === SYSTEM_ACCOUNT_SCOPE || !isSafeCodexRecordScope(accountId)) {
     throw new Error('Invalid NodeTerm Codex account scope')
   }
   return accountId
@@ -274,7 +275,7 @@ export function readIdentityCandidate(
 ): CodexThreadIdentity | undefined {
   if (!isSafeThreadId(threadId)) return undefined
   const norm = scope || SYSTEM_ACCOUNT_SCOPE
-  if (norm !== SYSTEM_ACCOUNT_SCOPE && !isSafeAccountId(norm)) return undefined
+  if (norm !== SYSTEM_ACCOUNT_SCOPE && !isSafeCodexRecordScope(norm)) return undefined
   let raw: string
   try {
     raw = readFileSync(recordFilePath(root, norm, threadId), 'utf8')
@@ -311,7 +312,7 @@ export function identityCandidates(
   }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    if (entry.name === SYSTEM_ACCOUNT_SCOPE || !isSafeAccountId(entry.name)) continue
+    if (entry.name === SYSTEM_ACCOUNT_SCOPE || !isSafeCodexRecordScope(entry.name)) continue
     const identity = readIdentityCandidate(threadId, entry.name, root)
     if (identity) out.push({ scope: entry.name, identity })
   }
@@ -487,7 +488,7 @@ export function forgetCodexThreadIdentitiesForNode(
   }
   for (const entry of scopes) {
     if (!entry.isDirectory()) continue
-    if (entry.name === SYSTEM_ACCOUNT_SCOPE || !isSafeAccountId(entry.name)) continue
+    if (entry.name === SYSTEM_ACCOUNT_SCOPE || !isSafeCodexRecordScope(entry.name)) continue
     forgetInScope(entry.name, path.join(root, entry.name))
   }
 }
@@ -537,7 +538,7 @@ export function buildCodexLauncherScript(
 # Explicit primary/secondary selection replaces stale inherited scope hints.
 case "\${CODEX_HOME-}" in
   "$HOME/.codex") NODETERM_CODEX_ACCOUNT_ID='' ;;
-  "$HOME/.codex-2") NODETERM_CODEX_ACCOUNT_ID=local-home-2 ;;
+  "$HOME/.codex-2") NODETERM_CODEX_ACCOUNT_ID=${LOCAL_SECOND_CODEX_SCOPE} ;;
 esac
 export NODETERM_CODEX_ACCOUNT_ID
 nt_reason=''
@@ -696,7 +697,7 @@ nt_preflight() {
   # falls back to plain codex rather than binding a thread under an attacker-shaped scope; the id
   # travels in the request body, never on argv (Constraint 6).
   case "\${NODETERM_CODEX_ACCOUNT_ID-}" in
-    '') ;;
+    ''|${LOCAL_SECOND_CODEX_SCOPE}) ;;
     [!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) nt_fail codex-account-invalid; return ;;
   esac
   # The authoritative check runs FIRST and unchanged; the stat below only decides WHICH reason to

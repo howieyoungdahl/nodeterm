@@ -3005,7 +3005,7 @@ Windows retained archive/undo refuses before receipt preparation or file enrollm
 The launcher advertises `nodeterm-codex-home-routing-v1`, resets stale primary/secondary
 scope hints, and posts its explicit CODEX_HOME to authenticated start/bind. The broker
 selects the matching control socket, not its ambient server account. Primary and second
-local homes resolve to system and reserved `local-home-2` signed scopes; arbitrary
+local homes resolve to system and separate `@local-home-2` signed scopes; arbitrary
 caller-supplied filesystem roots are refused. Bound second-home rollouts widen the
 transcript jail only for the exact signed node/thread and matching rollout filename.
 Both shell listeners feed additive Codex mirror context metadata.

@@ -14,6 +14,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { createHmac, randomBytes } from 'node:crypto'
+import { codexHomeFor } from './codex-config-dir'
 import { buildCodexLauncherScript } from './codex-identity-proxy'
 import { hookServer } from './agents/hook-server'
 import { nodeAuthKid, nodeAuthToken } from './agents/node-auth-token'
@@ -819,11 +820,31 @@ describe('home-aware Codex launcher contract', () => {
     const home = path.join(os.homedir(), leaf)
     await callLauncher([], { HOME: os.homedir(), CODEX_HOME: home, NODETERM_CODEX_ACCOUNT_ID: 'old-account' })
     expect(routedHome).toBe(home)
-    expect(started[0].accountId).toBe(leaf === '.codex-2' ? 'local-home-2' : undefined)
+    expect(started[0].accountId).toBe(leaf === '.codex-2' ? '@local-home-2' : undefined)
     expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc'])
     expect(fallbacks).toEqual([])
     await callLauncher(['resume', 'thread-known'], { HOME: os.homedir(), CODEX_HOME: home, NODETERM_CODEX_ACCOUNT_ID: 'old-account' })
-    expect(bound[0].accountId).toBe(leaf === '.codex-2' ? 'local-home-2' : undefined)
+    expect(bound[0].accountId).toBe(leaf === '.codex-2' ? '@local-home-2' : undefined)
     expect(codexArgv()[1]).toBe('--remote unix:// resume thread-known')
+  })
+})
+
+
+describe('authenticated home namespace collision', () => {
+  it('starts and binds the valid managed local-home-2 home separately from the second local login', async () => {
+    const managedHome = codexHomeFor('local-home-2')
+    expect(await postCodexThread('start', { nodeId: 'node-1', cwd: dir, accountId: 'local-home-2', codexHome: managedHome })).toBe(200)
+    expect(started[0].accountId).toBe('local-home-2')
+    expect(routedHome).toBe(managedHome)
+    expect(await postCodexThread('bind', { nodeId: 'node-1', threadId: 'thread-known', accountId: 'local-home-2', codexHome: managedHome })).toBe(204)
+    expect(bound[0].accountId).toBe('local-home-2')
+    const secondary = path.join(os.homedir(), '.codex-2')
+    expect(await postCodexThread('start', { nodeId: 'node-1', cwd: dir, accountId: '@local-home-2', codexHome: secondary })).toBe(200)
+    expect(started[1].accountId).toBe('@local-home-2')
+    expect(routedHome).toBe(secondary)
+    expect(await postCodexThread('bind', { nodeId: 'node-1', threadId: 'local-thread', accountId: '@local-home-2', codexHome: secondary })).toBe(204)
+    expect(bound[1].accountId).toBe('@local-home-2')
+    expect(await postCodexThread('start', { nodeId: 'node-1', cwd: dir, accountId: '@local-home-2', codexHome: managedHome })).toBe(400)
+    expect(started).toHaveLength(2)
   })
 })

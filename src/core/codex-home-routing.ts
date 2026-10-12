@@ -2,10 +2,11 @@ import path from 'path'
 import { homedir } from 'os'
 import { codexHome } from './usage/codex-usage'
 import { codexHomeFor } from './codex-config-dir'
+import { LOCAL_SECOND_CODEX_SCOPE } from '../shared/codex-account'
 import { identityCandidates } from './codex-identity-proxy'
 
 /** Reserved record scope for the operator's second local login, never a guessed account. */
-export const SECOND_CODEX_HOME_SCOPE = 'local-home-2'
+export const SECOND_CODEX_HOME_SCOPE = LOCAL_SECOND_CODEX_SCOPE
 
 export function resolveCodexHomeRouting(requested?: string, accountId?: string): {
   home: string; accountId?: string; socket: string

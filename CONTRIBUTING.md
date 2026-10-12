@@ -521,7 +521,7 @@ workspace/terminal path. Never infer task/creator evidence or backfill legacy ca
 Canvas launches that select another Codex home must use a launcher advertising
 `nodeterm-codex-home-routing-v1`. Authenticated start/bind requests carry `codexHome`,
 validated against the host primary home, `~/.codex-2`, or the requested managed
-account's deterministic home. `local-home-2` is reserved for the second local login.
+account's deterministic home. `@local-home-2` is the second local login record namespace and is not a valid managed account ID. The valid managed ID `local-home-2` retains its own deterministic home and records.
 The broker uses that home's socket and signed record scope. A bare remote TUI that
 was never bound cannot be adopted from cwd, recency, shared daemon PID, or neighboring
 rollout metadata. Existing sessions stay unknown until exact ownership is established.

@@ -452,6 +452,10 @@ export function reduceEntry(
     delete next.context
   }
   if (ev.codexHome && ev.verified) {
+    if (ev.codexHome !== prev?.codexHome) {
+      delete next.context
+      delete next.lastActivityAt
+    }
     next.codexHome = ev.codexHome
     next.codexAccountId = ev.codexAccountId ?? null
   }

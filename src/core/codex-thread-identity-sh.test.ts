@@ -281,3 +281,15 @@ describe('Codex ambient context precedence', () => {
     await refused(complete(), 'invalid-binding')
   })
 })
+
+
+describe('local login versus managed collision resolver parity', () => {
+  it('keeps a managed local-home-2 record separate from @local-home-2 under real /bin/sh', async () => {
+    scopedRecord('local-home-2', 'thread-1', body('managed-node', 'local-home-2'))
+    scopedRecord('@local-home-2', 'thread-1', body('secondary-node', '@local-home-2'))
+    expect(await resolve({ CODEX_THREAD_ID: 'thread-1', NODETERM_CODEX_ACCOUNT_ID: 'local-home-2' })).toBe(`managed-node|${dir}/hook-endpoint.env|1`)
+    expect(await resolve({ CODEX_THREAD_ID: 'thread-1', NODETERM_CODEX_ACCOUNT_ID: '@local-home-2' })).toBe(`secondary-node|${dir}/hook-endpoint.env|1`)
+    await refused({ CODEX_THREAD_ID: 'thread-1' }, 'ambiguous-binding')
+    await refused({ CODEX_THREAD_ID: 'thread-1', NODETERM_CODEX_ACCOUNT_ID: '@local-home-2/evil' }, 'invalid-account-scope')
+  })
+})
