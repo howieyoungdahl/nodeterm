@@ -178,6 +178,12 @@ adding terminal-session features, extend the interface — do not reach around i
 
 ## State & persistence model
 
+Automatic worker layout triggers are retired. Only an explicit `organize` request can reach
+the layout service; the renderer previews it and applies after confirmation. Existing
+`canvasLayout.enabled` settings enable that manual command, never background sorting.
+Legacy trigger values remain readable as data, but the service refuses them before lease I/O.
+
+
 Workspace saves report partial local-project write failures after saving the remaining projects
 and index. A successful index write alone is not proof that the canvas reached disk. The renderer's
 `useSavePersistence` and `useAutosave` hooks retain failed delivery state and schedule five bounded
@@ -1401,9 +1407,9 @@ else, and its context links must keep classifying across restarts).
     sweeps and the renderer use this reader, so automatic names also reach the mobile mirror.
   - **Header readability:** canvas terminals and board modals reserve a title row above a wrapping
     metadata/actions toolbar. Collapsed terminal cards hide the toolbar and retain title/close
-    within their existing 40px height. Automatic worker organization is exposed in the canvas menu
+    within their existing 40px height. Explicit worker organization is exposed in the canvas menu
     and command palette as well as Behavior settings; its machine-local opt-in and placement guards
-    are unchanged. Semantic topic grouping remains operator/supervisor work.
+    remain in force. Semantic topic grouping remains operator/supervisor work.
 - **Search** — the command palette (⌘K) matches the session name + tags + `nt-<id>` in the
   hint, and substring-searches each terminal's **visible buffer** (captured via `pty.capture`
   on palette open, cached ~3s); content matches show "found in output".
@@ -1615,9 +1621,9 @@ else, and its context links must keep classifying across restarts).
   never a guessed version floor or a launch with an unknown flag. The optional name is normalized
   to one line and shell-quoted by the shared command assembler. Desktop canvas control refuses the
   Server-only flag explicitly; `/rc [name]` inside an ordinary Claude session is the manual path.
-  **Automatic layout is a SEPARATE authority from creator ownership, and it is a narrower one**
+  **Worker layout is a SEPARATE authority from creator ownership, and it is a narrower one**
   (`src/core/canvas-layout/`, opt-in, default off). Creator ownership answers "may this caller
-  mutate that node"; the layout engine additionally asks "should anything automatic move it at
+  mutate that node"; the layout engine additionally asks "should this explicit organization request move it at
   all", and the second question has more ways to answer no. `plan(input) -> {ops, skipped}` is
   pure — no clock, no store, no filesystem — and every node it declines is reported with a reason
   (`@shared/canvas-layout`): `pinned`, `manual-placement`, `active`, `loop-owned`,
@@ -1667,12 +1673,10 @@ else, and its context links must keep classifying across restarts).
   tray is minted only by the spawn path
   (`@shared/worker-frame`, with its "no frame around a single card" rule) and the engine only ever
   files into one. A second frame-creator is the frame churn this design was written to avoid.
-  **Nothing runs on a timer.** The triggers are `node-created` (placement happens once, at birth),
-  `status-changed` (whose only rule, `tray.floatOnAttention` — a blocked or failed member leaves a
-  closed tray so its approval stays reachable — is dormant while no frame closes), `rules-changed`, and an explicit
-  `organize`. Automatic triggers apply straight away, narrow by construction, reversible by ONE
-  ⌘Z (`commitAsSingleUndoEntry` pushes the pre-apply array itself, because the history stack is
-  debounced and a burst would otherwise cost two undos); the two explicit triggers preview first.
+  **Nothing runs automatically.** Creation, status and rule changes no longer request layout.
+  The core service also refuses those retired triggers from older tabs before lease I/O. Only
+  an explicit `organize` command previews a plan and applies after confirmation, reversible by
+  one ⌘Z (`commitAsSingleUndoEntry` pushes the pre-apply array itself).
   `LayoutTriggerQueue` coalesces triggers received during a plan instead of dropping them. Each
   request carries its project identity; a late plan or preview cannot apply to a different project.
   Cleanup reads the lease actually held at unmount, not a stale effect-time snapshot.
