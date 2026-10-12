@@ -861,18 +861,6 @@ export function Canvas() {
   // `nodeterm` CLI (see the onAgentControl effect) and from browser popups to their opener.
   // Merged only at the <ReactFlow> prop and never turned into context links, but PERSISTED
   // per project (`ropes`) so the lineage survives restarts; deletable like a context link.
-  /**
-   * The layout engine's entry point, published through a ref.
-   *
-   * The two `node-created` sites sit far above the callback's own declaration (one is the
-   * server-change merge, one is the desktop control-spawn path), and both fire from inside a
-   * `setNodes`/subscription closure rather than from a render. A ref is what lets them reach the
-   * current callback without either of them re-subscribing on every canvas change — the same
-   * shape `visibilityReportRef` uses in TerminalNode for the same reason.
-   */
-  const runLayoutTriggerRef = useRef<
-    ((trigger: LayoutTrigger, createdIds?: string[]) => Promise<void>) | null
-  >(null)
   const [controlEdges, setControlEdges] = useState<Edge[]>([])
   const controlEdgesRef = useRef<Edge[]>([])
   controlEdgesRef.current = controlEdges
@@ -2616,7 +2604,8 @@ export function Canvas() {
           setLinkEdges(nextLinks)
         },
         acknowledge: (projects, revision) => useProjects.setState({ projects, revision }),
-        created: (ids) => void runLayoutTriggerRef.current?.('node-created', ids),
+        // New server cards keep their published placement. Organization requires a command.
+        created: () => {},
         defer: queueMicrotask
       })
       bumpDirty()
@@ -6227,27 +6216,17 @@ export function Canvas() {
   }, [setNodes, markDirty, fitAll])
 
 
-  // ---- automatic canvas layout (core/canvas-layout) -----------------------------------------
+  // ---- explicit worker layout (core/canvas-layout) -----------------------------------------
   //
   // The engine decides; this applies. Everything it can do goes through the same transforms a
-  // hand gesture does (`renderer/lib/layoutPlanApply.ts`), so an automatic placement and a manual
-  // one leave the same canvas — and nothing here touches a PTY.
+  // hand gesture does (`renderer/lib/layoutPlanApply.ts`), so a confirmed organization pass and a hand
+  // gesture leave the same canvas — and nothing here touches a PTY.
   //
-  // TWO PATHS, deliberately different, because a preview is only useful when there is something
-  // to read:
-  //   * `organize` / `rules-changed` — an explicit operator action over the WHOLE canvas. It
-  //     previews as a table (changes AND refusals) and applies only on confirm.
-  //   * `node-created` / `status-changed` — automatic, and narrow by construction: each addresses
-  //     only the node its event was about. A dialog per spawn would make the feature unusable, so
-  //     these apply straight away and are reversible by one ⌘Z, which is the other half of the
-  //     same requirement.
-  //
-  // The whole thing is inert unless `settings.canvasLayout.enabled`; core re-asks that on every
-  // call, so the switch never needs a restart and a stale renderer cannot keep it on.
+  // Organization now runs only from an explicit command, previews the complete plan, and
+  // applies on confirmation. Creation, status and rule changes never rearrange the canvas.
+  // Core enforces the same boundary for older renderer tabs.
 
-  /** Whether the engine may run on this machine. Read through a ref as well, so the automatic
-   *  triggers can ask without re-subscribing every listener on a settings change. Core re-asks
-   *  the same switch on every call — this only avoids the round trip when it is off. */
+  /** Machine-local opt-in for explicit worker organization previews. */
   const layoutEnabled = useSettings((st) => st.settings.canvasLayout?.enabled === true)
   const layoutEnabledRef = useRef(layoutEnabled)
   layoutEnabledRef.current = layoutEnabled
@@ -6354,20 +6333,12 @@ export function Canvas() {
         const api = window.nodeTerminal
         const plan = await api.canvasLayout.plan(buildLayoutRequest(projectId, trigger, createdIds))
         if (plan.stoodDown) {
-          // A stand-down is REPORTED on the path the operator asked for, naming the lease holder
-          // so a second instance can see why it lost rather than guess. On an automatic trigger it
-          // is deliberately quiet: the only reasons reachable there are "the feature is off"
-          // (nothing to say) and "another instance holds the lease" — where the visible result is
-          // an unplaced worker, i.e. exactly the pre-feature behaviour, and a modal on every spawn
-          // would be worse than the thing it reports.
-          if (trigger === 'organize' || trigger === 'rules-changed') {
-            const reason = LAYOUT_STAND_DOWN_LABELS[plan.stoodDown.reason]
-            setConfirm({
-              message: plan.stoodDown.holder ? `${reason} — ${plan.stoodDown.holder}` : reason,
-              alert: true,
-              onConfirm: () => setConfirm(null)
-            })
-          }
+          const reason = LAYOUT_STAND_DOWN_LABELS[plan.stoodDown.reason]
+          setConfirm({
+            message: plan.stoodDown.holder ? `${reason} — ${plan.stoodDown.holder}` : reason,
+            alert: true,
+            onConfirm: () => setConfirm(null)
+          })
           return
         }
         if (!layoutEnabledRef.current || useProjects.getState().activeProjectId !== projectId) {
@@ -6375,10 +6346,6 @@ export function Canvas() {
           return
         }
         layoutLeasedProjectRef.current = projectId
-        if (trigger === 'node-created' || trigger === 'status-changed') {
-          applyLayoutPlanNow(plan)
-          return
-        }
         const titleOf = (id: string): string =>
           nodesRef.current.find((n) => n.id === id)?.data.title || id
         setConfirm({
@@ -6414,45 +6381,9 @@ export function Canvas() {
     await layoutTriggerQueueRef.current!.enqueue({ projectId, trigger, createdIds })
   }, [])
 
-  runLayoutTriggerRef.current = runLayoutTrigger
-
   const organizeCanvas = useCallback(() => {
     void runLayoutTrigger('organize')
   }, [runLayoutTrigger])
-
-  // `status-changed`: the ONE layout consequence of a status change, and it is what makes shipping
-  // a tray closed safe — a member that starts needing the operator leaves the closed frame instead
-  // of waiting inside it. Keyed on a compact SIGNATURE of the attention-needing set, not on the
-  // whole status map: subscribing to `byId` would re-run this on every hook event of every node
-  // (the same discipline `loopSig` and `armedDepSig` document just above).
-  const attentionSig = useAgentStatus((st) => {
-    let sig = ''
-    for (const [id, entry] of Object.entries(st.byId)) {
-      if (entry.state === 'blocked' || entry.failure) sig += `${id}|`
-    }
-    return sig
-  })
-  useEffect(() => {
-    if (!layoutEnabled || !attentionSig) return
-    void runLayoutTriggerRef.current?.('status-changed')
-  }, [attentionSig, layoutEnabled])
-
-  // `rules-changed`: the project's SHARED rule block changed — an agent wrote it, or a git pull
-  // brought someone else's. It is an explicit change to what the engine should do, so it previews
-  // like an organize rather than applying itself. The first observation per project is skipped:
-  // loading a project is not a rule change, and a dialog on every project switch is not a feature.
-  const activeLayoutRules = useProjects((st) =>
-    st.projects.find((p) => p.id === st.activeProjectId)?.layoutRules
-  )
-  const lastRulesRef = useRef<{ projectId: string; rules: unknown } | null>(null)
-  useEffect(() => {
-    const projectId = useProjects.getState().activeProjectId
-    const seen = lastRulesRef.current
-    lastRulesRef.current = { projectId, rules: activeLayoutRules }
-    if (!layoutEnabled || !seen || seen.projectId !== projectId) return
-    if (JSON.stringify(seen.rules ?? null) === JSON.stringify(activeLayoutRules ?? null)) return
-    void runLayoutTriggerRef.current?.('rules-changed')
-  }, [activeLayoutRules, layoutEnabled])
 
   // Give the lease back when this renderer stops being the authority for a project — on switch and
   // on unmount. A lease left held would expire on its own (`LAYOUT_LEASE_TTL_MS`), so this is the
@@ -7350,7 +7281,7 @@ export function Canvas() {
                   ? ids.length > 1 ? 'Pin positions' : 'Pin position'
                   : ids.length > 1 ? 'Unpin positions' : 'Unpin position',
                 icon: <IconPin />,
-                hint: 'Automatic placement leaves a pinned node exactly where it is.',
+                hint: 'Worker organization leaves a pinned node exactly where it is.',
                 onClick: () => {
                   setNodes((ns) => setNodesPinned(ns as CanvasNode[], ids, pinning))
                   markDirty()
@@ -7919,9 +7850,9 @@ export function Canvas() {
             ? [{ label: 'Tidy canvas', icon: <IconGrid />, onClick: arrangeAllNodes } as MenuItem]
             : []),
           {
-            label: `Automatic worker organization: ${layoutEnabled ? 'On' : 'Off'}`,
+            label: `Worker organization: ${layoutEnabled ? 'On' : 'Off'}`,
             icon: <IconGrid />,
-            hint: 'Automatically place new delegated workers in their owner’s frame. Keeps manual placements and pinned nodes.',
+            hint: 'Enable explicit worker organization previews. Keeps manual placements and pinned nodes.',
             onClick: () => {
               const store = useSettings.getState()
               store.update({ canvasLayout: { ...store.settings.canvasLayout, enabled: !layoutEnabled } })
@@ -9068,10 +8999,7 @@ export function Canvas() {
           return applyWorkerFramePlan(flow, plan, workerFrameLabel(ownerTitle))
         })
         markDirty()
-        // `node-created` — placement happens ONCE, at birth. Deferred a tick so the engine plans
-        // against the canvas WITH the new cards and their tray on it: `setNodes` is async, and a
-        // plan built from the pre-append array would refuse every one of them as "no such node".
-        queueMicrotask(() => void runLayoutTriggerRef.current?.('node-created', newIds))
+
       }
       // Grid slots INSIDE a group frame (open-agent --group): 2 columns of terminal-sized
       // cells under the header. Pure geometry — the frame is grown to fit before children land.
@@ -11879,8 +11807,8 @@ export function Canvas() {
         : []),
       {
         id: 'toggle-worker-organization',
-        label: `${layoutEnabled ? 'Disable' : 'Enable'} automatic worker organization`,
-        hint: 'layout tray file workers automatic arrange naming organization',
+        label: `${layoutEnabled ? 'Disable' : 'Enable'} worker organization previews`,
+        hint: 'layout tray file workers manual arrange naming organization',
         section: 'View',
         icon: <IconGrid />,
         run: () => {
@@ -11893,7 +11821,7 @@ export function Canvas() {
             {
               id: 'organize-workers',
               label: 'Organize workers',
-              hint: 'layout tray file workers automatic arrange',
+              hint: 'layout tray file workers manual arrange',
               section: 'View',
               icon: <IconGrid />,
               run: organizeCanvas

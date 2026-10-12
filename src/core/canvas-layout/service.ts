@@ -1,4 +1,4 @@
-// The layout engine's one I/O surface: the channel both shells register, from this one body.
+// The explicit layout engine's one I/O surface: the channel both shells register, from this one body.
 //
 // Everything above it is pure. This is where the lease lives, where the machine-local switch is
 // read, and where a request from the renderer turns into a plan. It is deliberately the ONLY way
@@ -53,6 +53,9 @@ export async function planForRequest(
 ): Promise<LayoutPlan> {
   const trigger: LayoutTrigger = isLayoutTrigger(request?.trigger) ? request.trigger : 'organize'
   if (!request?.projectId) return standDownPlan(trigger, 'unknown-project')
+  // Automatic organization was retired. Reject old tabs too, before taking a lease or
+  // producing mutations. Explicit organize requests retain their preview/apply flow.
+  if (trigger !== 'organize') return standDownPlan(trigger, 'disabled')
   const settings = sanitizeCanvasLayoutSettings(deps.settings?.())
   if (!layoutEngineEnabled(settings)) return standDownPlan(trigger, 'disabled')
 

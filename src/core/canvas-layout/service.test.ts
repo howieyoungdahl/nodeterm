@@ -31,6 +31,19 @@ function lease(): LayoutLeaseStore {
 const ON = { settings: () => ({ enabled: true }) }
 
 describe('planForRequest', () => {
+  it.each(['node-created', 'status-changed', 'rules-changed'] as const)(
+    'rejects retired automatic trigger %s even for an enabled machine and stale tab', async trigger => {
+      let writes = 0
+      const store = new LayoutLeaseStore({ read: () => null, write: async () => { writes++ }, now: () => 1000 })
+      const result = await planForRequest(request({ trigger }), { ...ON, lease: store })
+      expect(result).toMatchObject({ trigger, ops: [], stoodDown: { reason: 'disabled' } })
+      expect(writes).toBe(0)
+      // Rejection cannot hold a lease and strand the explicit command in another tab.
+      expect((await planForRequest(request({ holder: 'manual-tab' }), { ...ON, lease: store })).stoodDown).toBeUndefined()
+      expect(writes).toBe(1)
+    }
+  )
+
   it('is OFF unless the machine says otherwise — an absent settings block plans nothing', async () => {
     for (const settings of [undefined, () => undefined, () => ({}), () => ({ enabled: false })]) {
       const plan = await planForRequest(request(), { settings, lease: lease() })

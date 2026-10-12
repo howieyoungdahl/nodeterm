@@ -23,8 +23,8 @@ const ROWS = {
   },
   snap: { title: 'Snap to grid', keywords: ['snap', 'grid', 'align'] },
   autoLayout: {
-    title: 'Organize delegated workers automatically',
-    keywords: ['layout', 'organize', 'automatic', 'worker', 'tray', 'frame', 'arrange', 'agent']
+    title: 'Enable worker organization previews',
+    keywords: ['layout', 'organize', 'manual', 'worker', 'tray', 'frame', 'arrange', 'agent']
   },
   autoAlign: {
     title: 'Snap to grid mode (auto-arrange)',
@@ -149,13 +149,13 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
       </SearchableRow>
       <SearchableRow {...ROWS.autoLayout}>
         <FieldRow
-          label="Organize delegated workers automatically"
-          description="Files the terminals an agent opens on your behalf into their spawner's frame, at the compact size, as they are created. It only ever touches delegated workers — never a node you opened, pinned, placed by hand, are using right now, or that a loop owns — and every card it leaves alone is listed with its reason. One ⌘Z undoes a whole pass. This setting is per-machine and is never read from a project file."
+          label="Enable worker organization previews"
+          description="Enables the Organize workers command and its preview. Workers move only after you confirm an explicit request. Pinned, manually placed, active and loop-owned cards keep their positions. This setting is per-machine."
           control={
             <Switch
               checked={settings.canvasLayout?.enabled === true}
               onChange={(v) => update({ canvasLayout: { ...settings.canvasLayout, enabled: v } })}
-              ariaLabel="Organize delegated workers automatically"
+              ariaLabel="Enable worker organization previews"
             />
           }
         />

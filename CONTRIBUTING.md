@@ -387,7 +387,7 @@ nodes. Keep it out of authorization, dispatch, hook stores, and workspace persis
 Both status-channel registrations request `sessionPresence`'s read-only mode: a supported but
 unobserved session-host backend remains unverified rather than starting a helper to check it.
 
-**Automatic layout only moves what it can prove is safe to move, and it says what it did not
+**Explicit worker organization only moves what it can prove is safe to move, and it says what it did not
 touch.** The engine (`src/core/canvas-layout/`) is opt-in, default off, and machine-local — the
 shared project file carries WHAT the rules are and never WHETHER they run, so cloning a repo can
 never start rearranging someone's canvas. `plan()` is pure and returns `{ops, skipped}`; a node is
@@ -426,8 +426,10 @@ Terminal and board-modal headers reserve a row for the title; put badges and sec
 in the wrapping toolbar. Collapsed terminals keep the title row and close button within 40px.
 Automatic names follow the exact agent session and respect `titleAuto: false`. Codex can use a
 bounded task preview when no explicit or relayed name exists; this never sends input to the agent.
-Automatic worker organization is a native, machine-local option in the canvas menu, command palette,
-and Behavior settings. Topic-based grouping still needs an operator or supervising agent.
+Worker organization is an explicit, confirmed command enabled in the canvas menu, command palette,
+and Behavior settings. Automatic creation, status and rule-change triggers are retired, including
+requests from older tabs. The conflict bar still reports genuine outside project writes.
+Topic-based grouping still needs an operator or supervising agent.
 
 **Reloading a saved canvas must preserve open cards.** Read the current React Flow snapshot when
 the user resolves a conflict, retain cards missing from disk with their ids and positions, and save
