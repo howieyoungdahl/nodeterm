@@ -3025,3 +3025,9 @@ and loaded thread IDs, but the inspected schemas have no local TUI PID or Nodete
 node association. UserMessage clientId alone does not bind that client to a local
 process. Activation cannot retroactively invent ownership for pre-existing bare
 remote TUIs. An explicit, independently established thread ID is required to bind.
+
+Authenticated operator single-card deletion carries a symbol-keyed internal archive
+omission allowance for the exact project and node. Browser/RPC JSON cannot supply
+that authority. Ordinary saves and sweeps still preserve archived rows; explicit
+deletion keeps retained tombstones and archive receipt history, so stale snapshots
+cannot resurrect the removed card or its incident links and board assignments.

@@ -1,3 +1,4 @@
+import { operatorArchiveRemoval, type ArchiveRemovalOptions } from '../core/cleanup-raw-preservation'
 import { completeCreationPlanning, creationAdmission, type AssistantCreation } from '../shared/assistant-creation'
 import { parseTaskPlanning, planningAtCreation, type TaskPlanning } from '../shared/task-planning'
 import { AssistantCreationReceipts } from './assistant-creation-receipts'
@@ -133,7 +134,7 @@ export interface OpsNodeInventoryItem {
 
 export interface NodeOpsWorkspace {
   load(opts?: { sideline?: boolean }): Promise<Workspace>
-  save(workspace: Workspace): Promise<unknown>
+  save(workspace: Workspace, opts?: ArchiveRemovalOptions): Promise<unknown>
 }
 
 export interface ServerNodeOpsDeps {
@@ -425,6 +426,8 @@ export function removeNodeCard(project: Project, nodeId: string): boolean {
       (entry) => entry.nodeId !== nodeId
     )
     project.kanban.meta = project.kanban.meta?.filter((entry) => entry.nodeId !== nodeId)
+    if (project.kanban.manualAssignments) delete project.kanban.manualAssignments[nodeId]
+    if (project.kanban.manualAssignmentVersions) delete project.kanban.manualAssignmentVersions[nodeId]
   }
   project.breadcrumbs = project.breadcrumbs?.filter((entry) => entry.nodeId !== nodeId)
   return true
@@ -717,7 +720,11 @@ export class ServerNodeOps {
       }
 
       removeNodeCard(project, node.id)
-      await this.deps.workspaceStore.save(workspace)
+      // Only this authenticated exact-card delete may omit an archive; sweeps and client saves
+      // retain their preservation rule. Retained deletion records still fence stale replays.
+      await this.deps.workspaceStore.save(workspace, {
+        [operatorArchiveRemoval]: new Map([[project.id, new Set([node.id])]])
+      })
       const persisted = await this.deps.workspaceStore.load({ sideline: false })
       if (persisted.projects.some(p => p.nodes.some(n => n.id === node.id)))
         return { ok: false, status: 503, error: 'card_removal_not_persisted', paneState }

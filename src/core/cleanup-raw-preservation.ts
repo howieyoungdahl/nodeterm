@@ -7,12 +7,18 @@ const nodeFields = new Set(["assistantCreation", "cleanupArchiveId", "organizati
 const projectFields = new Set(["loadedKanban", "organizationChange", "workspaceChange", "revision", "kanbanOrganization", "id", "name", "color", "icon", "cwd", "ssh", "viewport", "nodes", "defaultAccountId", "defaultPermissionMode", "layoutRules", "agentBrowserControl", "agentMessaging", "capabilityAck", "dinoHighScore", "kanban", "bridges", "ropes", "breadcrumbs", "closed", "unavailable", "remote", "version", "rev", "savedAt"])
 const entryFields = new Set(["id", "localApprovalId", "name", "color", "closed", "viewport", "defaultAccountId", "capabilityAck", "breadcrumbs", "cwd", "ssh", "cache", "project", "localExec", "localSettings", "settingsCache", "execMigrated"])
 const foreign = (old: object, known: Set<string>) => Object.fromEntries(Object.entries(old).filter(([key]) => !known.has(key)))
-function preserveProject<T extends { nodes: CanvasNodeState[] }>(old: T | null | undefined, next: T): T {
+// Symbol authority is internal only. JSON workspace content and RPC arguments cannot carry it.
+export const operatorArchiveRemoval = Symbol('operatorArchiveRemoval')
+export interface ArchiveRemovalOptions {
+  [operatorArchiveRemoval]?: ReadonlyMap<string, ReadonlySet<string>>
+}
+function preserveProject<T extends { nodes: CanvasNodeState[] }>(old: T | null | undefined, next: T,
+  removedIds: ReadonlySet<string> = new Set()): T {
   if (!old) return next
-  const protectedIds = new Set(old.nodes.filter(n => n.cleanupArchiveId).map(n => n.id))
+  const protectedIds = new Set(old.nodes.filter(n => n.cleanupArchiveId && !removedIds.has(n.id)).map(n => n.id))
   for (const id of protectedIds) {
     const parent = old.nodes.find(n => n.id === id)?.parentId
-    if (parent) protectedIds.add(parent)
+    if (parent && !removedIds.has(parent)) protectedIds.add(parent)
   }
   const nodes = next.nodes.map(n => {
     const held = old.nodes.find(b => b.id === n.id)
@@ -31,7 +37,7 @@ function preserveProject<T extends { nodes: CanvasNodeState[] }>(old: T | null |
   for (const key of ['bridges', 'ropes'] as const) {
     const held = previous[key]
     if (protectedIds.size && held) result[key] = retainRows(held, result[key] ?? [], e => e.id,
-      new Set(held.filter(e => protectedIds.has(e.source) || protectedIds.has(e.target)).map(e => e.id)))
+      new Set(held.filter(e => !removedIds.has(e.source) && !removedIds.has(e.target) && (protectedIds.has(e.source) || protectedIds.has(e.target))).map(e => e.id)))
   }
   if (protectedIds.size && previous.kanban) {
     const board = result.kanban ?? previous.kanban
@@ -56,18 +62,20 @@ function retainRows<T>(old: T[], next: T[], id: (row: T) => string, protectedIds
   }
   return result
 }
-export function preserveRawProject(old: ProjectFileV1 | null, next: ProjectFileV1): ProjectFileV1 {
-  return preserveProject(old, next)
+export function preserveRawProject(old: ProjectFileV1 | null, next: ProjectFileV1,
+  removedIds?: ReadonlySet<string>): ProjectFileV1 {
+  return preserveProject(old, next, removedIds)
 }
 export function preserveRawIndex(old: WorkspaceIndexV3 | null, next: WorkspaceIndexV3,
-  protectedEntries: ReadonlySet<string> = new Set()): WorkspaceIndexV3 {
+  protectedEntries: ReadonlySet<string> = new Set(),
+  removals?: ReadonlyMap<string, ReadonlySet<string>>): WorkspaceIndexV3 {
   if (!old) return next
   return { ...foreign(old,new Set(['version','activeProjectId','entries'])), ...next,
     entries: retainRows(old.entries, next.entries, e => e.id,
       new Set(old.entries.filter(e => protectedEntries.has(e.id) || (e.project ?? e.cache)?.nodes.some(n => n.cleanupArchiveId)).map(e => e.id))).map(e => {
       const held = old.entries.find(b => b.id === e.id)
       return held ? { ...foreign(held,entryFields), ...e,
-        ...(e.project ? { project: preserveProject(held.project, e.project) } : {}),
-        ...(e.cache ? { cache: preserveProject(held.cache, e.cache) } : {}) } : e
+        ...(e.project ? { project: preserveProject(held.project, e.project, removals?.get(e.id)) } : {}),
+        ...(e.cache ? { cache: preserveProject(held.cache, e.cache, removals?.get(e.id)) } : {}) } : e
     }) }
 }

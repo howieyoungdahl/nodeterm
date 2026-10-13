@@ -1,4 +1,4 @@
-import { preserveRawProject, preserveRawIndex } from './cleanup-raw-preservation'
+import { preserveRawProject, preserveRawIndex, operatorArchiveRemoval, type ArchiveRemovalOptions } from './cleanup-raw-preservation'
 import { CleanupRetainedWriter } from './cleanup-retained-writer'
 import { readPublicationFile, isPublicationReadError, type PublicationPhase } from './project-commit-store'
 import { publishWorkspaceFile } from './workspace-retained-publication'
@@ -987,7 +987,7 @@ export class WorkspaceStore {
    *  projects went blank after tab switching" wipe. */
   private saveChain: Promise<unknown> = Promise.resolve()
 
-  save(workspace: Workspace, opts?: { client?: string; requireRevision?: boolean }): Promise<WorkspaceSaveAck> {
+  save(workspace: Workspace, opts?: ArchiveRemovalOptions & { client?: string; requireRevision?: boolean }): Promise<WorkspaceSaveAck> {
     // Stamped BEFORE the chain hop, so the receipt can report how long this save waited behind
     // the saves already queued ahead of it — the "card minted, receipt 55 s later" field reports
     // never said whether the lag was queueing or the write itself.
@@ -1003,7 +1003,7 @@ export class WorkspaceStore {
       const beforeRevision = beforeContent?.revision
       if (workspace.revision && beforeRevision && workspace.revision !== beforeRevision)
         throw new Error('workspace_conflict: storage changed during publication snapshot')
-      await this.saveNow(workspace, opts?.client ?? 'internal', enqueuedAt)
+      await this.saveNow(workspace, opts?.client ?? 'internal', enqueuedAt, opts?.[operatorArchiveRemoval])
       const written = new Map<string, string>()
       for (const p of workspace.projects) {
         if (p.unavailable || p.remote || p.ssh || !p.cwd) continue
@@ -1046,7 +1046,8 @@ export class WorkspaceStore {
   private async saveNow(
     workspace: Workspace,
     client = 'internal',
-    enqueuedAt = Date.now()
+    enqueuedAt = Date.now(),
+    archiveRemovals?: ReadonlyMap<string, ReadonlySet<string>>
   ): Promise<void> {
     if (this.indexRaw === undefined) {
       try {
@@ -1075,7 +1076,7 @@ export class WorkspaceStore {
     const split = splitWorkspace(workspace, (id) => this.revs.get(id) ?? 0, savedAt)
     const protectedEntries = new Set(this.index?.entries.filter(e => e.cwd && !e.ssh &&
       (JSON.parse(this.lastWritten.get(projectFilePath(e.cwd)) ?? '{"nodes":[]}') as ProjectFileV1).nodes.some(n => n.cleanupArchiveId)).map(e => e.id))
-    const index = preserveRawIndex(this.index, split.index, protectedEntries), files = split.files
+    const index = preserveRawIndex(this.index, split.index, protectedEntries, archiveRemovals), files = split.files
 
     for (const entry of index.entries) {
       const previous = this.index?.entries.find((candidate) => candidate.id === entry.id)
@@ -1136,7 +1137,7 @@ export class WorkspaceStore {
       const file = projectFilePath(cwd)
       const prev = this.lastWritten.get(file)
       const prevParsed = prev ? (JSON.parse(prev) as ProjectFileV1) : null
-      const retainedCandidate = preserveRawProject(prevParsed, candidate)
+      const retainedCandidate = preserveRawProject(prevParsed, candidate, archiveRemovals?.get(projectId))
       if (prevParsed && sameProjectContent(prevParsed, retainedCandidate)) continue
       // LOCAL projects only (`files` never holds an ssh project — splitWorkspace puts those in
       // `cache`, which has its own rescue below).
