@@ -31,3 +31,25 @@ it('merges insertion anchors around a removed unchanged entity without resurrect
   expect(result.kind).toBe('adopt'); if (result.kind !== 'adopt') throw new Error('fixture')
   expect(result.projects[0].nodes.map(n => n.id)).toEqual(['L', 'A', 'R', 'C'])
 })
+
+it('keeps null distinct from an omitted field when checking edit-versus-delete overlap', () => {
+  const base = project(['A']), local = project(['A'])
+  Reflect.deleteProperty(local.nodes[0], 'group')
+  expect(merge(base, local, project([]))).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})
+
+it('refuses incoming layoutRules deletion when a plain JSON own __proto__ field was locally added', () => {
+  const base = project(['A']), local = project(['A']), incoming = project(['A'])
+  base.layoutRules = JSON.parse('{"unknown":{}}') as Project['layoutRules']
+  local.layoutRules = JSON.parse('{"unknown":{"__proto__":{}}}') as Project['layoutRules']
+  expect(Object.hasOwn((local.layoutRules as unknown as { unknown: object }).unknown, '__proto__')).toBe(true)
+  expect(merge(base, local, incoming)).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})
+it.each(['__proto__', 'toString'])('treats an undefined own %s field like omission during incoming layoutRules deletion', key => {
+  const base = project(['A']), local = project(['A']), incoming = project(['A'])
+  base.layoutRules = JSON.parse('{"unknown":{}}') as Project['layoutRules']
+  local.layoutRules = { unknown: { [key]: undefined } } as unknown as Project['layoutRules']
+  const result = merge(base, local, incoming)
+  expect(result.kind).toBe('adopt'); if (result.kind !== 'adopt') throw new Error('fixture')
+  expect(result.projects[0].layoutRules).toBeUndefined()
+})

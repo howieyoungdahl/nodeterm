@@ -9,6 +9,7 @@ import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { WorkspaceStore } from '../core/workspace-store'
 import { IPC } from '../shared/ipc'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
+import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 import { createServerWorkspaceWatcher } from './workspace-external-watch'
 
 const node = (id: string, x: number): CanvasNodeState => ({
@@ -40,6 +41,31 @@ describe('Server Edition external workspace watcher', () => {
     resetPlatformForTests()
     await fs.rm(dataDir, { recursive: true, force: true })
     await fs.rm(projectDir, { recursive: true, force: true })
+  })
+
+  it('waits for a server publication and suppresses its delayed self-write notification', async () => {
+    const store = new WorkspaceStore()
+    const workspace: Workspace = { version: 2, activeProjectId: 'p', projects: [{ id: 'p', name: 'p', color: '#fff', cwd: projectDir,
+      viewport: { x: 0, y: 0, zoom: 1 }, nodes: [node('term-one', 0)] }] }
+    await store.save(workspace)
+    const queue = new WorkspaceMutationQueue()
+    const entered = vi.fn()
+    const exclusive = <T>(work: () => Promise<T>): Promise<T> => { entered(); return queue.run(work) }
+    watcher = createServerWorkspaceWatcher(store, { debounceMs: 10, exclusive })
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    store.publicationPhase = async (phase, file) => { if (phase === 'published' && file.endsWith('project.json')) await gate }
+    const changed = await store.load()
+    changed.projects[0].nodes[0].title = 'normal server title update'
+    const save = queue.run(() => store.save(changed))
+    try {
+      await vi.waitFor(() => expect(entered).toHaveBeenCalled())
+      release()
+      await save
+      await queue.run(async () => {})
+      expect(fake.sent.some(event => event.channel === IPC.workspaceExternalChange)).toBe(false)
+      expect((await store.load()).projects[0].nodes[0].title).toBe('normal server title update')
+    } finally { release(); await save }
   })
 
   it('adopts a hand-edited node/edge removal and broadcasts the complete project live', async () => {

@@ -110,15 +110,14 @@ The codebase is split by Electron process boundary — keep code on the correct 
   and runs a serialized `HeadlessNodeFactory`; disabled remains the default. The Server shell also
   schedules a 30-minute dead-card pass by default (`NODETERM_DEAD_CARD_REAP_MINUTES`, `0` disables
   only the timer), using the operator API's shared `ServerNodeOps` engine. It removes a local
-  terminal card only after two definitive absent-session probes; unreadable probes and SSH-project
-  cards are preserved. **A MASS sweep is refused, not applied** (2026-09-06: the tmux server died at
-  06:39 and the 07:07 pass removed 16 terminal cards — the cards were the only remaining record of
-  the night's sessions). When ONE pass finds `--dead-card-reap-mass-limit` dead cards (default 5)
-  or `--dead-card-reap-mass-fraction` of the scanned local terminals (default 0.5, needing at least
-  two dead so a one-card canvas stays reapable), the pass applies NOTHING, returns `refused` beside
-  the set it declined to touch, and logs exactly one line — from the engine, so the timer and the
-  REST route cannot each print their own version of it.
-  `POST /opsapi/sweep {"dryRun":false,"force":true}` is the deliberate manual override; the
+  terminal card only after definitive absent-session probes across separate passes on the same
+  answering tmux server generation. Healthy backlogs warm once and drain bounded batches
+  (default five); dry runs do not establish evidence. Unknown probes, failed listings, changed
+  server PID and whole-server loss preserve the cards. SSH, drafts, armed launches, protected
+  archives, working/blocked agents and active recurring-loop members remain excluded.
+  `pendingConfirmation` and `remaining` describe a healthy warming pass; `refused` is reserved
+  for unhealthy host evidence. `POST /opsapi/sweep {"dryRun":false,"force":true}` remains the
+  deliberate manual override; the
   periodic reaper never forces. Global cleanup is never exposed as an agent canvas-control verb. (The SDK
   **chat node**
   — once listed here as deferred — was removed entirely, 2026-07; see the chat-node note in the
@@ -200,6 +199,11 @@ The merged store is saved directly, with ordinary save-failure handling; do not 
 Flow array back over it before the reload effect lands. Closing a node is the explicit removal
 path. The same behavior applies to desktop and Server Edition; the separate native mobile client
 needs equivalent handling for any future disk-reload control.
+
+Saved publication equality uses JSON object semantics: optional fields materialized as
+`undefined` by Flow are equivalent to omitted disk/RPC fields. Otherwise an untouched
+card becomes a false edit-versus-delete conflict on operator close. Defined local edits,
+including unsaved text on a deleted card, still refuse adoption.
 
 Explicit retained deletions are the exception to open-card preservation. `fileToProject` projects
 the loaded `_reconciliation.deleted` records into runtime `deletedEntities`. Both conflict choices
@@ -3026,3 +3030,9 @@ and loaded thread IDs, but the inspected schemas have no local TUI PID or Nodete
 node association. UserMessage clientId alone does not bind that client to a local
 process. Activation cannot retroactively invent ownership for pre-existing bare
 remote TUIs. An explicit, independently established thread ID is required to bind.
+
+Authenticated operator single-card deletion carries a symbol-keyed internal archive
+omission allowance for the exact project and node. Browser/RPC JSON cannot supply
+that authority. Ordinary saves and sweeps still preserve archived rows; explicit
+deletion keeps retained tombstones and archive receipt history, so stale snapshots
+cannot resurrect the removed card or its incident links and board assignments.

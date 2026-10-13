@@ -156,6 +156,22 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     expect(spawned).toHaveLength(2)
   })
 
+  it('keeps a crashed Server tmux card attach-only while desktop fresh creation remains available', async () => {
+    const m = await manager()
+    await m.protectPersistedSessionsAtBoot([])
+    const { sessionId } = await create(ALICE)
+    // Exercise the callback of a genuine installed session, with a synthetic tmux backend.
+    const session = (m as any).sessions.get(sessionId)
+    session.tmuxBacked = true
+    session.persistKey = 'node-1'
+    spawned[0].onExitCb?.({ exitCode: 1 })
+    expect((m as any).bootPersisted.get('node-1')).toBe('tmux')
+    ;(m as any).tmuxPath = null
+    const result = await create(ALICE)
+    expect(result).toMatchObject({ deadCard: true, sessionId: '' })
+    expect(spawned).toHaveLength(1)
+  })
+
   it('kill unsubscribes ONE client; the pty survives while others watch', async () => {
     await manager()
     const { sessionId } = await create(ALICE)

@@ -1,3 +1,4 @@
+import { operatorArchiveRemoval, type ArchiveRemovalOptions } from '../core/cleanup-raw-preservation'
 import { completeCreationPlanning, creationAdmission, type AssistantCreation } from '../shared/assistant-creation'
 import { parseTaskPlanning, planningAtCreation, type TaskPlanning } from '../shared/task-planning'
 import { AssistantCreationReceipts } from './assistant-creation-receipts'
@@ -133,11 +134,12 @@ export interface OpsNodeInventoryItem {
 
 export interface NodeOpsWorkspace {
   load(opts?: { sideline?: boolean }): Promise<Workspace>
-  save(workspace: Workspace): Promise<unknown>
+  save(workspace: Workspace, opts?: ArchiveRemovalOptions): Promise<unknown>
 }
 
 export interface ServerNodeOpsDeps {
   workspaceStore: NodeOpsWorkspace
+  backendGeneration?(): Promise<string | null>
   sessionPresence(nodeId: string): Promise<Exclude<OpsPaneState, 'none'>>
   destroySession(nodeId: string): Promise<void>
   statusOf(nodeId: string): { state?: AgentState; updatedAt: number } | undefined
@@ -165,6 +167,7 @@ export interface ServerNodeOpsDeps {
   sendText?(nodeId: string, text: string): Promise<boolean>
   onRemoved?(nodeIds: readonly string[]): void
   protectedCleanupNodeIds?(): Promise<string[]>
+  liveProtectedCleanupNodeIds?(workspace: Workspace): readonly string[]
   publishProject?(project: Project): void
   publishRemoval?(projectId: string, nodeId: string, workspaceRevision?: string): void
   /** Live insertion of one adopted card into every attached browser (canvas-sync upsert). Absent
@@ -194,6 +197,8 @@ export interface ServerNodeOpsDeps {
 }
 
 export interface OpsSweepResult {
+  pendingConfirmation?: boolean
+  remaining?: number
   dryRun: boolean
   affectedIds: string[]
   scanned: number
@@ -221,8 +226,8 @@ export interface OpsSweepRefusal {
  * socket name changed, a probe regressed — and in that event the cards are the only remaining
  * record of the sessions, so removing them destroys the evidence instead of tidying after it.
  * (2026-09-06: the tmux server died at 06:39 and the 07:07 pass removed 16 terminal cards.)
- * Above these thresholds the sweep applies NOTHING and says so; the operator forces it if the
- * cards really are stale.
+ * Healthy confirmed backlogs drain bounded batches. These thresholds describe unhealthy
+ * mass events; they never make a healthy backlog permanently unreapable.
  */
 export interface DeadCardMassLimit {
   /** Dead cards in one pass at or above which the sweep refuses. 0 disables this rule. */
@@ -421,6 +426,8 @@ export function removeNodeCard(project: Project, nodeId: string): boolean {
       (entry) => entry.nodeId !== nodeId
     )
     project.kanban.meta = project.kanban.meta?.filter((entry) => entry.nodeId !== nodeId)
+    if (project.kanban.manualAssignments) delete project.kanban.manualAssignments[nodeId]
+    if (project.kanban.manualAssignmentVersions) delete project.kanban.manualAssignmentVersions[nodeId]
   }
   project.breadcrumbs = project.breadcrumbs?.filter((entry) => entry.nodeId !== nodeId)
   return true
@@ -430,6 +437,8 @@ export function removeNodeCard(project: Project, nodeId: string): boolean {
 export class ServerNodeOps {
   private readonly now: () => number
   private readonly mutationQueue: WorkspaceMutationQueue
+  private previousGeneration: string | null = null
+  private previousDead = new Set<string>()
   private readonly massLimit: DeadCardMassLimit
 
   constructor(private readonly deps: ServerNodeOpsDeps) {
@@ -490,21 +499,24 @@ export class ServerNodeOps {
   }
 
   /**
-   * @param force Skip the mass-sweep guard. Only `POST /opsapi/sweep` with an explicit
+   * @param force Skip backend-generation confirmation and whole-server-loss protection. Only `POST /opsapi/sweep` with an explicit
    *              `"force": true` sets this; the periodic reaper never does.
    */
   sweep(dryRun: boolean, force = false): Promise<OpsSweepResult> {
     return this.runExclusive(async () => {
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      let generation: string | null = null
+      try { generation = await this.deps.backendGeneration?.() ?? null } catch { /* unknown */ }
+      const previousDead = generation && generation === this.previousGeneration ? this.previousDead : new Set<string>()
       const deadByProject = new Map<Project, string[]>()
       let scanned = 0
-      const protectedCleanupIds = new Set(await this.deps.protectedCleanupNodeIds?.() ?? [])
+      const protectedCleanupIds = new Set([...(await this.deps.protectedCleanupNodeIds?.() ?? []), ...(this.deps.liveProtectedCleanupNodeIds?.(workspace) ?? [])])
       for (const project of workspace.projects) {
         if (project.ssh) continue
         for (const node of project.nodes) {
-          if (node.kind !== 'terminal' || node.cleanupArchiveId || protectedCleanupIds.has(node.id)) continue
+          if (node.kind !== 'terminal' || node.cleanupArchiveId || node.text?.trim() || node.pendingLaunch || ['working', 'blocked'].includes(this.deps.statusOf(node.id)?.state ?? '') || protectedCleanupIds.has(node.id)) continue
           scanned += 1
-          // Two definitive misses: the second is the mutation-boundary recheck. Any read failure
+          // Two definitive misses per pass, plus a separate pass and an apply-boundary recheck. Any read failure
           // becomes `unknown`, never absence, and therefore cannot enter the deletion set.
           if ((await this.paneState(project, node)) !== 'dead') continue
           if ((await this.paneState(project, node)) !== 'dead') continue
@@ -513,8 +525,24 @@ export class ServerNodeOps {
           deadByProject.set(project, ids)
         }
       }
-      const affectedIds = [...deadByProject.values()].flat()
-      const refused = force ? null : deadCardMassRefusal(affectedIds.length, scanned, this.massLimit)
+      const candidates = [...deadByProject.values()].flat()
+      const mass = deadCardMassRefusal(candidates.length, scanned, this.massLimit)
+      // A healthy host must still have a definitely live backend. A whole-server loss is
+      // never converted into a deletion list, even if the same failure lasts several ticks.
+      let healthy = false
+      if (this.deps.listSessions) {
+        try { healthy = !!generation && (await this.deps.listSessions()).some(name => workspace.projects.some(p => !p.ssh && p.nodes.some(n => n.kind === 'terminal' && sessionName(n.id) === name))) } catch { healthy = false }
+      }
+      const confirmed = candidates.filter(id => previousDead.has(id))
+      if (!dryRun) { this.previousDead = healthy ? new Set(candidates) : new Set(); this.previousGeneration = generation }
+      const refused = !force && candidates.length && !healthy
+        ? mass ?? { reason: 'mass_limit' as const, deadCount: candidates.length, scanned, ...this.massLimit } : null
+      const batchLimit = this.massLimit.maxCards > 0 ? this.massLimit.maxCards : 5
+      const affectedIds = force ? candidates : (healthy ? confirmed.slice(0, batchLimit) : [])
+      if (!refused) {
+        const chosen = new Set(affectedIds)
+        for (const [project, ids] of deadByProject) deadByProject.set(project, ids.filter(id => chosen.has(id)))
+      }
       if (refused) {
         // Exactly one line per refused APPLY, printed by the engine rather than by each caller, so
         // the timer and the REST route cannot each publish their own version of the same refusal.
@@ -525,26 +553,57 @@ export class ServerNodeOps {
           warn(
             `[nodeterm-server] REFUSED dead-card sweep: ${refused.deadCount} of ${scanned} local ` +
               `terminal card(s) read dead in one pass (limit ${refused.maxCards} cards / ` +
-              `${Math.round(refused.maxFraction * 100)}% of the canvas). Nothing was removed — a ` +
+              `${Math.round(refused.maxFraction * 100)}% of the canvas). Nothing was removed. A ` +
               `whole canvas going dead at once is a host event, and the cards are the record of ` +
               `it. Sweep anyway: POST /opsapi/sweep {"dryRun":false,"force":true}. Change the ` +
               `thresholds: --dead-card-reap-mass-limit / --dead-card-reap-mass-fraction.`
           )
         }
-        return { dryRun, affectedIds, scanned, refused }
+        return { dryRun, affectedIds: candidates, scanned, refused }
       }
-      if (dryRun || affectedIds.length === 0) return { dryRun, affectedIds, scanned }
+      if (dryRun || affectedIds.length === 0) return { dryRun, affectedIds, scanned,
+        ...(healthy && candidates.length ? { pendingConfirmation: true, remaining: candidates.length } : {}) }
+      const protectedAtApply = new Set(await this.deps.protectedCleanupNodeIds?.() ?? [])
+      if (affectedIds.some(id => protectedAtApply.has(id))) return { dryRun, affectedIds: [], scanned, pendingConfirmation: true, remaining: candidates.length }
 
+      for (const [project, ids] of deadByProject) for (const id of ids) {
+        const node = project.nodes.find(n => n.id === id)!
+        if (!force && ((await this.paneState(project, node)) !== 'dead' ||
+          ['working', 'blocked'].includes(this.deps.statusOf(id)?.state ?? ''))) {
+          this.previousDead.delete(id)
+          return { dryRun, affectedIds: [], scanned, pendingConfirmation: true, remaining: candidates.length }
+        }
+      }
+      // Recheck at the mutation boundary. A replacement server or publishing protection state
+      // cannot inherit absence evidence collected by the preceding generation.
+      let applyGeneration = generation
+      if (!force) { try { applyGeneration = await this.deps.backendGeneration?.() ?? null } catch { applyGeneration = null } }
+      if (!force && applyGeneration !== generation) {
+        this.previousDead.clear()
+        this.previousGeneration = null
+        return { dryRun, affectedIds: [], scanned, pendingConfirmation: true, remaining: candidates.length }
+      }
+      // Hooks can run while the final backend-generation probe awaits. Re-read synchronous
+      // activity/loop protection after that last await and before changing any card.
+      const liveProtected = new Set(this.deps.liveProtectedCleanupNodeIds?.(workspace) ?? [])
+      if (affectedIds.some(id => liveProtected.has(id) ||
+        ['working', 'blocked'].includes(this.deps.statusOf(id)?.state ?? ''))) {
+        for (const id of affectedIds) this.previousDead.delete(id)
+        return { dryRun, affectedIds: [], scanned, pendingConfirmation: true, remaining: candidates.length }
+      }
       for (const [project, ids] of deadByProject) {
         for (const id of ids) removeNodeCard(project, id)
       }
       await this.deps.workspaceStore.save(workspace)
+      const persisted = await this.deps.workspaceStore.load({ sideline: false })
+      if (persisted.projects.some(p => p.nodes.some(n => affectedIds.includes(n.id))))
+        throw new Error('card_removal_not_persisted')
       for (const [project, ids] of deadByProject) {
         this.deps.publishProject?.(project)
         for (const id of ids) this.deps.publishRemoval?.(project.id, id, project.workspaceChange?.after)
       }
       this.deps.onRemoved?.(affectedIds)
-      return { dryRun, affectedIds, scanned }
+      return { dryRun, affectedIds, scanned, remaining: candidates.length - affectedIds.length }
     })
   }
 
@@ -629,6 +688,7 @@ export class ServerNodeOps {
       if (matches.length !== 1) return { ok: false, status: 409, error: 'ambiguous_node_id' }
 
       const { project, node } = matches[0]
+      if (node.kind === 'terminal' && (node.text?.trim() || node.pendingLaunch)) return { ok: false, status: 409, error: 'card_has_unsent_text_or_pending_launch' }
       // An operator-created node (§create) is terminated and removed like a forced delete WITHOUT
       // needing `?force=1` — it is this same principal's own card, so there is no third party's
       // work to protect it from. Every other node's behavior is byte-for-byte what it was before.
@@ -660,7 +720,14 @@ export class ServerNodeOps {
       }
 
       removeNodeCard(project, node.id)
-      await this.deps.workspaceStore.save(workspace)
+      // Only this authenticated exact-card delete may omit an archive; sweeps and client saves
+      // retain their preservation rule. Retained deletion records still fence stale replays.
+      await this.deps.workspaceStore.save(workspace, {
+        [operatorArchiveRemoval]: new Map([[project.id, new Set([node.id])]])
+      })
+      const persisted = await this.deps.workspaceStore.load({ sideline: false })
+      if (persisted.projects.some(p => p.nodes.some(n => n.id === node.id)))
+        return { ok: false, status: 503, error: 'card_removal_not_persisted', paneState }
       this.deps.publishProject?.(project)
       this.deps.publishRemoval?.(project.id, node.id, project.workspaceChange?.after)
       this.deps.onRemoved?.([node.id])
@@ -1108,8 +1175,8 @@ export class ServerNodeOps {
             const plan = planOrganization(project, node, input.organization, { attested: true, creating: true })
             if (!plan.organization) return partial(plan.reason)
             const id = randomUUID()
-            node.organization = { ...plan.organization, receiptId: id }
-            project.kanban = placeNode(project.kanban, node.id, { columnId: plan.to, index: -1, previous: null, next: null })
+            node.organization = { ...plan.organization, ...(input.organizationPolicy ? {} : { mode: 'manual' as const, columnId: null }), receiptId: id }
+            project.kanban = placeNode(project.kanban, node.id, { columnId: node.organization.columnId, index: -1, previous: null, next: null })
             receipt = { id, nodeId: node.id, projectId: project.id, kind: 'create', at: this.now(),
               before: plan.from, after: nodePlacement(project.kanban, node.id), organization: node.organization,
               committed: false, published: false }

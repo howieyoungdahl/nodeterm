@@ -31,6 +31,10 @@ import { defaultTaskPlanning } from '../../src/shared/task-planning'
 const metadata = (functionalRole = 'ops') => ({ owner: 'Test assistant', projectId: 'p1', workstream: 'ics', functionalRole })
 const human: CanvasNodeState = { id: 'human', kind: 'terminal', title: 'Manual card', role: 'primary',
   color: '#fff', group: null, position: { x: 30, y: 70 }, size: { width: 640, height: 440 } }
+let fixtureRevision: string
+const creationBases = new Map<string, string>()
+const explicitPolicy = { version: 1 as const, projectId: 'p1', roles: { ops: 'col-a', security: 'col-b' },
+  overrides: [{ workstream: 'seo', functionalRole: 'ops', columnId: 'col-b' }] }
 let root: string, data: string, cwd: string, base: string
 let server: http.Server, store: WorkspaceStore, ops: ServerNodeOps
 let fake: ReturnType<typeof fakePlatform>
@@ -69,11 +73,23 @@ const request = async (route: string, body?: unknown, method = body === undefine
   return { status: response.status, body: await response.json() as any }
 }
 const createInput = (over: Record<string, unknown> = {}) => {
-  const input = { projectId: 'p1', organization: metadata(), idempotencyKey: 'create-test-0001', ...over }
+  const key = String(over.idempotencyKey ?? 'create-test-0001')
+  if (!creationBases.has(key)) creationBases.set(key, fixtureRevision)
+  // This suite exercises explicitly requested placement. Default manual creation has its own
+  // engine regression; immutable retry requests retain the revision of their first declaration.
+  const input = { projectId: 'p1', organization: metadata(), idempotencyKey: 'create-test-0001',
+    organizationPolicy: explicitPolicy, expectedRevision: creationBases.get(key), ...over }
   return { creation: { version: 1 as const, taskId: 'organization-fixture-task', creationId: input.idempotencyKey,
     declaredOwner: input.organization.owner }, ...input }
 }
-const create = async (over: Record<string, unknown> = {}) => request('/opsapi/nodes', createInput(over))
+const create = async (over: Record<string, unknown> = {}) => {
+  const key = String(over.idempotencyKey ?? 'create-test-0001')
+  if (!creationBases.has(key)) {
+    const revision = (await store.load()).projects[0].revision!
+    if (!creationBases.has(key)) creationBases.set(key, revision)
+  }
+  return request('/opsapi/nodes', createInput(over))
+}
 const patch = async (id: string, role = 'security', over: Record<string, unknown> = {}) => {
   const project = (await store.load()).projects[0]
   return request(`/opsapi/nodes/${id}`, { organization: metadata(role), expectedRevision: project.revision, ...over }, 'PATCH')
@@ -93,6 +109,8 @@ beforeEach(async () => {
     kanbanOrganization: { version: 1, projectId: 'p1', roles: { ops: 'col-a', security: 'col-b' },
       overrides: [{ workstream: 'seo', functionalRole: 'ops', columnId: 'col-b' }] } }
   await store.save({ version: 2, activeProjectId: 'p1', projects: [project, { ...project, id: 'p2', cwd: undefined, name: 'Background', nodes: [] }] })
+  creationBases.clear()
+  fixtureRevision = (await store.load()).projects[0].revision!
   const handler = createOpsApiHandler({ token, nodes: () => ops.list(), boards: () => ops.boards(),
     createNode: (input) => ops.create(input), updateNode: (id, input, force) => ops.update(id, input, force),
     previewOrganization: (id, entries) => ops.preview(id, entries), organizationAudit: (id) => ops.audit(id),

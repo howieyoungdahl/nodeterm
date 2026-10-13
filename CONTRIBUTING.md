@@ -435,6 +435,8 @@ Topic-based grouping still needs an operator or supervising agent.
 the user resolves a conflict, retain cards missing from disk with their ids and positions, and save
 the merged result. A conflict can pause autosave while more terminals are opened. The old disk
 snapshot cannot be used as a deletion list; closing a card is a separate explicit action.
+Saved publication comparisons must treat undefined optional object fields like omitted
+JSON fields, while preserving conflicts for actual unsaved edits on a deleted card.
 Honor the retained store's explicit deletion records when resolving Reload or Keep my version.
 Missing cards without such evidence still survive. Deleted groups release surviving new cards at
 their original canvas position, and deleted links and board assignments must not return. Preserve
@@ -533,3 +535,15 @@ state provenance. `stateVerified` is telemetry from this server run, and is forc
 false with `stateSource: restored` on reload. `stateSource: stale` marks the quiet-time
 synthetic done transition. Context publication time never warms a target. The separate
 mobile consumer can ignore these optional fields; it must not turn them into authority.
+
+Dead-card sweep evidence spans separate passes on the same answering tmux server generation.
+Healthy backlogs warm once and drain bounded batches; whole-server loss stays protected.
+Server filesystem adoption shares the workspace transaction FIFO and rechecks self-writes after
+admission. Ordinary operator task creation keeps manual organization unless an explicit policy
+was requested. See `docs/SERVER.md` for responses and recovery limits.
+
+Authenticated operator single-card deletion carries a symbol-keyed internal archive
+omission allowance for the exact project and node. Browser/RPC JSON cannot supply
+that authority. Ordinary saves and sweeps still preserve archived rows; explicit
+deletion keeps retained tombstones and archive receipt history, so stale snapshots
+cannot resurrect the removed card or its incident links and board assignments.

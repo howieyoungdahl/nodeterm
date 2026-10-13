@@ -323,6 +323,21 @@ describe('HeadlessNodeFactory', () => {
     })
   })
 
+  it('never recreates a retained deleted card from a late verified hook and surviving live pane', async () => {
+    const opened = await factory.openTerminal('term-source', {}, true)
+    const nodeId = (opened.result as { id: string }).id
+    const deleted = await store.load({ sideline: false })
+    const project = deleted.projects[0]
+    project.nodes = project.nodes.filter(n => n.id !== nodeId)
+    project.bridges = project.bridges?.filter(e => e.source !== nodeId && e.target !== nodeId)
+    project.ropes = project.ropes?.filter(e => e.source !== nodeId && e.target !== nodeId)
+    await store.save(deleted)
+    expect(pty.live.has(nodeId)).toBe(true)
+    expect((await store.load({ sideline: false })).projects[0].deletedEntities?.nodes).toContain(nodeId)
+    await factory.onHookRegistration('claude', nodeId, true)
+    expect((await store.load({ sideline: false })).projects[0].nodes.some(n => n.id === nodeId)).toBe(false)
+  })
+
   it('re-attaches a verified hand launch after a stale save drops its live card', async () => {
     // Reproduce the field shape: a browser serialized this snapshot before Server control added
     // the terminal, then its whole-workspace save landed after the add. The card disappears while

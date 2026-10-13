@@ -810,6 +810,7 @@ export class PtyManager {
    * an absent backend is an inert dead card. The map is deliberately process-local: it is runtime
    * provenance, not project content, and new nodes created during this run are absent from it.
    */
+  private bootProtectionEnabled = false
   private bootPersisted = new Map<string, 'tmux' | 'session-host' | 'dead'>()
   /** sessionId → exact generation whose persistent backend is being ended by the awaited profile
    * switch path. A backend can emit exit before its kill response arrives; callbacks for this
@@ -2502,6 +2503,7 @@ export class PtyManager {
   async protectPersistedSessionsAtBoot(
     persistKeys: readonly string[]
   ): Promise<{ dead: string[]; guarded: string[] }> {
+    this.bootProtectionEnabled = true
     const keys = [...new Set(persistKeys)]
     const dead: string[] = []
     const guarded: string[] = []
@@ -2547,6 +2549,15 @@ export class PtyManager {
   /** Whether a tmux session for this node id currently exists (server alive + session present).
    *  Async like the remote probe: a bulk project load fires one `create()` per terminal node,
    *  and a synchronous subprocess per probe would serialize on the main event loop. */
+  /** Read-only identity of the currently answering tmux server. Missing/failed probes are unknown. */
+  async cleanupBackendGeneration(): Promise<string | null> {
+    if (!this.tmuxPath) return null
+    try {
+      const { stdout } = await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'display-message', '-p', '#{pid}'], { timeout: PROBE_TIMEOUT_MS })
+      return /^[1-9][0-9]*$/.test(stdout.trim()) ? `${TMUX_SOCKET}:${stdout.trim()}` : null
+    } catch { return null }
+  }
+
   private async tmuxSessionExists(persistKey: string): Promise<boolean> {
     return (await this.tmuxSessionPresence(persistKey)) !== 'dead'
   }
@@ -3517,6 +3528,9 @@ export class PtyManager {
    * the process really ended, but the profile switch still rejects and never respawns/applies. */
   private handleSessionExit(sessionId: string, session: Session, exitCode: number): void {
     if (this.sessions.get(sessionId) !== session) return
+    // A crashed tmux painter or server must not turn a restored card into a fresh shell.
+    // Retry the exact backend through attach-only; absence surfaces the existing dead-card plate.
+    if (this.bootProtectionEnabled && session.tmuxBacked && session.persistKey) this.bootPersisted.set(session.persistKey, 'tmux')
     this.flush(sessionId, session) // deliver any buffered output before the exit signal
     session.onExit?.(exitCode) // relay host sink (unchanged)
     for (const client of this.clientsOf(session))

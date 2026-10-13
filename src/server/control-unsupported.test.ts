@@ -61,7 +61,8 @@ afterAll(() => {
 describe('the Server Edition refuses canvas control by name', () => {
   it('answers every verb with the same machine-readable error, in JSON', async () => {
     for (const verb of ['list', 'open-terminal', 'write']) {
-      const res = await control(verb, 'n-1', 'application/json')
+      // Measure the edition refusal after identity admission, independent of the dated cutoff.
+      const res = await control(verb, 'n-1', 'application/json', nodeAuthToken(SECRET, 'n-1'))
       expect(res.status, verb).toBe(400)
       const body = (await res.json()) as { ok: boolean; error: string; message: string }
       expect(body.ok, verb).toBe(false)
