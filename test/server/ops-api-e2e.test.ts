@@ -333,7 +333,13 @@ describe.skipIf(!canDriveTmux)('operator node creation (POST/PATCH/DELETE /opsap
   })
 
   it('places a keyed assistant card and retries without replacing its real private tmux pane', async () => {
+    const before = await fetch(`${base}/opsapi/boards`, { headers: auth })
+    expect(before.status).toBe(200)
+    const initial = await before.json() as { boards: Array<{ projectId: string; revision: string }> }
+    // Placement is opt-in. Keep the original revision in the immutable idempotent request.
+    const expectedRevision = initial.boards.find((board) => board.projectId === 'op-project')!.revision
     const input = { ...managedCreate('op-project', 'org-real-tmux-0001'), projectId: 'op-project', title: 'Disposable organization fixture', idempotencyKey: 'org-real-tmux-0001',
+      organizationPolicy: { version: 1, projectId: 'op-project', roles: { ops: 'fixture-ops' } }, expectedRevision,
       organization: { owner: 'E2E fixture', projectId: 'op-project', workstream: 'test', functionalRole: 'ops' } }
     const post = () => fetch(`${base}/opsapi/nodes`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(input) })
     const first = await post()
