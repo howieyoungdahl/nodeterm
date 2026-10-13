@@ -48,15 +48,13 @@ export type ServerConfig = {
    */
   deadCardReapMinutes?: number
   /**
-   * Mass-sweep guard: dead terminal cards in a SINGLE sweep pass at or above which the sweep
-   * refuses the whole pass, removes nothing, and logs one line. Default 5; zero disables this
-   * rule (the fraction rule below still applies). `POST /opsapi/sweep {"force":true}` overrides.
+   * Bounded healthy backlog batch size and unhealthy mass-event count threshold. Default 5;
+   * zero disables count reporting and retains the default batch size. `POST /opsapi/sweep {"force":true}` overrides.
    */
   deadCardReapMassLimit?: number
   /**
-   * Mass-sweep guard, share form: dead-of-scanned ratio (0..1) at or above which the sweep
-   * refuses. Default 0.5; zero disables this rule. Needs at least two dead cards to trip, so a
-   * one-card canvas is still reapable.
+   * Unhealthy mass-event share threshold (0..1). Default 0.5; zero disables this threshold.
+   * Whole-server-loss protection remains active independently of threshold configuration.
    */
   deadCardReapMassFraction?: number
   /**

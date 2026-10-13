@@ -924,7 +924,7 @@ export class HeadlessNodeFactory {
     const project = projectId
       ? workspace.projects.find((candidate) => candidate.id === projectId && !candidate.ssh)
       : undefined
-    if (!project || !(await this.paneIsAlive(nodeId))) return null
+    if (!project || project.deletedEntities?.nodes?.includes(nodeId) || !(await this.paneIsAlive(nodeId))) return null
 
     const remembered = this.runtimeNodes.get(nodeId)
     const normalSize = terminalSize(this.deps.settings())

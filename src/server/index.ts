@@ -6,6 +6,7 @@ import { FileCleanupReservations } from '../core/session-cleanup-reservations'
 import { cleanupReaperGuards } from '../core/session-cleanup-protection'
 import { CleanupActivity, createCleanupProbe } from '../core/session-cleanup-probe'
 import { createCleanupStartupWitness } from '../core/session-cleanup-generation'
+import { loopOwnedFrameIds } from '../shared/canvas-layout'
 import { sessionName } from '../core/tmux-naming'
 import fs from 'fs'
 import { readAgentSessionName } from '../core/agent-session-name'
@@ -490,8 +491,10 @@ export async function startServer(
   // now so the runtime, once present, consumes the exact same normalized stream as the UI/mirror.
   let canvasControl: ServerCanvasControl | null = null
   const assistantCreationReceipts = new AssistantCreationReceipts(path.join(config.dataDir, 'assistant-creation-receipts'))
+  const activeLoopNodes = new Set<string>()
   const nodeOps = new ServerNodeOps({
     workspaceStore,
+    backendGeneration: () => ptyManager.cleanupBackendGeneration(),
     sessionPresence: (nodeId) => ptyManager.sessionPresence(nodeId),
     destroySession: (nodeId) =>
       ptyManager.destroySession(null, nodeId, { everySocket: true }),
@@ -530,15 +533,30 @@ export async function startServer(
     listSessions: () => ptyManager.listNodetermSessions(),
     listPaneCwds: () => ptyManager.listNodetermPaneCwds(),
     protectedCleanupNodeIds: () => sessionCleanup.protectedNodeIds(),
+    liveProtectedCleanupNodeIds: workspace => {
+      const held = new Set<string>()
+      const nodes = workspace.projects.flatMap(p => p.nodes)
+      const frames = new Set(loopOwnedFrameIds(nodes, [...activeLoopNodes]))
+      const byId = new Map(nodes.map(n => [n.id, n]))
+      for (const node of nodes) {
+        const seen = new Set<string>()
+        let cursor: string | undefined = node.id
+        while (cursor && !seen.has(cursor)) {
+          seen.add(cursor)
+          if (activeLoopNodes.has(cursor) || frames.has(cursor)) { held.add(node.id); break }
+          cursor = byId.get(cursor)?.parentId
+        }
+      }
+      return [...held]
+    },
     mirrorOf: (nodeId) => mirrorEntry(nodeId),
     // The adopted id was NOT created during this Server run, so it takes the persisted-card
     // classification, not the fresh-spawn path: `attach-session` only, dead card if the session
     // vanishes. Same production function Server boot runs over the saved cards.
     protectAdopted: (nodeIds) => ptyManager.protectPersistedSessionsAtBoot(nodeIds),
     mutationQueue: workspaceMutationQueue,
-    // Mass-sweep guard. A pass this large is a host event (a dead tmux server, a renamed socket),
-    // and the cards are the last record of the sessions, so the pass is refused whole rather than
-    // applied. POST /opsapi/sweep with "force": true is the deliberate override.
+    // Healthy confirmed backlogs drain bounded batches. Whole-server loss preserves cards;
+    // POST /opsapi/sweep with "force": true remains the deliberate manual override.
     massLimit: {
       maxCards: config.deadCardReapMassLimit ?? 5,
       maxFraction: config.deadCardReapMassFraction ?? 0.5
@@ -568,6 +586,11 @@ export async function startServer(
     onRegistration: (agentId, nodeId, verified) =>
       canvasControl?.onHookRegistration(agentId, nodeId, verified),
     onEvent: (event) => {
+      if (event.kind === 'session' && event.sessionPhase) activeLoopNodes.delete(event.nodeId)
+      if (event.kind === 'recurring') {
+        if (event.recurringEnd) activeLoopNodes.delete(event.nodeId)
+        else activeLoopNodes.add(event.nodeId)
+      }
       void cleanupActivity.observe(event)
       canvasControl?.onAgentEvent(event)
     },
@@ -755,7 +778,7 @@ export async function startServer(
     canvases: () => workspaceStore.persistedCanvases(),
     installAgentIntegrations: config.installHooks !== false
   })
-  const workspaceWatcher = createServerWorkspaceWatcher(workspaceStore)
+  const workspaceWatcher = createServerWorkspaceWatcher(workspaceStore, { exclusive: work => workspaceMutationQueue.run(work) })
   // Every load()/save() is a canvas change as far as links are concerned: a browser drawing a
   // bridge edge reaches us as the workspace save it triggers. It also refreshes the local-ref
   // watcher set, so projects added or removed while the server runs get the same hand-edit path.

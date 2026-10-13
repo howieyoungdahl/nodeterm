@@ -41,6 +41,10 @@ function harness(opts: {
   nodes?: CanvasNodeState[]
   pane?: Record<string, boolean | Error>
   status?: Record<string, { state?: AgentState; updatedAt: number }>
+  generation?: () => Promise<string | null>
+  listSessions?: () => Promise<string[]>
+  protectedIds?: () => Promise<string[]>
+  liveProtectedIds?: () => readonly string[]
   remote?: boolean
   destroyError?: Error
   massLimit?: DeadCardMassLimit
@@ -97,6 +101,10 @@ function harness(opts: {
     creationReceipts: new AssistantCreationReceipts(path.join(evidenceDir, 'creations')),
     flushOwnership: async () => {},
     workspaceStore: store,
+    backendGeneration: opts.generation ?? (async () => "fixture-generation"),
+    protectedCleanupNodeIds: opts.protectedIds,
+    liveProtectedCleanupNodeIds: opts.liveProtectedIds,
+    listSessions: opts.listSessions ?? (async () => Object.entries(opts.pane ?? {}).filter(([, alive]) => alive === true).map(([id]) => `nt-${id}`)),
     sessionPresence: async (id) => {
       probes.push(id)
       const answer = opts.pane?.[id]
@@ -207,14 +215,15 @@ describe('ServerNodeOps', () => {
       pane: { dead: false, live: true, unknown: new Error('tmux unreadable') }
     })
 
-    expect(await h.service.sweep(true)).toMatchObject({ affectedIds: ['dead'], dryRun: true })
+    expect(await h.service.sweep(true)).toMatchObject({ affectedIds: [], dryRun: true })
     expect(h.workspace().projects[0].nodes).toHaveLength(4)
     expect(h.saves()).toBe(0)
 
+    expect(await h.service.sweep(false)).toMatchObject({ affectedIds: [], dryRun: false })
     expect(await h.service.sweep(false)).toMatchObject({ affectedIds: ['dead'], dryRun: false })
     expect(h.workspace().projects[0].nodes.map((n) => n.id)).toEqual(['live', 'unknown', 'note'])
     expect(h.removed).toEqual(['dead'])
-    expect(h.probes.filter((id) => id === 'dead')).toHaveLength(4)
+    expect(h.probes.filter((id) => id === 'dead')).toHaveLength(7)
   })
 
   it(
@@ -536,35 +545,28 @@ describe('ServerNodeOps mass-sweep guard', () => {
       }
     })
 
-  it('refuses a pass over the count threshold, mutates nothing, and logs one loud line', async () => {
+  it('warms a healthy backlog without removal or a refusal warning', async () => {
     const h = fiveDead()
 
     const result = await h.service.sweep(false)
-    expect(result.refused).toEqual({
-      reason: 'mass_limit',
-      deadCount: 5,
-      scanned: 12,
-      maxCards: 5,
-      maxFraction: 0.5
-    })
-    // The set it declined to touch is still reported, so an operator can inspect it before forcing.
-    expect(result.affectedIds).toEqual(['d1', 'd2', 'd3', 'd4', 'd5'])
+    expect(result.refused).toBeUndefined()
+    expect(result.pendingConfirmation).toBe(true)
+    expect(result.remaining).toBe(5)
+    expect(result.affectedIds).toEqual([])
     expect(h.workspace().projects[0].nodes).toHaveLength(12)
     expect(h.saves()).toBe(0)
     expect(h.removed).toEqual([])
-    expect(h.warnings).toHaveLength(1)
-    expect(h.warnings[0]).toContain('REFUSED dead-card sweep: 5 of 12')
-    expect(h.warnings[0]).toContain('"force":true')
+    expect(h.warnings).toEqual([])
   })
 
-  it('refuses on the share rule when the count rule alone would let a small canvas empty', async () => {
+  it('warms a healthy high-fraction backlog before removal', async () => {
     const h = harness({
       nodes: [node('d1'), node('d2'), node('d3'), node('live')],
       pane: { d1: false, d2: false, d3: false, live: true }
     })
 
     const result = await h.service.sweep(false)
-    expect(result.refused).toMatchObject({ reason: 'mass_limit', deadCount: 3, scanned: 4 })
+    expect(result).toMatchObject({ pendingConfirmation: true, remaining: 3 })
     expect(h.workspace().projects[0].nodes).toHaveLength(4)
     expect(h.saves()).toBe(0)
   })
@@ -575,6 +577,7 @@ describe('ServerNodeOps mass-sweep guard', () => {
       pane: { d1: false, d2: false, 'live-1': true, 'live-2': true, 'live-3': true }
     })
 
+    await h.service.sweep(false)
     const result = await h.service.sweep(false)
     expect(result.refused).toBeUndefined()
     expect(result.affectedIds).toEqual(['d1', 'd2'])
@@ -600,7 +603,7 @@ describe('ServerNodeOps mass-sweep guard', () => {
     const h = fiveDead()
 
     const result = await h.service.sweep(true)
-    expect(result).toMatchObject({ dryRun: true, refused: { reason: 'mass_limit' } })
+    expect(result).toMatchObject({ dryRun: true, pendingConfirmation: true })
     expect(h.saves()).toBe(0)
     expect(h.warnings).toEqual([])
   })
@@ -611,15 +614,133 @@ describe('ServerNodeOps mass-sweep guard', () => {
       pane: { d1: false, d2: false, live: true },
       massLimit: { maxCards: 2, maxFraction: 0 }
     })
-    expect((await h.service.sweep(false)).refused).toMatchObject({ deadCount: 2, maxCards: 2 })
+    expect(await h.service.sweep(false)).toMatchObject({ pendingConfirmation: true, remaining: 2 })
 
     const off = harness({
       nodes: [node('d1'), node('d2'), node('d3'), node('live')],
       pane: { d1: false, d2: false, d3: false, live: true },
       massLimit: { maxCards: 0, maxFraction: 0 }
     })
+    await off.service.sweep(false)
     expect((await off.service.sweep(false)).refused).toBeUndefined()
     expect(off.workspace().projects[0].nodes.map((n) => n.id)).toEqual(['live'])
+  })
+})
+
+describe('bounded confirmed backlog cleanup', () => {
+  it('drains a healthy large backlog in bounded batches after a consecutive pass', async () => {
+    const h = harness({ nodes: [...Array.from({ length: 19 }, (_, i) => node(`dead-${i}`)), node('live')], pane: { live: true } })
+    expect((await h.service.sweep(false)).pendingConfirmation).toBe(true)
+    for (let i = 0; i < 4; i++) {
+      const result = await h.service.sweep(false)
+      expect(result.refused).toBeUndefined()
+      expect(result.affectedIds.length).toBeLessThanOrEqual(5)
+    }
+    expect(h.workspace().projects[0].nodes.map(n => n.id)).toEqual(['live'])
+  })
+  it('never treats a persistent whole-server loss as a healthy backlog', async () => {
+    const pane = { live: true }
+    const h = harness({ nodes: [node('a'), node('b'), node('live')], pane })
+    await h.service.sweep(false)
+    pane.live = false
+    for (let i = 0; i < 3; i++) expect((await h.service.sweep(false)).refused).toBeDefined()
+    expect(h.saves()).toBe(0)
+    pane.live = true
+    expect((await h.service.sweep(false)).pendingConfirmation).toBe(true)
+    expect((await h.service.sweep(false)).affectedIds).toEqual(['a', 'b'])
+  })
+  it('resets absence evidence when the answering tmux server changes or becomes unreadable', async () => {
+    let generation: string | null = 'one'
+    const h = harness({ nodes: [node('dead'), node('live')], pane: { live: true }, generation: async () => generation })
+    await h.service.sweep(false)
+    generation = 'two'
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    generation = null
+    expect((await h.service.sweep(false)).refused).toBeDefined()
+    expect(h.saves()).toBe(0)
+    generation = 'two'
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect((await h.service.sweep(false)).affectedIds).toEqual(['dead'])
+  })
+  it('withholds confirmation when healthy-looking pane probes have an unreadable session listing', async () => {
+    let readable = true
+    const h = harness({ nodes: [node('dead'), node('live')], pane: { live: true },
+      listSessions: async () => { if (!readable) throw new Error('unreadable tmux server'); return ['nt-live'] } })
+    await h.service.sweep(false)
+    readable = false
+    expect((await h.service.sweep(false)).refused).toBeDefined()
+    readable = true
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect((await h.service.sweep(false)).affectedIds).toEqual(['dead'])
+  })
+  it('retains active-loop cleanup reservations and rechecks reservations before apply', async () => {
+    let held = ['loop-worker']
+    const h = harness({ nodes: [node('loop-worker'), node('dead'), node('live')], pane: { live: true }, protectedIds: async () => held })
+    await h.service.sweep(false)
+    held = ['loop-worker', 'dead']
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(h.saves()).toBe(0)
+  })
+  it('rechecks server generation at apply before deleting a confirmed card', async () => {
+    let reads = 0
+    const h = harness({ nodes: [node('dead'), node('live')], pane: { live: true }, generation: async () => ++reads < 3 ? 'one' : 'two' })
+    await h.service.sweep(false)
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(h.saves()).toBe(0)
+  })
+  it('preserves a confirmed card if tmux changes during its final pane probe', async () => {
+    let generation = 'one', deadProbes = 0
+    const h = harness({ nodes: [node('dead'), node('live')], pane: { live: true }, generation: async () => generation })
+    // Use the real engine with a probe seam that changes generation at the final recheck.
+    const deps = (h.service as any).deps
+    const original = deps.sessionPresence
+    deps.sessionPresence = async (id: string) => {
+      if (id === 'dead' && ++deadProbes === 5) generation = 'replacement'
+      return original(id)
+    }
+    await h.service.sweep(false)
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(generation).toBe('replacement')
+    expect(h.saves()).toBe(0)
+  })
+  it.each(['working', 'blocked', 'loop'])('rechecks %s protection after the final generation await', async protection => {
+    const status: Record<string, { state?: AgentState; updatedAt: number }> = {}
+    let held: string[] = [], reads = 0
+    const h = harness({ nodes: [node('dead'), node('live')], pane: { live: true }, status,
+      liveProtectedIds: () => held,
+      generation: async () => {
+        if (++reads === 3) {
+          if (protection === 'loop') held = ['dead']
+          else status.dead = { state: protection as AgentState, updatedAt: 1 }
+        }
+        return 'one'
+      } })
+    await h.service.sweep(false)
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(h.saves()).toBe(0)
+  })
+  it('retains working and blocked cards despite absent backends', async () => {
+    const h = harness({ nodes: [node('work'), node('blocked'), node('live')], pane: { live: true },
+      status: { work: { state: 'working', updatedAt: 1 }, blocked: { state: 'blocked', updatedAt: 1 } } })
+    await h.service.sweep(false)
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+  })
+  it('refuses terminal drafts but keeps explicit sticky deletion available', async () => {
+    const h = harness({ nodes: [node('draft', 'terminal', { text: 'unfinished command' }), node('note', 'sticky', { text: 'note body' })] })
+    expect(await h.service.remove('draft', true)).toMatchObject({ ok: false, error: 'card_has_unsent_text_or_pending_launch' })
+    expect(await h.service.remove('note', true)).toMatchObject({ ok: true })
+    expect(h.workspace().projects[0].nodes.map(n => n.id)).toEqual(['draft'])
+  })
+  it('creates ordinary task cards with manual organization by default', async () => {
+    const h = harness()
+    const created = await h.create({})
+    expect(created.ok).toBe(true)
+    expect(h.workspace().projects[0].nodes[0].organization).toMatchObject({ mode: 'manual', columnId: null })
+  })
+  it('preserves unsent text and armed nodes even under force', async () => {
+    const h = harness({ nodes: [node('draft', 'terminal', { text: 'unfinished input' }), node('empty')] })
+    expect((await h.service.sweep(false, true)).affectedIds).toEqual(['empty'])
+    expect(h.workspace().projects[0].nodes.map(n => n.id)).toEqual(['draft'])
   })
 })
 

@@ -405,6 +405,8 @@ export class WorkspaceStore {
             ...(layoutRules ? { layoutRules } : {}),
             nodes: sanitizeOrganizationNodes(sanitizeNodeTriggers(base.nodes), base.kanban),
             ...(parseOrganizationPolicy(base.kanbanOrganization) ? { kanbanOrganization: parseOrganizationPolicy(base.kanbanOrganization) } : { kanbanOrganization: undefined }),
+            // Inline deletion evidence is retained at the index's publication boundary.
+            deletedEntities: (index as WorkspaceIndexV3 & { _reconciliation?: { deleted?: Project['deletedEntities'] } })._reconciliation?.deleted,
             revision: createHash('sha256').update(JSON.stringify(e.project)).digest('hex')
           }
         })

@@ -1,3 +1,4 @@
+import { readPublicationFile } from '../core/project-commit-store'
 import { platform } from '../core/platform'
 import type { WorkspaceStore } from '../core/workspace-store'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
@@ -12,6 +13,7 @@ type WatchedWorkspaceStore = Pick<
 export interface ServerWorkspaceWatcherOptions {
   debounceMs?: number
   publish?: (project: Project) => void
+  exclusive?: <T>(work: () => Promise<T>) => Promise<T>
 }
 
 /**
@@ -31,7 +33,14 @@ export function createServerWorkspaceWatcher(
     paths: () => store.localRefPaths(),
     isSelfWrite: (filePath, content) => store.isSelfWrite(filePath, content),
     onExternalChange: (filePath) => {
-      void store.readLocalRefByPath(filePath)
+      const read = async () => {
+        // A queued filesystem notification may describe a server publication that finished
+        // after the watcher's first content check. Recheck after the writer FIFO drains.
+        const raw = await readPublicationFile(filePath)
+        if (store.isSelfWrite(filePath, raw)) return null
+        return store.readLocalRefByPath(filePath)
+      }
+      void (options.exclusive ? options.exclusive(read) : read())
         .then((changed) => {
           if (changed) publish(changed)
         })

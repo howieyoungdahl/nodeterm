@@ -105,9 +105,16 @@ function tombstones(document: ProjectDocument): Tombstones {
 }
 function ids(document: ProjectDocument, key: string): string[] {
   const values = document[key]
-  if (!Array.isArray(values)) return []
-  return values.flatMap((value) => value && typeof value === 'object' && !Array.isArray(value) &&
+  if (Array.isArray(values)) return values.flatMap((value) => value && typeof value === 'object' && !Array.isArray(value) &&
     typeof value.id === 'string' ? [value.id] : [])
+  // Inline canvases have no project file. Their entity deletion evidence must live in the
+  // retained index publication, not disappear inside an otherwise atomic entries array.
+  if (document.version === 3 && Array.isArray(document.entries)) return document.entries.flatMap(entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !entry.project ||
+      typeof entry.project !== 'object' || Array.isArray(entry.project)) return []
+    return ids(entry.project, key)
+  })
+  return []
 }
 function content(document: ProjectDocument): ProjectDocument {
   const { rev: _rev, savedAt: _saved, _reconciliation: _meta, ...rest } = document
@@ -468,6 +475,8 @@ export class ProjectCommitStore {
       const deleted = tombstones(incoming)
       const retained = await this.retainedDeleted()
       for (const key of collections) deleted[key] = [...new Set([...deleted[key], ...retained[key]])]
+      if (base.version === 3 && collections.some(key => ids(local, key).some(id => deleted[key].includes(id))))
+        return await this.finish(op, result('conflict', { current, message: 'Inline canvas replays a retained deleted entity.' }))
       const merged = reconcileProjectDocuments(content(base), content(local), content(incoming), new Set(deleted.nodes), this.keyedLists)
       for (const key of ['bridges', 'ropes'] as const) {
         for (const id of ids(merged.document, key).filter((id) => deleted[key].includes(id))) {
