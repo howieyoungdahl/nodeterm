@@ -7,9 +7,10 @@ const equal = (a: unknown, b: unknown): boolean => {
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal(v, b[i]))
   // RPC/disk JSON omits undefined object fields, while Flow serialization materializes
   // them. Compare the persisted values so an untouched node is not an edit-vs-delete
-  // conflict. Null, array order and every defined field still participate in equality.
+  // conflict. Only own values participate; inherited prototype fields are not persisted JSON.
+  // Null, array order and every defined field still participate in equality.
   return object(a) && object(b) &&
-    [...new Set([...Object.keys(a), ...Object.keys(b)])].every(k => equal(a[k], b[k]))
+    [...new Set([...Object.keys(a), ...Object.keys(b)])].every(k => equal(Object.hasOwn(a, k) ? a[k] : undefined, Object.hasOwn(b, k) ? b[k] : undefined))
 }
 const clean = (p: Project): Project => {
   const { revision: _revision, loadedKanban: _baseline, workspaceChange: _change, organizationChange: _organization, deletedEntities: _deletions, ...content } = p
