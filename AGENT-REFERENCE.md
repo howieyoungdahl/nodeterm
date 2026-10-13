@@ -200,6 +200,11 @@ Flow array back over it before the reload effect lands. Closing a node is the ex
 path. The same behavior applies to desktop and Server Edition; the separate native mobile client
 needs equivalent handling for any future disk-reload control.
 
+Saved publication equality uses JSON object semantics: optional fields materialized as
+`undefined` by Flow are equivalent to omitted disk/RPC fields. Otherwise an untouched
+card becomes a false edit-versus-delete conflict on operator close. Defined local edits,
+including unsaved text on a deleted card, still refuse adoption.
+
 Explicit retained deletions are the exception to open-card preservation. `fileToProject` projects
 the loaded `_reconciliation.deleted` records into runtime `deletedEntities`. Both conflict choices
 exclude only those recorded nodes and links, remove their board references, and release surviving

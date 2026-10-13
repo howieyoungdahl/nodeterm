@@ -5,8 +5,11 @@ const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 const equal = (a: unknown, b: unknown): boolean => {
   if (a === b) return true
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal(v, b[i]))
-  return object(a) && object(b) && Object.keys(a).length === Object.keys(b).length &&
-    Object.keys(a).every(k => Object.hasOwn(b, k) && equal(a[k], b[k]))
+  // RPC/disk JSON omits undefined object fields, while Flow serialization materializes
+  // them. Compare the persisted values so an untouched node is not an edit-vs-delete
+  // conflict. Null, array order and every defined field still participate in equality.
+  return object(a) && object(b) &&
+    [...new Set([...Object.keys(a), ...Object.keys(b)])].every(k => equal(a[k], b[k]))
 }
 const clean = (p: Project): Project => {
   const { revision: _revision, loadedKanban: _baseline, workspaceChange: _change, organizationChange: _organization, deletedEntities: _deletions, ...content } = p

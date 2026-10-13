@@ -31,3 +31,9 @@ it('merges insertion anchors around a removed unchanged entity without resurrect
   expect(result.kind).toBe('adopt'); if (result.kind !== 'adopt') throw new Error('fixture')
   expect(result.projects[0].nodes.map(n => n.id)).toEqual(['L', 'A', 'R', 'C'])
 })
+
+it('keeps null distinct from an omitted field when checking edit-versus-delete overlap', () => {
+  const base = project(['A']), local = project(['A'])
+  Reflect.deleteProperty(local.nodes[0], 'group')
+  expect(merge(base, local, project([]))).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})

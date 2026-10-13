@@ -79,6 +79,39 @@ it('refuses true overlap, missed/out-of-order/foreign publications and missing o
   for (const plan of rejected) { expect(plan.kind).toBe('conflict'); applyWorkspaceFlowPublication(plan, { content, acknowledge, created: vi.fn(), defer: vi.fn() }) }
   expect(content).not.toHaveBeenCalled(); expect(acknowledge).not.toHaveBeenCalled(); expect(f.live[0].data.title).toBe('local')
 })
+it.each([false, true])('adopts a saved operator close of an unchanged JSON node, archived=%s', archived => {
+  const f = fixture()
+  if (archived) f.base.nodes[0].cleanupArchiveId = 'receipt'
+  // Real RPC/disk snapshots omit undefined keys. Flow serialization materializes them.
+  f.base = JSON.parse(JSON.stringify(f.base)) as Project
+  f.incoming = JSON.parse(JSON.stringify(f.base)) as Project
+  f.incoming.nodes = f.incoming.nodes.filter(n => n.id !== 'same')
+  f.incoming.deletedEntities = { nodes: ['same'], bridges: ['incident'], ropes: [] }
+  f.base.bridges = [{ id: 'incident', source: 'same', target: 'local' }]
+  f.incoming.bridges = []
+  f.base.kanban!.assignments = [{ nodeId: 'same', columnId: 'manual' }]
+  f.incoming.kanban!.assignments = []
+  const live = nodeStatesToFlow(f.base.nodes)
+  live[1].data.text = 'unsaved surviving draft'
+  const plan = planWorkspaceFlowPublication({ revision, projects: [f.base], activeProjectId: 'p', nodes: live,
+    change: { before: revision, after, changes: [{ before: f.base, after: f.incoming }] } })
+  expect(plan.kind).toBe('adopt'); if (plan.kind !== 'adopt') throw new Error('fixture')
+  expect(plan.nodes.map(n => n.id)).toEqual(['local'])
+  expect(plan.nodes[0].data.text).toBe('unsaved surviving draft')
+  expect(plan.removed).toEqual(['same'])
+  expect(plan.projects[0].bridges).toEqual([])
+  expect(plan.projects[0].kanban!.assignments).toEqual([])
+  expect(plan.projects[0].deletedEntities).toEqual(f.incoming.deletedEntities)
+  expect(plan.revision).toBe(after)
+})
+it('refuses saved deletion of a card carrying a real unsaved draft despite retained deletion evidence', () => {
+  const f = fixture()
+  f.incoming.nodes = f.incoming.nodes.filter(n => n.id !== 'same')
+  f.incoming.deletedEntities = { nodes: ['same'], bridges: [], ropes: [] }
+  f.live[0].data.text = 'unsent text must stay visible'
+  expect(f.plan()).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+  expect(f.live[0].data.text).toBe('unsent text must stay visible')
+})
 it('installs all content before acknowledging and defers the original node-created trigger', () => {
   const f = fixture(), order: string[] = [], deferred: Array<() => void> = []
   f.incoming.nodes.push(node('created'))
