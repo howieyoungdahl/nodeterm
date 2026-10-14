@@ -12,6 +12,7 @@ interface FakePty {
   resizes: Array<{ cols: number; rows: number }>
   paused: boolean
   killed: boolean
+  initialSize: { cols: number; rows: number }
 }
 const spawned: FakePty[] = []
 /** When set, the NEXT pty.spawn throws (simulates posix_spawn failing). */
@@ -31,7 +32,11 @@ vi.mock('node-pty', () => ({
       failNextSpawn = false
       throw new Error('posix_spawnp failed.')
     }
-    const p: FakePty = { writes: [], resizes: [], paused: false, killed: false }
+    const { cols, rows } = _opts as { cols: number; rows: number }
+    const p: FakePty = {
+      writes: [], resizes: [], paused: false, killed: false,
+      initialSize: { cols, rows }
+    }
     spawned.push(p)
     return {
       onData: (cb: (d: string) => void) => {
@@ -607,6 +612,106 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     const bId = b.status === 'fulfilled' ? b.value.sessionId : 'b'
     const cId = c.status === 'fulfilled' ? c.value.sessionId : 'c'
     expect(cId).toBe(bId)
+  })
+})
+
+describe('headless subscribers keep the backend alive without sizing real viewers', () => {
+  let fake: FakePlatform
+
+  beforeEach(() => {
+    spawned.length = 0
+    failNextSpawn = false
+    fake = fakePlatform()
+    initPlatform(fake)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+    resetPlatformForTests()
+  })
+
+  async function manager(tmuxBacked = false) {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    if (tmuxBacked) {
+      // Exercise readiness too, without probing or controlling the host's real tmux server.
+      ;(m as unknown as { tmuxPath: string }).tmuxPath = '/usr/bin/tmux'
+      vi.spyOn(m as unknown as { tmuxSessionExists: (k: string) => Promise<boolean> }, 'tmuxSessionExists')
+        .mockResolvedValue(false)
+      vi.spyOn(m as unknown as { confirmedTmuxSessionExists: (k: string) => Promise<boolean> }, 'confirmedTmuxSessionExists')
+        .mockResolvedValue(true)
+      vi.spyOn(m as unknown as { ensureUpdateEnvKeys: (keys: string[]) => void }, 'ensureUpdateEnvKeys')
+        .mockImplementation(() => {})
+      vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+      vi.spyOn(m, 'paneCursor').mockResolvedValue(undefined)
+    }
+    return m
+  }
+  const create = (clientId: number, cols: number, rows: number) =>
+    fake.handlers[IPC.ptyCreate](clientId, { cols, rows, persistKey: 'headless-node' }) as Promise<{
+      sessionId: string
+      fresh: boolean
+    }>
+
+  it.each([false, true])('lets browser fit, expand, park and reconnect with tmuxBacked=%s', async (tmuxBacked) => {
+    const m = await manager(tmuxBacked)
+    const { sessionId } = await m.createHeadless({ cols: 120, rows: 36, persistKey: 'headless-node' })
+    expect(spawned[0].initialSize).toMatchObject({ cols: 120, rows: 36 })
+    expect(spawned[0].resizes).toEqual([]) // No real viewer yet: retain startup size.
+
+    expect((await create(ALICE, 238, 47)).sessionId).toBe(sessionId)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 238, rows: 47 })
+    m.resize(ALICE, sessionId, 300, 80)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 300, rows: 80 })
+
+    await create(BOB, 80, 24)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 80, rows: 24 })
+    m.resize(BOB, sessionId, null, null)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 300, rows: 80 })
+    m.kill(BOB, sessionId)
+    const beforePark = spawned[0].resizes.length
+    m.resize(ALICE, sessionId, null, null)
+    expect(spawned[0].resizes).toHaveLength(beforePark)
+    m.kill(ALICE, sessionId)
+    expect(spawned[0].killed).toBe(false)
+
+    // Headless still consumes output after the last real browser detaches.
+    fake.sent.length = 0
+    spawned[0].onDataCb?.('still alive')
+    vi.advanceTimersByTime(20)
+    expect(fake.sent.filter((s) => s.channel === IPC.ptyData(sessionId)).map((s) => s.to)).toEqual([0])
+
+    expect((await create(ALICE, 260, 60)).sessionId).toBe(sessionId)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 260, rows: 60 })
+    const beforeRejoin = spawned[0].resizes.length
+    await create(ALICE, 260, 60)
+    expect(spawned[0].resizes).toHaveLength(beforeRejoin)
+    expect(spawned).toHaveLength(1)
+  })
+
+  it.each([undefined, 'headless-worker'])('parks exactly the headless view when joining an existing browser, viewerId=%s', async (viewerId) => {
+    const m = await manager()
+    const { sessionId } = await create(ALICE, 238, 47)
+    await m.createHeadless({ cols: 120, rows: 36, persistKey: 'headless-node', viewerId })
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 238, rows: 47 })
+    // Repeating the headless attach must not leave its startup vote behind either.
+    await m.createHeadless({ cols: 120, rows: 36, persistKey: 'headless-node', viewerId })
+    m.resize(ALICE, sessionId, 300, 80)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 300, rows: 80 })
+    expect(spawned).toHaveLength(1)
+  })
+
+  it('parks before the no-persist-key early return and retains a plain-shell keepalive', async () => {
+    const m = await manager()
+    const { sessionId } = await m.createHeadless({ cols: 120, rows: 36 })
+    // A null relay vote independently sizes this unindexed session; no synthetic screen can cap it.
+    m.resize(null, sessionId, 238, 47)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 238, rows: 47 })
+    m.kill(null, sessionId)
+    expect(spawned[0].killed).toBe(false)
+    expect(spawned[0].resizes.at(-1)).toEqual({ cols: 238, rows: 47 })
   })
 })
 
