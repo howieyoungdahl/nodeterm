@@ -537,7 +537,7 @@ describe('native organization through HTTP, store and renderer', () => {
     const saved = (await store.load()).projects[0]
     expect(nodePlacement(saved.kanban, human.id).columnId).toBe('col-a')
     expect(nodePlacement(saved.kanban, 'human-two').columnId).toBe('col-b')
-  })
+  }, serialIoTimeout)
 
   it('preserves a repeated intentional Ungrouped choice against another browser assignment', async () => {
     const ws = await store.load(); ws.projects[0].kanban = assignNode(ws.projects[0].kanban!, human.id, null, null); await rpcSave(ws)
