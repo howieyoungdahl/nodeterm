@@ -3,6 +3,7 @@ import { creationAdmission, creationFlags, creationFromArgs } from '../shared/as
 import { planningAtCreation } from '../shared/task-planning'
 import type { AssistantCreationReceipts } from './assistant-creation-receipts'
 import { planOrganization, placeNode } from '../core/kanban-organization'
+import { addBoardColumn, assignBoardCard, parseCreateFlag, resolveBoardColumn } from './board-assign'
 import { randomBytes, randomUUID } from 'node:crypto'
 import path from 'node:path'
 
@@ -62,6 +63,7 @@ import type {
   Workspace
 } from '../shared/types'
 import {
+  boardCardTitle,
   buildBoardView,
   formatBoardMessage,
   formatListMessage,
@@ -1262,9 +1264,10 @@ export class HeadlessNodeFactory {
   /**
    * The caller's project as a kanban board. The board file stores only column ASSIGNMENTS — the
    * cards are the canvas session nodes, derived live — so this reads `project.kanban` (which the
-   * Server's own workspace files already round-trip) and never writes it. `assign` is not
-   * implemented on this edition, so a project with no board on disk gets the virtual Ungrouped
-   * column and a line saying so, rather than the renderer's lazy default columns.
+   * Server's own workspace files already round-trip) and never writes it; `assign` is the verb
+   * that writes it. A project with no board on disk gets the virtual Ungrouped column and a line
+   * saying so (columns appear once `assign --create` or the browser UI adds one), rather than the
+   * renderer's lazy default columns, whose ids would exist nowhere.
    */
   async board(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply> {
     const source = await this.readOnlySource('board', sourceNodeId, args)
@@ -1279,6 +1282,90 @@ export class HeadlessNodeFactory {
         ungrouped: view.ungrouped
       }
     }
+  }
+
+  /**
+   * File one session card under a kanban column of the caller's project (desktop's `assign`).
+   *
+   * Deliberately NOT creator-ownership gated: this writes board metadata only. It never touches the
+   * node, its group, or its session, and desktop classifies it non-destructive
+   * (`isDestructiveVerb('assign') === false`), so a director may file a card it did not open.
+   * Ownership still applies to every destructive verb. The verified-identity gate and the
+   * control-capable-agent check are the same as the structural verbs'.
+   *
+   * `--column` is required, so an omitted flag can never silently unassign a card; `ungrouped`
+   * unassigns on purpose. An unknown column is an error that lists the real ones, unless `--create`
+   * is passed, which appends it (to a project with no board, a one-column board).
+   */
+  assign(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply> {
+    return this.runExclusive('assign', async () => {
+      const flagError = unsupportedFlags(args, new Set(['node', 'column', 'before', 'create']))
+      if (flagError) return { ok: false, error: `assign: ${flagError}` }
+      const create = parseCreateFlag(args.create)
+      if (create === undefined) {
+        return { ok: false, error: 'assign: --create takes no value (or yes); got a different value' }
+      }
+      const source = await this.structuralSource('assign', sourceNodeId, verified)
+      if ('ok' in source) return source
+      const { workspace, project } = source
+
+      const nodeId = (args.node ?? '').trim()
+      const target = project.nodes.find((node) => node.id === nodeId)
+      const cardTitle = target ? boardCardTitle(target) : null
+      if (!target || cardTitle === null) {
+        return { ok: false, error: `assign: --node names no session card (${nodeId || 'missing'})` }
+      }
+      const columnRef = (args.column ?? '').trim()
+      if (!columnRef) return { ok: false, error: 'assign requires --column <id|title|ungrouped>' }
+      const beforeId = (args.before ?? '').trim() || null
+
+      let board = project.kanban
+      let columnId = resolveBoardColumn(board, columnRef)
+      let created = false
+      if (columnId === undefined) {
+        if (!create) {
+          const titles = board?.columns.map((column) => column.title).join(', ') || '(none)'
+          return {
+            ok: false,
+            error:
+              `assign: no column "${columnRef}" - columns: ${titles}` +
+              (board?.github ? '' : '; pass --create to add it')
+          }
+        }
+        const added = addBoardColumn(board, columnRef)
+        if (!added.ok) return { ok: false, error: added.error }
+        board = added.board
+        columnId = added.column.id
+        created = true
+      }
+
+      // Ungrouped on a project with no board: the card is already there, and writing an empty
+      // `kanban` would replace the browser's lazy default columns with none.
+      if (columnId === null && !board) {
+        return {
+          ok: true,
+          message: `moved ${cardTitle} to Ungrouped`,
+          result: { node: nodeId, column: null, created: false }
+        }
+      }
+
+      const next = assignBoardCard(board ?? { columns: [], assignments: [] }, nodeId, columnId, beforeId)
+      project.kanban = next
+      await this.deps.workspaceStore.save(workspace)
+      this.publishChangeSet(project, [], [])
+      const where = columnId
+        ? next.columns.find((column) => column.id === columnId)?.title ?? columnId
+        : 'Ungrouped'
+      return {
+        ok: true,
+        message: `moved ${cardTitle} to ${where}`,
+        result: { node: nodeId, column: columnId, created }
+      }
+    })
   }
 
   async openTerminal(

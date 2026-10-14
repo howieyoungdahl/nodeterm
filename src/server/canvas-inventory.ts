@@ -191,16 +191,15 @@ export function buildBoardView(project: Project): BoardView {
 }
 
 /**
- * Server Edition v1 has no way to CREATE columns: `assign` is not implemented here and the column
- * editor lives in the browser UI. So a project whose file has never carried a board renders one
- * virtual Ungrouped column and says why, rather than inventing the lazy default three columns the
- * renderer shows — inventing them would name column ids that exist nowhere and that no server verb
- * could ever move a card into.
+ * A project whose file has never carried a board renders one virtual Ungrouped column and says
+ * why, rather than inventing the lazy default three columns the renderer shows: inventing them
+ * would name column ids that exist nowhere and that no server verb could ever move a card into.
+ * Columns come from `assign --create` (which writes the board file) or the browser UI.
  */
 export const SERVER_BOARD_NO_COLUMNS_NOTE =
   'Server Edition v1 has no columns yet — this project has no kanban board on disk, so every ' +
-  'session card is Ungrouped. Columns appear once the board is edited in the browser UI; there ' +
-  'is no `assign` verb on this edition.'
+  'session card is Ungrouped. Add a column with `assign --node <id> --column "<title>" --create` ' +
+  'or in the browser UI.'
 
 export function formatBoardMessage(
   project: Project,
