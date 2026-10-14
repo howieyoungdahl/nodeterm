@@ -259,3 +259,14 @@ describe('capability setters schedule a workspace save', () => {
     }
   })
 })
+
+it('does not rewind revision or loaded board evidence on a delayed save acknowledgment', () => {
+  const p = useProjects.getState().addProject('P')
+  useProjects.setState({ revision: 'a'.repeat(64) })
+  const saved = useProjects.getState().toWorkspace()
+  useProjects.setState({ revision: 'c'.repeat(64), projects: [{ ...p, revision: 'c'.repeat(64), loadedKanban: { columns: [], assignments: [] } }] })
+  useProjects.getState().acknowledgeSave({ revision: 'b'.repeat(64), projectRevisions: { [p.id]: 'b'.repeat(64) } }, saved)
+  expect(useProjects.getState().revision).toBe('c'.repeat(64))
+  expect(useProjects.getState().projects[0].revision).toBe('c'.repeat(64))
+  expect(useProjects.getState().projects[0].loadedKanban).toEqual({ columns: [], assignments: [] })
+})

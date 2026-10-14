@@ -14,7 +14,12 @@ const equal = (a: unknown, b: unknown): boolean => {
 }
 const clean = (p: Project): Project => {
   const { revision: _revision, loadedKanban: _baseline, workspaceChange: _change, organizationChange: _organization, deletedEntities: _deletions, ...content } = p
-  return content
+  // Only the documented renderer defaults are equivalent to omission. Keep all other
+  // defined metadata, geometry and drafts in the three-way comparison.
+  return { ...content, nodes: content.nodes.map(n => ({ ...n,
+    titleAuto: n.titleAuto === undefined ? true : n.titleAuto,
+    collapsed: n.collapsed === undefined ? false : n.collapsed
+  })) }
 }
 
 /** Merge every field, not only new nodes. Arrays without entity IDs are atomic choices, so

@@ -143,7 +143,7 @@ import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
 import { useAutosave, useCreateFlush, useSavePersistence } from '../lib/useSavePersistence'
-import { mergeOrganizationProject, resolveWorkspaceConflict, saveWorkspace } from '../lib/workspacePersistence'
+import { mergeOrganizationProject, resolveWorkspaceConflict, saveWorkspace, subscribeWorkspacePublications } from '../lib/workspacePersistence'
 import { SaveFailureBar } from '../components/SaveFailureBar'
 import {
   adoptedNodesNotice,
@@ -450,8 +450,6 @@ import { chordHeld, isHoldChord, isModifierEventKey, matchesShortcut } from '@sh
 // while the gating lived in two hand-written blocks here, so the set decided nothing.
 import { isDestructiveVerb } from '@shared/control-verbs'
 import {
-  planWorkerFrame,
-  workerFrameLabel,
   workerNodeTitle,
   workerTaskSummary
 } from '@shared/worker-frame'
@@ -459,8 +457,6 @@ import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
   applyMutationToFlow,
-  applyWorkerFramePlan,
-  workerFrameNodeOf,
   markManualPlacement,
   setNodesPinned,
   compactToggleState,
@@ -2568,7 +2564,7 @@ export function Canvas() {
   // disjoint local edits before advancing the revision; preserve a conflict warning when
   // content overlaps or a publication was missed. Never repair a broken chain with an upsert.
   useEffect(() => {
-    return api.workspace.onServerChange((project) => {
+    return subscribeWorkspacePublications(api.workspace, (project) => {
       const store = useProjects.getState()
       const active = store.getProject(store.activeProjectId)
       const localProjects = store.projects.map(p => p.id === active?.id ? {
@@ -2576,15 +2572,10 @@ export function Canvas() {
         ropes: controlEdgesRef.current.map(e => ({ id: e.id, source: e.source, target: e.target })),
         bridges: linkEdgesRef.current.map(e => ({ id: e.id, source: e.source, target: e.target }))
       } : p)
-      if (project.workspaceChange) {
-        const seen = serverPublicationRevisionsRef.current
-        if (seen.size >= 64) seen.delete(seen.values().next().value!)
-        seen.add(project.workspaceChange.after)
-      }
       const result = planWorkspaceFlowPublication({ revision: store.revision, projects: localProjects,
         activeProjectId: store.activeProjectId, nodes: nodesRef.current, change: project.workspaceChange })
-      if (result.kind === 'duplicate') return
-      if (result.kind === 'conflict') { setConflict({ project, added: 0 }); return }
+      if (result.kind === 'duplicate') return { kind: 'duplicate', revision: store.revision! }
+      if (result.kind === 'conflict') { setConflict({ project, added: 0 }); return { kind: 'conflict' } }
       applyWorkspaceFlowPublication(result, {
         content: (plan) => {
           for (const id of plan.removed) useWebviewKeepAlive.getState().drop(id)
@@ -2609,6 +2600,13 @@ export function Canvas() {
         defer: queueMicrotask
       })
       bumpDirty()
+      return { kind: 'adopt', before: project.workspaceChange!.before, after: result.revision }
+    }, (project) => {
+      if (project.workspaceChange) {
+        const seen = serverPublicationRevisionsRef.current
+        if (seen.size >= 64) seen.delete(seen.values().next().value!)
+        seen.add(project.workspaceChange.after)
+      }
     })
   }, [setNodes, setControlEdges, setLinkEdges, bumpDirty])
 
@@ -8975,32 +8973,6 @@ export function Canvas() {
           taskSummary: workerTaskSummary(ownerTitle, task)
         }
       })
-      /**
-       * The tray (@shared/worker-frame): collect this spawner's workers under one frame. Runs in
-       * its own `setNodes` because `addAndConnect`'s append is async — the callback sees the
-       * canvas WITH the new nodes on it. Skipped when the caller named a frame itself: an
-       * explicit `--group` is a placement decision the agent already made.
-       */
-      const applyTray = (newIds: string[]): void => {
-        if (!newIds.length) return
-        setNodes((ns) => {
-          const flow = ns as CanvasNode[]
-          const plan = planWorkerFrame({
-            nodes: flow.map(workerFrameNodeOf),
-            spawnerId: sourceNodeId,
-            newWorkerIds: newIds,
-            // The ropes this tick drew are not in the render-time ref yet (the same reason
-            // `bridgeTo` carries its own `drawn` accumulator), so name them directly.
-            ropes: [
-              ...controlEdgesRef.current.map((e) => ({ source: e.source, target: e.target })),
-              ...newIds.map((id) => ({ source: sourceNodeId, target: id }))
-            ]
-          })
-          return applyWorkerFramePlan(flow, plan, workerFrameLabel(ownerTitle))
-        })
-        markDirty()
-
-      }
       // Grid slots INSIDE a group frame (open-agent --group): 2 columns of terminal-sized
       // cells under the header. Pure geometry — the frame is grown to fit before children land.
       const GROUP_PAD_X = 24
@@ -9188,7 +9160,6 @@ export function Canvas() {
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
-            if (!intoGroupId) applyTray(ids)
             reply({
               ok: true,
               message:
@@ -9261,7 +9232,6 @@ export function Canvas() {
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
-            if (!intoGroupId) applyTray(ids)
             // Context-link the new session(s) back to the opener (same rationale as spawn-team:
             // the fan-out needs a fan-in). The nodes were added via setNodes in this tick, so
             // resolve their endpoints from `agentId` rather than the not-yet-updated canvas.

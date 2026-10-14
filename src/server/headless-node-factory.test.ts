@@ -1942,9 +1942,7 @@ describe('HeadlessNodeFactory', () => {
     }
 
     const nodes = (await store.load({ sideline: false })).projects[0].nodes
-    // Spawned workers collect under a tray frame, so a persisted position is parent-relative from
-    // the second spawn on: the no-overlap rule is about where cards LAND, which is absolute. The
-    // frame itself is excluded because containing its members is what a frame is.
+    // Existing explicit frames use relative positions; overlap is measured on the canvas.
     const absolute = (node: CanvasNodeState): { x: number; y: number } => {
       let { x, y } = node.position
       const seen = new Set<string>([node.id])
@@ -2324,42 +2322,15 @@ describe('HeadlessNodeFactory', () => {
       expect(nodeById(nodes, id).parentId).toBeUndefined()
     })
 
-    it('builds the tray when the SECOND worker arrives, taking the first in with it', async () => {
+    it('preserves earlier worker geometry exactly across later provider opens', async () => {
       const first = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
-      const second = idOf(await factory.openAgent('term-source', { agent: 'codex' }, true))
-
-      const nodes = await load()
-      const frames = nodes.filter((node) => node.kind === 'group')
-      expect(frames).toHaveLength(1)
-      // EXPANDED on creation. It used to ship collapsed ("put away is half of what the tray is
-      // for") — but `collapsed` on a frame only shrank it to 40px, and a frame's height is its
-      // children's `extent: 'parent'` clamp bounds, so every member was pinned to the same
-      // `frameTop - memberHeight` and overlapped (@shared/node-collapse). A real put-away is
-      // unbuilt; until then the tray is a labelled frame around visible cards.
-      expect(frames[0]).toMatchObject({ title: 'Director workers', taskFrame: true })
-      expect(frames[0].collapsed).toBeFalsy()
-      expect(nodeById(nodes, first).parentId).toBe(frames[0].id)
-      expect(nodeById(nodes, second).parentId).toBe(frames[0].id)
-      // The frame is a creation of this caller, so it can be renamed/colored/closed like any other.
-      expect(factory.ownsSpawn('term-source', frames[0].id)).toBe(true)
-      // Parent before child: React Flow hydrates in array order.
-      expect(nodes.findIndex((node) => node.id === frames[0].id)).toBeLessThan(
-        nodes.findIndex((node) => node.id === first)
-      )
-      const trayIndex = published.findIndex((node) => node.id === frames[0].id)
-      expect(trayIndex).toBeGreaterThanOrEqual(0)
-      expect(trayIndex).toBeLessThan(published.findIndex((node) => node.id === second))
-    })
-
-    it('puts a later worker into the tray that already exists', async () => {
-      await factory.openAgent('term-source', { agent: 'claude' }, true)
+      const before = await load()
       await factory.openAgent('term-source', { agent: 'codex' }, true)
-      const third = idOf(await factory.openAgent('term-source', { agent: 'gemini' }, true))
-
+      await factory.openAgent('term-source', { agent: 'gemini' }, true)
       const nodes = await load()
-      const frames = nodes.filter((node) => node.kind === 'group')
-      expect(frames).toHaveLength(1)
-      expect(nodeById(nodes, third).parentId).toBe(frames[0].id)
+      expect(nodes.filter(n => n.kind === 'group')).toEqual([])
+      for (const held of before) expect(nodeById(nodes, held.id)).toEqual(held)
+      expect(nodeById(nodes, first).parentId).toBeUndefined()
     })
 
     it('numbers the fan-out across separate commands, not per command', async () => {
@@ -2370,16 +2341,16 @@ describe('HeadlessNodeFactory', () => {
       expect(nodeById(nodes, second).title).toBe('Director · Claude Code 2')
     })
 
-    it('builds the tray from one command that opens two workers', async () => {
+    it('leaves a multi-worker creation ungrouped', async () => {
       const reply = await factory.openAgent('term-source', { agent: 'claude', count: '2' }, true)
       const ids = (reply.result as { ids: string[] }).ids
       const nodes = await load()
       const frames = nodes.filter((node) => node.kind === 'group')
-      expect(frames).toHaveLength(1)
-      expect(ids.map((id) => nodeById(nodes, id).parentId)).toEqual([frames[0].id, frames[0].id])
+      expect(frames).toHaveLength(0)
+      expect(ids.map((id) => nodeById(nodes, id).parentId)).toEqual([undefined, undefined])
     })
 
-    it('joins the spawner’s OWN frame on the first worker, moving nothing that is already there', async () => {
+    it('preserves explicit existing frames without implicitly joining new workers', async () => {
       const workspace = await store.load({ sideline: false })
       const project = workspace.projects[0]
       project.nodes.unshift({
@@ -2398,7 +2369,7 @@ describe('HeadlessNodeFactory', () => {
 
       const id = idOf(await factory.openAgent('term-source', { agent: 'claude' }, true))
       const nodes = await load()
-      expect(nodeById(nodes, id).parentId).toBe('group-existing')
+      expect(nodeById(nodes, id).parentId).toBeUndefined()
       expect(nodes.filter((node) => node.kind === 'group')).toHaveLength(1)
       expect(nodeById(nodes, 'term-source').parentId).toBe('group-existing')
     })
@@ -2428,15 +2399,7 @@ describe('HeadlessNodeFactory', () => {
       expect(nodeById(nodes, second).parentId).toBeUndefined()
     })
 
-    it('starts no session and types nothing for the frame itself', async () => {
-      await factory.openAgent('term-source', { agent: 'claude' }, true)
-      await factory.openAgent('term-source', { agent: 'codex' }, true)
-      const frames = (await load()).filter((node) => node.kind === 'group')
-      expect(frames).toHaveLength(1)
-      expect(pty.creates.map((options) => options.persistKey)).not.toContain(frames[0].id)
-      expect(pty.sends.map((send) => send.nodeId)).not.toContain(frames[0].id)
-      expect(pty.destroys).toEqual([])
-    })
+
   })
 
 })

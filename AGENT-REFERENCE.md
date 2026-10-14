@@ -203,7 +203,20 @@ needs equivalent handling for any future disk-reload control.
 Saved publication equality uses JSON object semantics: optional fields materialized as
 `undefined` by Flow are equivalent to omitted disk/RPC fields. Otherwise an untouched
 card becomes a false edit-versus-delete conflict on operator close. Defined local edits,
-including unsaved text on a deleted card, still refuse adoption.
+including unsaved text on a deleted card, still refuse adoption. Node-level omitted `titleAuto`
+and `collapsed` additionally compare as their renderer defaults true and false. This normalization
+never applies to opaque metadata. Shared shell comparisons exclude runtime revision, publication and
+loaded-board evidence. Per-WorkspaceApi subscriptions buffer up to 64 complete publications while a
+save is awaiting its ACK; delivery resumes against acknowledged evidence even on failure, through
+strict revision/content guards. Overflow refuses adoption and teardown cancels queued callbacks.
+Stamped canvas deltas observe publication receipt immediately, before deferred content adoption.
+A save ACK can advance only its original snapshot revision and cannot rewind adopted evidence.
+A host `workspace_conflict` rejection can retry once when listener-returned installation evidence
+accounts for every queued publication in a contiguous safely adopted chain from the failed snapshot
+to the installed revision. At least one adoption is required; duplicates alone and global revision
+changes supply no grant. Snapshot again after adoption and require the ordinary host ACK. Genuine
+overlap, missed chain, overflow, malformed ACK, failed content installation and retry failure retain
+the original failure/conflict paths. No UI warning is cleared by publication arrival itself.
 
 Explicit retained deletions are the exception to open-card preservation. `fileToProject` projects
 the loaded `_reconciliation.deleted` records into runtime `deletedEntities`. Both conflict choices
@@ -1655,8 +1668,8 @@ else, and its context links must keep classifying across restarts).
   Collapse/Expand menu row is omitted when every target is one; `fitGroupToChildren` clears a stale
   flag off the frame it fits (it rewrites width AND height, so it used to re-expand a "collapsed"
   frame's box while leaving the flag set — that is how a 4284×1796 frame came to be marked
-  collapsed and re-shrunk on every load); the spawn tray is created EXPANDED by both
-  `applyWorkerFramePlan` and `HeadlessNodeFactory`; and the engine no longer proposes a tray
+  collapsed and re-shrunk on every load); legacy spawn trays remain expanded;
+  new creation never collects existing workers into frames; and the engine no longer proposes a tray
   collapse at all. `rules.tray.collapsed` is still declared, validated, resolved and round-tripped
   (a shared `project.json` out there carries it) but is **inert**, and its built-in default is now
   `false`. `tray.floatOnAttention` is therefore **dormant** — its guard is `tray.collapsed` on the
@@ -1674,9 +1687,9 @@ else, and its context links must keep classifying across restarts).
   discipline agent hibernation uses. And **the engine cannot CREATE a frame**: the op set is
   `place | resize | reparent | collapse | label` (`collapse` is emitted for nothing today — see the
   container rule above; the applier keeps its group refusal for a plan built elsewhere), so the
-  tray is minted only by the spawn path
-  (`@shared/worker-frame`, with its "no frame around a single card" rule) and the engine only ever
-  files into one. A second frame-creator is the frame churn this design was written to avoid.
+  frame is created only by an explicit grouping command and the engine only ever
+  files into an existing frame. Desktop and Server creation append only new cards and never
+  reparent or reposition prior workers. A second frame-creator is the frame churn this design was written to avoid.
   **Nothing runs automatically.** Creation, status and rule changes no longer request layout.
   The core service also refuses those retired triggers from older tabs before lease I/O. Only
   an explicit `organize` command previews a plan and applies after confirmation, reversible by

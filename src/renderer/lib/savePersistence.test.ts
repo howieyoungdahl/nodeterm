@@ -96,3 +96,15 @@ describe('the trigger: an external change that REMOVES a node freezes the save',
     expect(autosaveDelay(true, true, undefined)).toBeNull()
   })
 })
+
+it('merges additive external content despite changed runtime revision and baseline evidence', () => {
+  const base = project([node('a')]), incoming = project([node('a'), node('b')])
+  base.revision = 'a'.repeat(64)
+  base.loadedKanban = null
+  incoming.revision = 'b'.repeat(64)
+  incoming.loadedKanban = { columns: [], assignments: [] }
+  incoming.workspaceChange = { before: 'a'.repeat(64), after: 'b'.repeat(64), changes: [] }
+  incoming.organizationChange = { before: 'a'.repeat(64), after: 'b'.repeat(64) }
+  expect(decideExternalChange({ dirty: true, base, incoming, liveNodeIds: ['a'] }).kind).toBe('merge')
+  expect(decideExternalChange({ dirty: true, base, incoming: { ...incoming, name: 'Changed shared name' }, liveNodeIds: ['a'] }).kind).toBe('conflict')
+})

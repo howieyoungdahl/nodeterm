@@ -283,6 +283,8 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   },
 
   acknowledgeSave(ack, saved) {
+    // A delayed ACK may only advance the snapshot it saved, never newer adopted evidence.
+    if (saved && get().revision !== saved.revision) return
     set((s) => ({ revision: ack.revision, projects: s.projects.map((p) =>
       ack.projectRevisions[p.id] ? { ...p, revision: ack.projectRevisions[p.id],
         ...(saved ? { loadedKanban: saved.projects.find((held) => held.id === p.id)?.kanban ?? null } : {}) } : p) }))

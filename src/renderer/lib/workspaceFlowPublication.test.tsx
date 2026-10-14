@@ -83,6 +83,8 @@ it.each([false, true])('adopts a saved operator close of an unchanged JSON node,
   const f = fixture()
   if (archived) f.base.nodes[0].cleanupArchiveId = 'receipt'
   // Real RPC/disk snapshots omit undefined keys. Flow serialization materializes them.
+  delete f.base.nodes[0].titleAuto
+  delete f.base.nodes[0].collapsed
   f.base = JSON.parse(JSON.stringify(f.base)) as Project
   f.incoming = JSON.parse(JSON.stringify(f.base)) as Project
   f.incoming.nodes = f.incoming.nodes.filter(n => n.id !== 'same')
