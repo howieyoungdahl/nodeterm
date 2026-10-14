@@ -75,7 +75,8 @@ it.skipIf(process.platform !== 'linux')('round trips an archive through authenti
       ws!.send(JSON.stringify({ t: 'req', id: key, method, args }))
     })
     // An ordinary mobile save migrates the legacy index before retained cleanup.
-    await rpc(IPC.workspaceSave, await rpc(IPC.workspaceLoad))
+    const legacyInitial: Workspace = await rpc(IPC.workspaceLoad)
+    await rpc(IPC.workspaceSave, legacyInitial)
     const stale: Workspace = await rpc(IPC.workspaceLoad)
     const beforePane = call('list-panes', '-s', '-t', '=' + name, '-F', '#{pane_id}:#{pane_pid}')
     const history = call('capture-pane', '-p', '-S', '-', '-t', pane)
@@ -88,6 +89,8 @@ it.skipIf(process.platform !== 'linux')('round trips an archive through authenti
     await expect(rpc(IPC.workspaceSave, stale)).rejects.toThrow()
     const visibleIds = (w: Workspace) => w.projects[0].nodes.filter(n => !n.cleanupArchiveId).map(n => n.id)
     let current: Workspace = await rpc(IPC.workspaceLoad)
+    const archivedWorkspace = structuredClone(current)
+    const phoneEdits: Workspace[] = []
     expect(visibleIds(current)).toEqual([other])
     expect(current.projects[0].nodes[0].cleanupArchiveId).toBe(archived.receipt.id)
     const board = current.projects[0].kanban
@@ -104,19 +107,36 @@ it.skipIf(process.platform !== 'linux')('round trips an archive through authenti
       expect(current.projects[0].nodes[0]).toMatchObject({ cleanupArchiveId: archived.receipt.id,
         agentSessionId: 'fixture-session', agentModel: 'gpt-6.1-sol', pinned: true, manualPlacement: true })
       expect(current.projects[0].kanban).toEqual(board)
+      phoneEdits.push(structuredClone(current))
     }
     await post('/opsapi/cleanup/undo', { receiptId: archived.receipt.id })
     const restored: Workspace = await rpc(IPC.workspaceLoad)
     expect(visibleIds(restored)).toEqual([id, other])
     expect(restored.projects[0].nodes[1].title).toBe('legacy phone edit true')
     expect(restored.projects[0].kanban).toEqual(board)
-    await expect.poll(() => events.filter(e => e.channel === IPC.workspaceServerChange).length).toBe(2)
+    // Migration, archive, both real phone edits and undo each publish one complete stamp.
+    // Rejected stale saves publish nothing, and no unrelated event may enter this chain.
+    await expect.poll(() => events.filter(e => e.channel === IPC.workspaceServerChange).length).toBe(5)
     const publications = events.filter(e => e.channel === IPC.workspaceServerChange).map(e => e.args[0])
-    expect(publications[0].nodes.find((n: any) => n.id === id).cleanupArchiveId).toBe(archived.receipt.id)
-    expect(publications[0].workspaceChange.before).toBe(stale.revision)
-    expect(publications[1].workspaceChange.before).toBe(current.revision)
-    expect(publications[1].workspaceChange.after).toBe(restored.revision)
-    expect(publications[1].workspaceChange.changes[0].after.nodes).toEqual(restored.projects[0].nodes)
+    const snapshots = [legacyInitial, stale, archivedWorkspace, ...phoneEdits, restored]
+    expect(publications).toHaveLength(5)
+    for (const [index, publication] of publications.entries()) {
+      expect(publication.workspaceChange.before).toBe(snapshots[index].revision)
+      expect(publication.workspaceChange.after).toBe(snapshots[index + 1].revision)
+      expect(publication.workspaceChange.after).not.toBe(publication.workspaceChange.before)
+      expect(publication.workspaceChange.changes).toHaveLength(1)
+      expect(publication.workspaceChange.changes[0].before.nodes).toEqual(snapshots[index].projects[0].nodes)
+      expect(publication.workspaceChange.changes[0].after.nodes).toEqual(snapshots[index + 1].projects[0].nodes)
+      if (index) expect(publication.workspaceChange.before).toBe(publications[index - 1].workspaceChange.after)
+    }
+    expect(publications[0].nodes.find((n: any) => n.id === id).cleanupArchiveId).toBeUndefined()
+    expect(publications[1].nodes.find((n: any) => n.id === id).cleanupArchiveId).toBe(archived.receipt.id)
+    for (const publication of publications.slice(2, 4))
+      expect(publication.nodes.find((n: any) => n.id === id).cleanupArchiveId).toBe(archived.receipt.id)
+    expect(publications[4].workspaceChange.before).toBe(current.revision)
+    expect(publications[4].workspaceChange.after).toBe(restored.revision)
+    expect(publications[4].nodes.find((n: any) => n.id === id).cleanupArchiveId).toBeUndefined()
+    expect(publications[4].workspaceChange.changes[0].after.nodes).toEqual(restored.projects[0].nodes)
     expect(call('list-panes', '-s', '-t', '=' + name, '-F', '#{pane_id}:#{pane_pid}')).toBe(beforePane)
     expect(call('capture-pane', '-p', '-S', '-', '-t', pane)).toBe(history)
   } finally {
