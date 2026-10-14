@@ -162,6 +162,8 @@ hooks from replacing a resumed rollout. Recognized authenticated parent hooks ca
 - **`src/shared/`** — types and IPC channel names imported by all three sides. `ipc.ts`
   is the single source of truth for channel strings; never hardcode a channel elsewhere.
 
+Headless keepalive subscribers have no visible screen and must park their size vote; otherwise their startup grid caps real co-attached viewers.
+
 PTY output flows main → renderer over per-session channels (`pty:data:<sessionId>`),
 input flows renderer → main over `pty:write`. node-pty is kept **external** in the bundle
 (`externalizeDepsPlugin` in `electron.vite.config.ts`) because it's a native module.
@@ -3049,3 +3051,29 @@ omission allowance for the exact project and node. Browser/RPC JSON cannot suppl
 that authority. Ordinary saves and sweeps still preserve archived rows; explicit
 deletion keeps retained tombstones and archive receipt history, so stale snapshots
 cannot resurrect the removed card or its incident links and board assignments.
+
+Kanban priority ordering is a personal view preference in `state/viewMode.ts`, separate from
+ProjectKanban. Apply it only to visible session cards after filtering/folding, preserve provider
+lanes and stable ties, and keep assignment/manual-intent order unchanged. Priority view disables
+session-card ordering drags; context-menu column moves remain explicit. The shared effective
+priority resolver honors manual clears, legacy stored priorities, then assessed task urgency.
+Ordinary UI workspace saves publish only revision-fenced authoritative read-back content via the
+existing complete stamp before ACK, inside the same Server FIFO. Revision-only publication uses a
+complete unchanged project delta; project-set changes remain outside project-only adoption.
+
+The native Desktop preload must forward `workspace:server-change` and unregister its exact IPC
+wrapper. An unchanged SSH cache save preserves its previous savedAt using sameProjectContent,
+so a peer's durability save does not generate another revision/publication. This does not suppress
+real content changes or the unmirrored retry path. Do not clear local dirty generations merely to
+hide a publisher feedback loop.
+
+An unchanged workspace index must retain its exact bytes instead of entering a retained commit
+that creates a new rev/savedAt. Compare logical JSON excluding only root rev/savedAt/_reconciliation,
+then require a fenced read matching the exact loaded indexRaw bytes. Competing raw bytes or busy
+retained publication refuse acknowledgment; all changed index content keeps the normal commit path.
+
+Clean stamped publication adoption installs content/revision without creating another dirty
+save generation. Use the merge's canonical persisted equality to detect retained local edits;
+request persistence only for those, and never clear already dirty generations. Canonical
+Project.kanban.meta merges by nodeId so separate-card priorities coexist. Assignees/labels and
+arbitrary nested meta arrays remain atomic; competing same-card priority choices still conflict.

@@ -128,3 +128,24 @@ describe('preload sshProject passphrase wiring', () => {
     expect(h.removeListener).toHaveBeenCalledWith(IPC.sshPassphraseDismiss, handler)
   })
 })
+
+it('the exposed native workspace API delivers stamped publications and removes the exact IPC wrapper', () => {
+  const got = vi.fn()
+  const before = h.on.mock.calls.length
+  const off = api.workspace.onServerChange(got)
+  const subscriptions = h.on.mock.calls.slice(before)
+  expect(subscriptions).toHaveLength(1)
+  expect(subscriptions[0][0]).toBe(IPC.workspaceServerChange)
+  const handler = subscriptions[0][1] as (event: unknown, payload: unknown) => void
+  const publication = { id: 'synthetic', workspaceChange: { before: 'a'.repeat(64), after: 'b'.repeat(64), changes: [] } }
+  handler({ sender: 'synthetic-electron-event' }, publication)
+  expect(got).toHaveBeenCalledExactlyOnceWith(publication)
+  off()
+  expect(h.removeListener).toHaveBeenLastCalledWith(IPC.workspaceServerChange, handler)
+  // Independent listeners have distinct wrappers, so one teardown cannot detach another.
+  const secondOff = api.workspace.onServerChange(vi.fn())
+  const second = h.on.mock.calls.at(-1)![1]
+  expect(second).not.toBe(handler)
+  secondOff()
+  expect(h.removeListener).toHaveBeenLastCalledWith(IPC.workspaceServerChange, second)
+})

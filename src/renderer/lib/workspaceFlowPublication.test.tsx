@@ -172,3 +172,37 @@ it.each([false, true])('keeps webview DOM keys/order and mounted background ghos
   }
 })
 afterEach(() => vi.restoreAllMocks())
+
+it('clean adoption advances content/evidence without requesting another save, disjoint retained edits request saving', () => {
+  const base = project([node('A')]), incoming = structuredClone(base)
+  incoming.nodes[0].title = 'Durable incoming title'
+  const change: WorkspacePublication = { before: revision, after, changes: [{ before: base, after: incoming }] }
+  const persist = vi.fn(), acknowledge = vi.fn()
+  const sinks = { content: vi.fn(), acknowledge, created: vi.fn(), defer: (work: () => void) => work(), persistLocalEdits: persist }
+  const clean = planWorkspaceFlowPublication({ revision, projects: [base], activeProjectId: 'p', nodes: nodeStatesToFlow(base.nodes), change })
+  expect(clean.kind).toBe('adopt'); if (clean.kind !== 'adopt') throw new Error('fixture')
+  expect(clean.localEditsRemain).toBe(false)
+  applyWorkspaceFlowPublication(clean, sinks)
+  expect(acknowledge).toHaveBeenCalledOnce()
+  expect(persist).not.toHaveBeenCalled()
+  const local = nodeStatesToFlow(base.nodes)
+  local[0].data.text = 'Synthetic unsaved disjoint draft'
+  const merged = planWorkspaceFlowPublication({ revision, projects: [base], activeProjectId: 'p', nodes: local, change })
+  expect(merged.kind).toBe('adopt'); if (merged.kind !== 'adopt') throw new Error('fixture')
+  expect(merged.localEditsRemain).toBe(true)
+  applyWorkspaceFlowPublication(merged, sinks)
+  expect(persist).toHaveBeenCalledOnce()
+  expect(merged.projects[0].nodes[0].text).toBe('Synthetic unsaved disjoint draft')
+  expect(merged.projects[0].nodes[0].title).toBe('Durable incoming title')
+})
+it('an index-only publication while viewing a different project does not request saving or change active Flow', () => {
+  const base = project([node('A')]), background = { ...project([]), id: 'different-active' }
+  const change: WorkspacePublication = { before: revision, after, changes: [{ before: base, after: { ...base, revision: 'c'.repeat(64) } }] }
+  const nodes = nodeStatesToFlow(background.nodes), persist = vi.fn()
+  const plan = planWorkspaceFlowPublication({ revision, projects: [base, background], activeProjectId: background.id, nodes, change })
+  expect(plan.kind).toBe('adopt'); if (plan.kind !== 'adopt') throw new Error('fixture')
+  expect(plan.nodes).toBe(nodes)
+  expect(plan.localEditsRemain).toBe(false)
+  applyWorkspaceFlowPublication(plan, { content: vi.fn(), acknowledge: vi.fn(), created: vi.fn(), defer: work => work(), persistLocalEdits: persist })
+  expect(persist).not.toHaveBeenCalled()
+})

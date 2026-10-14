@@ -72,6 +72,8 @@ component and the list path feeding it). Columns take lanes and name no source; 
 branches on `placement`. If you find yourself writing `=== 'github'` outside the registry, the
 registry is missing a field.
 
+Headless keepalive subscribers have no visible screen and must park their size vote; otherwise their startup grid caps real co-attached viewers.
+
 ## House rules
 
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
@@ -564,3 +566,29 @@ successful content installation along a contiguous chain from the rejected snaps
 revision. Take a fresh merged snapshot and require its normal save ACK. Global revision drift alone,
 a conflict, missing chain, overflow, malformed ACK, failed installation or failed retry never grants
 recovery. Keep failure reporting behind this save promise instead of clearing UI warnings directly.
+
+Kanban's Manual order / Priority selector is a personal per-project localStorage preference.
+Priority ordering is derived after the existing visibility filters, only for session cards.
+It never writes assignment order, canvas geometry or shared project settings. In Priority view,
+move cards through the context menu; select Manual order before dragging to reorder.
+Ordinary UI saves publish authoritative read-back content through the existing stamped workspace
+channel, on Desktop and Server, before the save ACK. Never publish a client snapshot or a partial
+save as successful content. A revision-only save must include a complete no-op content delta.
+The native mobile board can reuse the existing priority metadata, but needs its own personal sort
+control and stamped-save consumption; coordinate that follow-up with @eneskirca.
+
+Native Desktop preload subscribes to the same stamped workspace publication channel as Server.
+Unchanged SSH caches retain their prior savedAt: regenerating bookkeeping timestamps can make
+peer adoption trigger recurring idle autosaves. Real content changes and owed mirror retries
+remain separate from that no-op stability rule.
+
+An unchanged workspace index must retain its exact bytes instead of entering a retained commit
+that creates a new rev/savedAt. Compare logical JSON excluding only root rev/savedAt/_reconciliation,
+then require a fenced read matching the exact loaded indexRaw bytes. Competing raw bytes or busy
+retained publication refuse acknowledgment; all changed index content keeps the normal commit path.
+
+Clean stamped publication adoption installs content/revision without creating another dirty
+save generation. Use the merge's canonical persisted equality to detect retained local edits;
+request persistence only for those, and never clear already dirty generations. Canonical
+Project.kanban.meta merges by nodeId so separate-card priorities coexist. Assignees/labels and
+arbitrary nested meta arrays remain atomic; competing same-card priority choices still conflict.

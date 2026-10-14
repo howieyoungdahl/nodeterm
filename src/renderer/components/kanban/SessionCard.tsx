@@ -12,6 +12,8 @@ import { OrganizationBadge } from '../OrganizationBadge'
 import { TaskPlanningBadge } from '../TaskPlanningBadge'
 import { assessTaskUrgency, parseTaskPlanning } from '@shared/task-planning'
 
+import { effectivePriority } from '../../lib/kanbanPriority'
+
 const PRIO_COLOR: Record<KanbanPriority, string> = {
   low: '#8e8e93',
   medium: '#ffd60a',
@@ -20,6 +22,8 @@ const PRIO_COLOR: Record<KanbanPriority, string> = {
 }
 
 interface SessionCardProps {
+  reorderEnabled?: boolean
+  priorityNow?: number
   supportingSessions?: KanbanSession[]
   urgentSupportingCount?: number
   supportsExpanded?: boolean
@@ -41,7 +45,7 @@ interface SessionCardProps {
 }
 
 export const SessionCard = memo(function SessionCard({
-  session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext,
+  session, meta, reorderEnabled = true, priorityNow = Date.now(), labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext,
   supportingSessions = [], urgentSupportingCount = 0, supportsExpanded = false, onToggleSupport
 }: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
@@ -80,8 +84,8 @@ export const SessionCard = memo(function SessionCard({
   const due = meta?.dueAt
   const overdue = due !== undefined && due < Date.now()
   const planning = parseTaskPlanning(session.taskPlanning)
-  const automaticUrgency = planning ? assessTaskUrgency(planning, Date.now()) : undefined
-  const priority = meta?.priorityManual ? meta.priority : meta?.priority ?? automaticUrgency?.level
+  const automaticUrgency = planning ? assessTaskUrgency(planning, priorityNow) : undefined
+  const priority = effectivePriority(meta, session.taskPlanning, priorityNow)
   // The account chip counts as detail in its own right: a card whose only thing to say is "this
   // one is on the other Claude login" is exactly the card that must say it.
   const hasDetail =
@@ -91,8 +95,10 @@ export const SessionCard = memo(function SessionCard({
       className={`kanban-card kanban-card--session${dragging ? ' kanban-card--dragging' : ''}${
         dropSide ? ` kanban-card--drop-${dropSide}` : ''
       }`}
-      draggable
+      data-node-id={session.id}
+      draggable={reorderEnabled}
       onDragStart={(e) => {
+        if (!reorderEnabled) { e.preventDefault(); return }
         e.dataTransfer.effectAllowed = 'move'
         setDragging(true)
         onDragStart(session.id)
@@ -103,12 +109,14 @@ export const SessionCard = memo(function SessionCard({
         onDragEnd()
       }}
       onDragOver={(e) => {
+        if (!reorderEnabled) return
         e.preventDefault()
         const side = sideFor(e)
         if (side !== dropSide) setDropSide(side)
       }}
       onDragLeave={() => setDropSide(null)}
       onDrop={(e) => {
+        if (!reorderEnabled) return
         e.preventDefault()
         e.stopPropagation() // don't let the column's end-drop swallow a drop aimed at this card
         const side = sideFor(e)

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { parseViewMap, useViewMode, isKanbanOpen, viewFor } from './viewMode'
+import { parseViewMap, parseKanbanSortMap, useViewMode, isKanbanOpen, viewFor } from './viewMode'
 
 describe('parseViewMap', () => {
   it('keeps canvas/kanban entries, tolerates garbage', () => {
@@ -54,4 +54,16 @@ describe('card requests (board-aware "go to node")', () => {
     expect(isKanbanOpen('p9')).toBe(false)
     expect(useViewMode.getState().requestedCardNodeId).toBeNull()
   })
+})
+
+it('validates personal per-project sort preferences and isolates projects', () => {
+  for (const raw of [null, 'broken', 'null', '[]', '42']) expect(parseKanbanSortMap(raw)).toEqual({})
+  expect(parseKanbanSortMap('{"a":"priority","b":"manual","c":"urgent"}')).toEqual({ a: 'priority', b: 'manual' })
+  useViewMode.setState({ kanbanSortByProject: {} })
+  expect(useViewMode.getState().kanbanSortByProject.a ?? 'manual').toBe('manual')
+  useViewMode.getState().setKanbanSort('a', 'priority')
+  useViewMode.getState().setKanbanSort('b', 'manual')
+  expect(useViewMode.getState().kanbanSortByProject).toEqual({ a: 'priority', b: 'manual' })
+  useViewMode.getState().setKanbanSort('a', 'manual')
+  expect(useViewMode.getState().kanbanSortByProject).toEqual({ a: 'manual', b: 'manual' })
 })

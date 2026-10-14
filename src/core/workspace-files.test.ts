@@ -698,3 +698,12 @@ describe('shared appearance rules survive the project file', () => {
     expect(fileToProject(forged, { id: 'p1' }).layoutRules).toEqual(rules)
   })
 })
+
+it('round-trips priority levels and explicit clear without changing manual assignments', () => {
+  const board = { columns: [{ id: 'c', title: 'Work', color: '#fff' }],
+    assignments: [{ nodeId: 'n2', columnId: 'c' }, { nodeId: 'n1', columnId: 'c' }],
+    meta: [{ nodeId: 'n1', priority: 'urgent' as const, priorityManual: true as const },
+      { nodeId: 'n2', priorityManual: true as const }] }
+  const file = projectToFile(project({ kanban: board }), 1, '2026-10-13T00:00:00.000Z')
+  expect(fileToProject(JSON.parse(JSON.stringify(file)), { id: 'p1' }).kanban).toEqual(board)
+})

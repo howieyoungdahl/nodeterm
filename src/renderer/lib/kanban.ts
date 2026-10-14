@@ -259,11 +259,9 @@ export function setCardPriority(
 ): ProjectKanban {
   const cur = cardMeta(k, nodeId)
   return withCardMeta(k, nodeId, {
-    assignees: cur?.assignees,
-    ...(priority === null || cur?.priorityManual ? { priorityManual: true as const } : {}),
-    dueAt: cur?.dueAt,
-    labels: cur?.labels,
-    ...(priority === null ? {} : { priority })
+    ...cur,
+    priorityManual: true,
+    priority: priority ?? undefined
   })
 }
 

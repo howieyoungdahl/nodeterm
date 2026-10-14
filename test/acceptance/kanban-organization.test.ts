@@ -95,6 +95,36 @@ const patch = async (id: string, role = 'security', over: Record<string, unknown
   return request(`/opsapi/nodes/${id}`, { organization: metadata(role), expectedRevision: project.revision, ...over }, 'PATCH')
 }
 
+// Node content belongs to project.json; a creation alone leaves the logical index unchanged.
+// Change a real machine-local header once so the real store reaches index publication after
+// writing the project, rather than faking the publication callback on a proven no-op.
+async function failCreationIndexPublication(message: string) {
+  const indexPath = path.join(data, 'workspace.json')
+  const beforeIndex = await fs.readFile(indexPath, 'utf8')
+  const originalSave = store.save.bind(store)
+  vi.spyOn(store, 'save').mockImplementationOnce((workspace, options) => {
+    const candidate = structuredClone(workspace)
+    const project = candidate.projects.find(p => p.id === 'p1')!
+    project.viewport = { ...project.viewport, x: project.viewport.x + 17 }
+    return originalSave(candidate, options)
+  })
+  let faultCount = 0
+  store.publicationPhase = async (phase, file) => {
+    if (file === indexPath && phase === 'before-displace') {
+      faultCount++
+      throw new Error(message)
+    }
+  }
+  return async (id: string) => {
+    expect(faultCount).toBe(1)
+    expect(await fs.readFile(indexPath, 'utf8')).toBe(beforeIndex)
+    const persisted = JSON.parse(await fs.readFile(path.join(cwd, '.nodeterm/project.json'), 'utf8'))
+    expect(persisted.nodes).toHaveLength(2)
+    expect(persisted.nodes.some((n: CanvasNodeState) => n.id === id)).toBe(true)
+    expect(createPersistentHeadlessNodeOwnership(path.join(data, 'node-ownership.json')).ownerOf(id)?.assistantCreationId).toBeDefined()
+  }
+}
+
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'nt-organization-'))
   data = path.join(root, 'data'); cwd = path.join(root, 'project')
@@ -301,18 +331,20 @@ describe('native organization through HTTP, store and renderer', () => {
   })
 
   it('rechecks durable ownership before launching an already persisted partial creation', async () => {
-    store.publicationPhase = async (phase, file) => {
-      if (file === path.join(data, 'workspace.json') && phase === 'before-displace') throw new Error('fixture_index_full')
-    }
+    const assertPartialPublication = await failCreationIndexPublication('fixture_index_full')
     const partial = await create()
     expect(partial.status).toBe(503); expect(createSession).not.toHaveBeenCalled()
+    expect(partial.body.id).toBeDefined(); expect(sendText).not.toHaveBeenCalled()
+    await assertPartialPublication(partial.body.id)
     store.publicationPhase = undefined
     expect((await store.load()).projects[0].nodes.some((n) => n.id === partial.body.id)).toBe(true)
     vi.spyOn(ownership, 'flush').mockRejectedValueOnce(new Error('fixture_retry_ledger_full'))
     const failed = await create()
     expect(failed.status).toBe(503); expect(failed.body.id).toBe(partial.body.id)
     expect(createSession).not.toHaveBeenCalled(); expect(sendText).not.toHaveBeenCalled()
-    expect((await create()).body.id).toBe(partial.body.id)
+    const recovered = await create()
+    expect(recovered.status).toBe(201); expect(recovered.body.id).toBe(partial.body.id)
+    expect((await store.load()).projects[0].nodes).toHaveLength(2)
     expect(createSession).toHaveBeenCalledTimes(1)
   })
 
@@ -426,11 +458,11 @@ describe('native organization through HTTP, store and renderer', () => {
   })
 
   it('recovers a project write followed by an index failure without another card', async () => {
-    store.publicationPhase = async (phase, file) => {
-      if (file === path.join(data, 'workspace.json') && phase === 'before-displace') throw new Error('fixture_index_disk_full')
-    }
+    const assertPartialPublication = await failCreationIndexPublication('fixture_index_disk_full')
     const failed = await create()
     expect(failed.status).toBe(503); expect(createSession).not.toHaveBeenCalled()
+    expect(failed.body.id).toBeDefined(); expect(sendText).not.toHaveBeenCalled()
+    await assertPartialPublication(failed.body.id)
     expect(JSON.parse(await fs.readFile(path.join(cwd, '.nodeterm/project.json'), 'utf8')).nodes).toHaveLength(2)
     store.publicationPhase = undefined
     service()

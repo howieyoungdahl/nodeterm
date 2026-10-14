@@ -42,9 +42,12 @@ export function applyWorkspaceFlowPublication(plan: ReturnType<typeof planWorksp
   acknowledge(projects: Project[], revision: string): void
   created(ids: string[]): void
   defer(work: () => void): void
+  /** Keep existing dirty generations; only retained unsaved content requests another save. */
+  persistLocalEdits?(): void
 }): void {
   if (plan.kind !== 'adopt') return
   sinks.content(plan)
   sinks.acknowledge(plan.projects, plan.revision)
+  if (plan.localEditsRemain) sinks.persistLocalEdits?.()
   if (plan.created.length) sinks.defer(() => sinks.created(plan.created))
 }

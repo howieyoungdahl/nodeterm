@@ -24,27 +24,34 @@ const clean = (p: Project): Project => {
 
 /** Merge every field, not only new nodes. Arrays without entity IDs are atomic choices, so
  * conflicting manual order/columns/pins are retained behind the conflict bar. */
-function merge(base: unknown, local: unknown, incoming: unknown, key = ''): unknown {
+function merge(base: unknown, local: unknown, incoming: unknown, path: string[] = []): unknown {
+  const key = path.at(-1) ?? ''
   if (equal(base, incoming) || equal(local, incoming)) return local
   if (equal(base, local)) return incoming
   if (object(base) && object(local) && object(incoming)) {
     const result: Record<string, unknown> = {}
     for (const k of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(incoming)])) {
-      const value = merge(base[k], local[k], incoming[k], k)
+      const value = merge(base[k], local[k], incoming[k], [...path, k])
       if (value !== undefined) result[k] = value
     }
     return result
   }
-  if (['nodes', 'ropes', 'bridges', 'columns', 'assignments'].includes(key) && Array.isArray(base) && Array.isArray(local) && Array.isArray(incoming)) {
-    const identity = (v: unknown) => (v as Record<string, string>)[key === 'assignments' ? 'nodeId' : 'id']
+  // Only the canonical project board metadata rows have nodeId entity semantics.
+  // Arbitrary nested/opaque meta arrays, card labels and assignees remain atomic.
+  const cardMeta = path.length === 2 && path[0] === 'kanban' && path[1] === 'meta'
+  if ((['nodes', 'ropes', 'bridges', 'columns', 'assignments'].includes(key) || cardMeta) &&
+    (Array.isArray(base) || cardMeta && base === undefined) &&
+    (Array.isArray(local) || cardMeta && local === undefined) &&
+    (Array.isArray(incoming) || cardMeta && incoming === undefined)) {
+    const identity = (v: unknown) => (v as Record<string, string>)[key === 'assignments' || cardMeta ? 'nodeId' : 'id']
     const index = (items: unknown[]) => {
       if (!items.every(v => object(v) && typeof identity(v) === 'string') || new Set(items.map(identity)).size !== items.length)
         throw new Error('ambiguous-entity')
       return new Map(items.map(v => [identity(v), v]))
     }
-    const b = index(base), l = index(local), r = index(incoming)
+    const b = index((base ?? []) as unknown[]), l = index((local ?? []) as unknown[]), r = index((incoming ?? []) as unknown[])
     const merged = new Map<string, unknown>()
-    for (const id of new Set([...b.keys(), ...l.keys(), ...r.keys()])) merged.set(id, merge(b.get(id), l.get(id), r.get(id)))
+    for (const id of new Set([...b.keys(), ...l.keys(), ...r.keys()])) merged.set(id, merge(b.get(id), l.get(id), r.get(id), [...path, id]))
     const alive = [...merged.keys()].filter(id => merged.get(id) !== undefined)
     // Shared retained-document ordering keeps each side's insertion and manual relations.
     // Selecting one side's list and appending the other's new rows silently loses those relations.
@@ -56,7 +63,7 @@ function merge(base: unknown, local: unknown, incoming: unknown, key = ''): unkn
 }
 
 export function mergeWorkspacePublication(revision: string | undefined, projects: Project[], change: WorkspacePublication | undefined):
-  { kind: 'adopt'; projects: Project[]; revision: string } | { kind: 'duplicate' } | { kind: 'conflict'; reason: string } {
+  { kind: 'adopt'; projects: Project[]; revision: string; localEditsRemain: boolean } | { kind: 'duplicate' } | { kind: 'conflict'; reason: string } {
   if (!change || !/^[a-f0-9]{64}$/.test(change.before) || !/^[a-f0-9]{64}$/.test(change.after) || !Array.isArray(change.changes))
     return { kind: 'conflict', reason: 'revision-acknowledgment-missing' }
   if (revision === change.after) return { kind: 'duplicate' }
@@ -65,6 +72,7 @@ export function mergeWorkspacePublication(revision: string | undefined, projects
     return { kind: 'conflict', reason: 'publication-content-missing' }
   try {
     const ids = new Set<string>(), result = [...projects]
+    let localEditsRemain = false
     for (const delta of change.changes) {
       if (!delta.before || !delta.after || delta.before.id !== delta.after.id || ids.has(delta.after.id)) throw new Error('invalid-publication')
       ids.add(delta.after.id)
@@ -72,7 +80,10 @@ export function mergeWorkspacePublication(revision: string | undefined, projects
       if (i < 0 || result.filter(p => p.id === delta.after.id).length !== 1) throw new Error('foreign-project')
       result[i] = { ...merge(clean(delta.before), clean(result[i]), clean(delta.after)) as Project,
         revision: delta.after.revision, deletedEntities: delta.after.deletedEntities, loadedKanban: delta.after.kanban ?? null }
+      // The same persisted equality/default semantics used by the merge decide whether
+      // adoption retained local content that still needs a save. Durable incoming content does not.
+      if (!equal(clean(result[i]), clean(delta.after))) localEditsRemain = true
     }
-    return { kind: 'adopt', projects: result, revision: change.after }
+    return { kind: 'adopt', projects: result, revision: change.after, localEditsRemain }
   } catch (error) { return { kind: 'conflict', reason: (error as Error).message } }
 }

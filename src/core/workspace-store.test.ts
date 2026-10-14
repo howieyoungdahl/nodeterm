@@ -4,6 +4,7 @@ import os from 'os'
 import path from 'path'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
+import { IPC } from '../shared/ipc'
 import { WorkspaceStore } from './workspace-store'
 import type { Project, Workspace } from '../shared/types'
 
@@ -759,11 +760,13 @@ describe('ssh mirror guarantee (unmirrored retry)', () => {
 
     await store.save(w) // connection not up yet → read errors, nothing written, mirror owed
     expect(state.remote['ps']).toBeUndefined()
+    const pendingCache = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf8')).entries[0].cache
 
     state.up = true
     await store.save(w) // content unchanged, but the mirror is still owed
     expect(state.remote['ps']).toContain('"id": "ps"')
     expect(JSON.parse(state.remote['ps']).rev).toBe(1) // retry does not bump rev
+    expect(JSON.parse(state.remote['ps']).savedAt).toBe(pendingCache.savedAt)
 
     const writesSoFar = state.writes
     await store.save(w) // confirmed → unchanged saves stop writing
@@ -1866,5 +1869,98 @@ describe('projectMetaFor (issue #338 PR 1) — target exists / is SSH, from the 
     expect(store.projectMetaFor('p-b')).toEqual({ ssh: false })
     await store.save(ws([project({ id: 'p-a', cwd: projRoot })]))
     expect(store.projectMetaFor('p-b')).toBeUndefined()
+  })
+})
+
+
+describe('ordinary UI save publications (shared Desktop and Server core)', () => {
+  it('publishes authoritative priority content with contiguous revision evidence before ACK', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot, kanban: { columns: [], assignments: [] } })]))
+    const loaded = await store.load()
+    const before = loaded.revision
+    loaded.projects[0].kanban!.meta = [{ nodeId: 'term-1', priority: 'urgent', priorityManual: true }]
+    store.registerIpc()
+    const ack = await fake.handlers[IPC.workspaceSave](12, loaded) as { revision: string }
+    const publications = fake.sent.filter(event => event.channel === IPC.workspaceServerChange)
+    expect(publications).toHaveLength(1)
+    expect(publications[0].args[0]).toMatchObject({ id: 'p1', kanban: loaded.projects[0].kanban,
+      workspaceChange: { before, after: ack.revision, changes: [{ after: { kanban: loaded.projects[0].kanban } }] } })
+    expect((await new WorkspaceStore().load()).projects[0].kanban).toEqual(loaded.projects[0].kanban)
+  })
+})
+
+it('publishes complete revision evidence for a genuine index-only edit and never publishes failed writes', async () => {
+  const store = new WorkspaceStore()
+  await store.save(ws([project({ cwd: projRoot }), project({ id: 'p2', name: 'Synthetic inline' })]))
+  store.registerIpc()
+  const loaded = await store.load()
+  loaded.activeProjectId = 'p2'
+  const ack = await fake.handlers[IPC.workspaceSave](12, loaded) as { revision: string }
+  const events = fake.sent.filter(e => e.channel === IPC.workspaceServerChange)
+  expect(events).toHaveLength(1)
+  const publication = events[0].args[0].workspaceChange
+  expect(publication).toMatchObject({ before: loaded.revision, after: ack.revision })
+  expect(publication.changes).toHaveLength(1)
+  expect(publication.changes[0].before.nodes).toEqual(publication.changes[0].after.nodes)
+  const latest = await store.load()
+  const writeFailure = vi.spyOn(store as unknown as { saveNow: () => Promise<void> }, 'saveNow').mockRejectedValue(new Error('synthetic disk failure'))
+  const count = fake.sent.length
+  await expect(fake.handlers[IPC.workspaceSave](12, latest)).rejects.toThrow('synthetic disk failure')
+  expect(fake.sent).toHaveLength(count)
+  writeFailure.mockRestore()
+})
+
+it('unchanged index admission rejects competing same-content bytes and retained reader busy evidence', async () => {
+  const store = new WorkspaceStore()
+  await store.save(ws([project({ cwd: projRoot })]))
+  const file = path.join(userData, 'workspace.json')
+  const raw = await fs.readFile(file, 'utf8')
+  const publisher = store as unknown as { publishIndex(content: string): Promise<void> }
+  // Semantic equality is insufficient: another writer's formatting is different observed bytes.
+  const competing = raw + '\n'
+  await fs.writeFile(file, competing)
+  await expect(publisher.publishIndex(raw)).rejects.toThrow('workspace_conflict: index changed')
+  expect(await fs.readFile(file, 'utf8')).toBe(competing)
+  await fs.writeFile(file, raw)
+  const lock = path.join(userData, '.recovery', 'workspace.json', 'writer.lock')
+  await fs.mkdir(lock, { recursive: true })
+  await expect(publisher.publishIndex(raw)).rejects.toThrow('E_PUBLICATION_BUSY')
+  expect(await fs.readFile(file, 'utf8')).toBe(raw)
+  expect(fake.sent.filter(e => e.channel === IPC.workspaceServerChange)).toHaveLength(0)
+})
+
+describe('unchanged cached SSH UI saves', () => {
+  it('keeps cache/index bytes and revisions stable, publishes real content changes once', async () => {
+    const store = new WorkspaceStore()
+    const cached = project({ id: 'cached-ssh', cwd: undefined, ssh: { server: { host: 'synthetic.invalid', user: 'synthetic' } as never, remoteCwd: '~/synthetic' } })
+    await store.save(ws([cached]))
+    const baseline = await store.load()
+    const bytes = await fs.readFile(path.join(userData, 'workspace.json'), 'utf8')
+    const originalTimestamp = JSON.parse(bytes).entries[0].cache.savedAt
+    // Distinct clocks make a timestamp-churn mutant reliably fail even in fast CI.
+    for (const now of [2_000_000_000_000, 2_000_000_001_000, 2_000_000_002_000]) {
+      vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(now)
+      try {
+        const unchanged = await store.load()
+        const ack = await store.save(unchanged, { requireRevision: true, publish: true })
+        expect(ack.revision).toBe(baseline.revision)
+        expect(await fs.readFile(path.join(userData, 'workspace.json'), 'utf8')).toBe(bytes)
+        expect(fake.sent.filter(e => e.channel === IPC.workspaceServerChange)).toHaveLength(0)
+      } finally { vi.useRealTimers() }
+    }
+    const changed = await store.load()
+    changed.projects[0].nodes[0].title = 'Synthetic changed SSH title'
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(2_000_000_003_000)
+    try { await store.save(changed, { requireRevision: true, publish: true }) } finally { vi.useRealTimers() }
+    const newBytes = await fs.readFile(path.join(userData, 'workspace.json'), 'utf8')
+    expect(newBytes).not.toBe(bytes)
+    expect(JSON.parse(newBytes).entries[0].cache.savedAt).not.toBe(originalTimestamp)
+    expect(fake.sent.filter(e => e.channel === IPC.workspaceServerChange)).toHaveLength(1)
+    const stable = await store.load()
+    await store.save(stable, { requireRevision: true, publish: true })
+    expect((await store.load()).revision).toBe(stable.revision)
+    expect(await fs.readFile(path.join(userData, 'workspace.json'), 'utf8')).toBe(newBytes)
+    expect(fake.sent.filter(e => e.channel === IPC.workspaceServerChange)).toHaveLength(1)
   })
 })
