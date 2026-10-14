@@ -2597,9 +2597,9 @@ export function Canvas() {
         acknowledge: (projects, revision) => useProjects.setState({ projects, revision }),
         // New server cards keep their published placement. Organization requires a command.
         created: () => {},
-        defer: callback => queueMicrotask(callback)
+        defer: callback => queueMicrotask(callback),
+        persistLocalEdits: bumpDirty
       })
-      bumpDirty()
       return { kind: 'adopt', before: project.workspaceChange!.before, after: result.revision }
     }, (project) => {
       if (project.workspaceChange) {

@@ -1,3 +1,4 @@
+import { sameProjectJson } from '../shared/project-reconciliation'
 import { preserveRawProject, preserveRawIndex, operatorArchiveRemoval, type ArchiveRemovalOptions } from './cleanup-raw-preservation'
 import { CleanupRetainedWriter } from './cleanup-retained-writer'
 import { readPublicationFile, isPublicationReadError, type PublicationPhase } from './project-commit-store'
@@ -219,6 +220,17 @@ export class WorkspaceStore {
   publicationPhase?: (phase: PublicationPhase, file: string) => Promise<void>
 
   private async publishIndex(content: string): Promise<void> {
+    // Retained commits stamp rev/savedAt even for identical content. Avoid manufacturing
+    // revision publications, but only after a fenced read confirms our exact loaded bytes.
+    const logicalIndex = (raw: string) => {
+      const { rev: _rev, savedAt: _savedAt, _reconciliation: _retained, ...logical } = JSON.parse(raw)
+      return logical
+    }
+    if (this.indexRaw && sameProjectJson(logicalIndex(this.indexRaw), logicalIndex(content))) {
+      if (await readPublicationFile(this.indexPath) !== this.indexRaw)
+        throw new Error('workspace_conflict: index changed during unchanged save')
+      return
+    }
     const raw = await publishWorkspaceFile(this.indexPath, content, this.indexRaw, this.publicationPhase)
     this.indexRaw = raw
     this.index = JSON.parse(raw)
@@ -250,7 +262,7 @@ export class WorkspaceStore {
     // the truncated node list. With N browser tabs on one Server there is otherwise no way to tell
     // a stale tab from the one the user is looking at, and that was the whole diagnosis problem.
     platform().handleWithSender(IPC.workspaceSave, (senderId: number, workspace: Workspace) => {
-      const work = () => this.save(workspace, { client: `ui:${senderId}`, requireRevision: true })
+      const work = () => this.save(workspace, { client: `ui:${senderId}`, requireRevision: true, publish: true })
       return this.clientMutationRunner ? this.clientMutationRunner(work) : work()
     })
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
@@ -987,7 +999,7 @@ export class WorkspaceStore {
    *  projects went blank after tab switching" wipe. */
   private saveChain: Promise<unknown> = Promise.resolve()
 
-  save(workspace: Workspace, opts?: ArchiveRemovalOptions & { client?: string; requireRevision?: boolean }): Promise<WorkspaceSaveAck> {
+  save(workspace: Workspace, opts?: ArchiveRemovalOptions & { client?: string; requireRevision?: boolean; publish?: boolean }): Promise<WorkspaceSaveAck> {
     // Stamped BEFORE the chain hop, so the receipt can report how long this save waited behind
     // the saves already queued ahead of it — the "card minted, receipt 55 s later" field reports
     // never said whether the lag was queueing or the write itself.
@@ -1033,10 +1045,25 @@ export class WorkspaceStore {
         const old = beforeContent?.projects.find(b => b.id === p.id)
         return old && JSON.stringify(clean(old)) !== JSON.stringify(clean(p)) ? [{ before: clean(old), after: { ...clean(p), revision: p.revision, deletedEntities: p.deletedEntities } }] : []
       })
+      // A revision-only save still needs complete content evidence for peer adoption.
+      // A no-op project delta carries that fence without pretending a missing body is safe.
+      if (!changes.length && beforeRevision !== revision && beforeContent?.projects[0] && afterContent.projects[0]) {
+        const after = afterContent.projects[0]
+        const before = beforeContent.projects.find(p => p.id === after.id)
+        if (before) changes.push({ before: clean(before), after: { ...clean(after), revision: after.revision, deletedEntities: after.deletedEntities } })
+      }
       // A project-set mutation cannot be acknowledged by a project-only consumer.
       if (beforeRevision && beforeContent && beforeContent.projects.length === afterContent.projects.length &&
-        beforeContent.projects.every(p => afterContent.projects.some(a => a.id === p.id)))
-        for (const p of workspace.projects) p.workspaceChange = { before: beforeRevision, after: revision, changes }
+        beforeContent.projects.every(p => afterContent.projects.some(a => a.id === p.id))) {
+        const workspaceChange = { before: beforeRevision, after: revision, changes }
+        for (const p of workspace.projects) p.workspaceChange = workspaceChange
+        // UI saves share the Server transaction FIFO. Publish only successfully read-back,
+        // revision-fenced content, never the client payload or a partial-save candidate.
+        // One complete stamp accounts for every changed project, including background tabs.
+        const publication = afterContent.projects[0]
+        if (opts?.publish && publication && beforeRevision !== revision)
+          platform().broadcast(IPC.workspaceServerChange, { ...publication, workspaceChange })
+      }
       return { revision, projectRevisions }
     })
     this.saveChain = run.catch(() => {})
@@ -1186,6 +1213,9 @@ export class WorkspaceStore {
       const previousCache = this.index?.entries.find((old) => old.id === e.id && old.cache)?.cache
       const changedSinceLoad = !(previousCache && sameProjectContent(previousCache, e.cache))
       e.cache.rev = changedSinceLoad ? prevRev + 1 : prevRev
+      // Re-serializing unchanged SSH content must not manufacture index revision changes.
+      // Keep the last real publication timestamp, while owed mirrors still retry below.
+      if (!changedSinceLoad && previousCache) e.cache.savedAt = previousCache.savedAt
       this.revs.set(e.id, e.cache.rev)
       if (!this.remoteIO) continue
       // Anything this save dropped is a deliberate local deletion — remember it until the server has

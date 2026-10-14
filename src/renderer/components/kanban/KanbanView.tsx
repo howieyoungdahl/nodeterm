@@ -7,14 +7,16 @@ import { useSettings } from '../../state/settings'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
   deleteColumn, labelsForCard, moveColumn,
-  nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned
+  nextColumnColor, pruneAssignments, recolorColumn, renameColumn, setCardPriority, unassigned
 } from '../../lib/kanban'
+import { effectivePriority, sortByPriority } from '../../lib/kanbanPriority'
 import { labelSwatch } from '../../lib/kanbanLabelColors'
 import { CardModal } from './CardModal'
+import { PRIORITIES } from './CardMetaBar'
 import { KanbanColumn, type KanbanLane } from './KanbanColumn'
 import { SessionCard } from './SessionCard'
 import { taskBoardVisibility } from '../../lib/taskBoardVisibility'
-import { assessTaskUrgency, parseTaskPlanning, TASK_CATEGORIES, type TaskCategory } from '@shared/task-planning'
+import { parseTaskPlanning, TASK_CATEGORIES, type TaskCategory } from '@shared/task-planning'
 import { GitHubIssueCard } from './GitHubIssueCard'
 import { kanbanSource, sourceVisible } from '../../lib/kanbanSources'
 import type { ModalSpawn } from './ModalTerminal'
@@ -150,6 +152,10 @@ export const KanbanView = memo(function KanbanView({
   >(null)
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectId = useProjects((s) => s.activeProjectId)
+  const sortMode = useViewMode(s => s.kanbanSortByProject[projectId] ?? 'manual')
+  const setKanbanSort = useViewMode(s => s.setKanbanSort)
+  // One sampled clock for badges, sorting and supporting-session urgency, without a timer.
+  const priorityNow = useMemo(() => Date.now(), [board, sessions, sortMode])
   const projectName = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.name)
   const projectColor = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.color)
   const github = useGitHubIssues((state) => state.projects[projectId])
@@ -320,9 +326,9 @@ export const KanbanView = memo(function KanbanView({
         if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
         // a column dropped on Ungrouped is a no-op — Ungrouped is always first
       } else if (isProviderDrag(drag)) requestGitHubMove(drag.issue, columnId)
-      else commit(assignNode(board, drag.id, columnId, null))
+      else if (sortMode === 'manual') commit(assignNode(board, drag.id, columnId, null))
     },
-    [board, commit, requestGitHubMove]
+    [board, commit, requestGitHubMove, sortMode]
   )
 
   const dropAtCard = useCallback(
@@ -337,6 +343,7 @@ export const KanbanView = memo(function KanbanView({
         requestGitHubMove(drag.issue, columnId)
         return
       }
+      if (sortMode === 'priority') return
       // "after this card" = "before the NEXT card in the column" (null = end of column).
       const ids = columnId === null ? unassigned(board, sessionIds) : assignedTo(board, columnId)
       let beforeId: string | null = targetNodeId
@@ -346,7 +353,7 @@ export const KanbanView = memo(function KanbanView({
       }
       commit(assignNode(board, drag.id, columnId, beforeId))
     },
-    [board, commit, requestGitHubMove, sessionIds]
+    [board, commit, requestGitHubMove, sessionIds, sortMode]
   )
 
   // Per-column card lists in one pass, so a board render doesn't re-derive (and re-allocate)
@@ -362,13 +369,15 @@ export const KanbanView = memo(function KanbanView({
         const matches = (entry: KanbanSession) => (cardMeta(board, entry.id)?.category ?? parseTaskPlanning(entry.taskPlanning)?.category ?? 'needs-classification') === categoryFilter
         return categoryFilter === 'all' || matches(card) || taskVisibility.supports.get(id)?.some(matches) ? [card] : []
       })
-      return cards.length ? cards : NO_CARDS
+      return cards.length ? (sortMode === 'priority'
+        ? sortByPriority(cards, card => effectivePriority(cardMeta(board, card.id), card.taskPlanning, priorityNow))
+        : cards) : NO_CARDS
     }
     return {
       ungrouped: toCards(vis(unassigned(board, sessionIds))),
       byColumn: new Map(board.columns.map((c) => [c.id, toCards(vis(assignedTo(board, c.id)))]))
     }
-  }, [board, byId, sessionIds, activeLocalFilter, taskVisibility, categoryFilter])
+  }, [board, byId, sessionIds, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow])
 
   // Stable column/card plumbing — every handler the memoized columns receive is identity-stable
   // across renders (the column binds its own id; cards bind theirs).
@@ -437,13 +446,13 @@ export const KanbanView = memo(function KanbanView({
           <SessionCard
             key={s.id}
             session={s}
+            reorderEnabled={sortMode === 'manual'}
+            priorityNow={priorityNow}
             meta={metaOf(s.id)}
             labels={labelsOf(s.id)}
             supportingSessions={taskVisibility.supports.get(s.id)}
             urgentSupportingCount={(taskVisibility.supports.get(s.id) ?? []).filter(child => {
-              const meta = metaOf(child.id), planning = parseTaskPlanning(child.taskPlanning)
-              const level = meta?.priorityManual ? meta.priority : meta?.priority ?? (planning ? assessTaskUrgency(planning, Date.now()).level : undefined)
-              return level === 'urgent'
+              return effectivePriority(metaOf(child.id), child.taskPlanning, priorityNow) === 'urgent'
             }).length}
             supportsExpanded={expandedSupport.has(s.id)}
             onToggleSupport={toggleSupport}
@@ -511,6 +520,14 @@ export const KanbanView = memo(function KanbanView({
       ...(moveTargets.length
         ? ([{ type: 'submenu', label: 'Move to', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
         : []),
+      { type: 'submenu', label: 'Priority', children: [
+        ...PRIORITIES.map(priority => ({
+          label: priority.label,
+          icon: <span style={{ color: priority.color }}>●</span>,
+          onClick: () => commit(setCardPriority(board, nodeId, priority.id))
+        })),
+        { label: 'Clear', onClick: () => commit(setCardPriority(board, nodeId, null)) }
+      ] },
       { type: 'separator' },
       { label: 'Delete', icon: <IconTrash />, danger: true, onClick: () => onDeleteNode(nodeId) }
     ]
@@ -523,6 +540,11 @@ export const KanbanView = memo(function KanbanView({
       <div className="kanban-header">
         <span className="kanban-header__dot" style={{ background: projectColor }} />
         <span className="kanban-header__name">{projectName}</span>
+        <select aria-label="Card order" value={sortMode} title="Priority view uses derived order. Choose Manual order to drag cards; Move to remains available in the card menu."
+          onChange={e => { const mode = e.target.value; if (mode === 'manual' || mode === 'priority') setKanbanSort(projectId, mode) }}>
+          <option value="manual">Manual order</option>
+          <option value="priority">Priority</option>
+        </select>
         {board.github && <KanbanSourceFilter value={source} onChange={setSource} />}
         <select aria-label="Work category" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value as TaskCategory | 'all')}>
           <option value="all">All work categories</option>

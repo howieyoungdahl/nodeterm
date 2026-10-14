@@ -74,3 +74,57 @@ it('does not normalize defaults on opaque nested metadata', () => {
   local.layoutRules = { unknown: { collapsed: false, titleAuto: true } } as unknown as Project['layoutRules']
   expect(merge(base, local, incoming)).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
 })
+
+it('adopts priority metadata beside disjoint unsaved node text, but refuses competing priority edits', () => {
+  const base = project(['A']), local = project(['A']), incoming = project(['A'])
+  for (const p of [base, local, incoming]) p.kanban = { columns: [], assignments: [] }
+  local.nodes[0].text = 'Synthetic unsaved draft'
+  incoming.kanban!.meta = [{ nodeId: 'A', priority: 'urgent', priorityManual: true }]
+  const result = merge(base, local, incoming)
+  expect(result.kind).toBe('adopt'); if (result.kind !== 'adopt') throw new Error('fixture')
+  expect(result.projects[0].nodes[0].text).toBe('Synthetic unsaved draft')
+  expect(result.projects[0].kanban?.meta).toEqual(incoming.kanban!.meta)
+  local.kanban!.meta = [{ nodeId: 'A', priority: 'low', priorityManual: true }]
+  expect(merge(base, local, incoming)).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})
+
+it('merges different-card priority rows and retains row order, but refuses different choices on the same card', () => {
+  const base = project(['A', 'B']), local = project(['A', 'B']), incoming = project(['A', 'B'])
+  for (const p of [base, local, incoming]) p.kanban = { columns: [], assignments: [], meta: [
+    { nodeId: 'A', priority: 'low' }, { nodeId: 'B', priority: 'low' }] }
+  local.kanban!.meta![1].priority = 'high'
+  incoming.kanban!.meta![0].priority = 'urgent'
+  incoming.kanban!.meta!.reverse()
+  const result = merge(base, local, incoming)
+  expect(result.kind).toBe('adopt'); if (result.kind !== 'adopt') throw new Error('fixture')
+  expect(result.projects[0].kanban!.meta).toEqual([{ nodeId: 'B', priority: 'high' }, { nodeId: 'A', priority: 'urgent' }])
+  expect(result.localEditsRemain).toBe(true)
+  local.kanban!.meta![0].priority = 'medium'
+  expect(merge(base, local, incoming)).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})
+it('merges concurrent first choices on distinct cards without interpreting opaque meta or labels as entities', () => {
+  const base = project(['A', 'B']), local = project(['A', 'B']), incoming = project(['A', 'B'])
+  for (const p of [base, local, incoming]) p.kanban = { columns: [], assignments: [] }
+  local.kanban!.meta = [{ nodeId: 'B', priority: 'high' }]
+  incoming.kanban!.meta = [{ nodeId: 'A', priority: 'urgent' }]
+  const result = merge(base, local, incoming)
+  expect(result.kind).toBe('adopt'); if (result.kind !== 'adopt') throw new Error('fixture')
+  expect(result.projects[0].kanban!.meta).toHaveLength(2)
+  expect(result.projects[0].kanban!.meta).toEqual(expect.arrayContaining([...local.kanban!.meta, ...incoming.kanban!.meta]))
+  for (const p of [base, local, incoming]) p.layoutRules = JSON.parse('{"opaque":{"meta":[{"nodeId":"A","value":1},{"nodeId":"B","value":1}]}}')
+  ;(local.layoutRules as unknown as { opaque: { meta: Array<{ value: number }> } }).opaque.meta[1].value = 2
+  ;(incoming.layoutRules as unknown as { opaque: { meta: Array<{ value: number }> } }).opaque.meta[0].value = 3
+  expect(merge(base, local, incoming)).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+  for (const p of [base, local, incoming]) delete p.layoutRules
+  base.kanban!.meta = [{ nodeId: 'A', labels: ['base'] }]
+  local.kanban!.meta = [{ nodeId: 'A', labels: ['local'] }]
+  incoming.kanban!.meta = [{ nodeId: 'A', labels: ['incoming'] }]
+  expect(merge(base, local, incoming)).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})
+
+it('card assignee arrays retain atomic choice semantics', () => {
+  const base = project(['A']), local = project(['A']), incoming = project(['A'])
+  for (const [p, name] of [[base, 'Synthetic base'], [local, 'Synthetic local'], [incoming, 'Synthetic incoming']] as const)
+    p.kanban = { columns: [], assignments: [], meta: [{ nodeId: 'A', assignees: [{ name, color: '#fff' }] }] }
+  expect(merge(base, local, incoming)).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})

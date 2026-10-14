@@ -10,6 +10,16 @@ import { readLocal, writeLocal } from '../lib/localStore'
 
 export const PROJECT_VIEW_KEY = 'nodeterm.projectView'
 
+export const PROJECT_KANBAN_SORT_KEY = 'nodeterm.projectKanbanSort'
+export type KanbanSort = 'manual' | 'priority'
+export function parseKanbanSortMap(raw: string | null): Record<string, KanbanSort> {
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : {}
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return Object.fromEntries(Object.entries(parsed).filter(([, value]) => value === 'manual' || value === 'priority'))
+  } catch { return {} }
+}
+
 export type ProjectView = 'canvas' | 'kanban'
 
 /** Parses the persisted map, keeping only valid canvas/kanban entries. Exported for tests. */
@@ -34,6 +44,8 @@ function save(v: Record<string, ProjectView>): void {
 }
 
 interface ViewModeState {
+  kanbanSortByProject: Record<string, KanbanSort>
+  setKanbanSort(projectId: string, mode: KanbanSort): void
   viewByProject: Record<string, ProjectView>
   /** The fallback view for projects with no explicit entry (Settings → Default view). */
   defaultView: ProjectView
@@ -59,6 +71,13 @@ export function viewFor(s: Pick<ViewModeState, 'viewByProject' | 'defaultView'>,
 }
 
 export const useViewMode = create<ViewModeState>((set) => ({
+  kanbanSortByProject: parseKanbanSortMap(readLocal(PROJECT_KANBAN_SORT_KEY)),
+  setKanbanSort: (projectId, mode) => set(s => {
+    if (mode !== 'manual' && mode !== 'priority') return s
+    const next = { ...s.kanbanSortByProject, [projectId]: mode }
+    try { writeLocal(PROJECT_KANBAN_SORT_KEY, JSON.stringify(next)) } catch { /* Personal preference only. */ }
+    return { kanbanSortByProject: next }
+  }),
   viewByProject: parseViewMap(readLocal(PROJECT_VIEW_KEY)),
   defaultView: 'canvas',
   setDefaultView: (v) => set((s) => (s.defaultView === v ? s : { defaultView: v })),
