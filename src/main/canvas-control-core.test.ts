@@ -383,7 +383,7 @@ describe('parseControlRequest', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body.toLowerCase()).toContain('put')
       // Line-wrap tolerant: the SKILL body wraps this sentence, the marker block does not.
-      expect(body.toLowerCase()).toMatch(/neither touches the\s+session|keeps its session running/)
+      expect(body.toLowerCase()).toMatch(/neither touches the\s+session|keeps its\s+session running/)
     }
   })
 

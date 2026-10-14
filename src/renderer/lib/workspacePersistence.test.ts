@@ -10,8 +10,17 @@ function fixture() {
   let listener: (p: Project) => void = () => {}
   let resolve!: (ack: WorkspaceSaveAck) => void, reject!: (error: Error) => void, started!: () => void
   const start = new Promise<void>(r => { started = r })
-  const api = { save: () => { started(); return new Promise<WorkspaceSaveAck>((yes, no) => { resolve = yes; reject = no }) },
-    onServerChange: (cb: (p: Project) => void) => { listener = cb; return () => { listener = () => {} } } } as WorkspaceApi
+  const unused = (): never => { throw new Error('Unexpected unused WorkspaceApi fixture method') }
+  const api: WorkspaceApi = {
+    load: unused,
+    probeFolder: unused,
+    projectFileState: unused,
+    onMigrated: unused,
+    onCorruptRecovered: unused,
+    onExternalChange: unused,
+    save: () => { started(); return new Promise<WorkspaceSaveAck>((yes, no) => { resolve = yes; reject = no }) },
+    onServerChange: (cb: (p: Project) => void) => { listener = cb; return () => { listener = () => {} } }
+  }
   const conflicts: string[] = [], delivered: Project[] = [], observed: Project[] = []
   const handle = (p: Project) => {
     delivered.push(p)
