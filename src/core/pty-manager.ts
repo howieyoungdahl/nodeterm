@@ -1928,6 +1928,10 @@ export class PtyManager {
    */
   async createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult> {
     const result = await this.create(0, options)
+    // Headless keeps the backend alive but has no screen to size it. Leaving its startup grid
+    // in the minimum-size ledger capped every later browser/card-modal viewer at 120x36.
+    // Park only this view's vote, retaining its subscriber and the initial grid until a viewer joins.
+    this.resize(0, result.sessionId, null, null, options.viewerId)
     const live = this.sessions.get(result.sessionId)
     if (!options.persistKey || !live?.persistKey || live.sshRemote || live.sessionHost || !this.tmuxPath)
       return result
