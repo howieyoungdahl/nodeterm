@@ -364,16 +364,16 @@ describe('parseControlRequest', () => {
   })
 
   // The spawn defaults are BEHAVIOUR the caller cannot see any other way: it asks for one node
-  // and gets a named worker that may have been moved into a frame. A body that does not say so
+  // and gets a named worker. A body that promises implicit grouping
   // describes a product that no longer exists (this repo shipped exactly that drift as #269).
-  it('both agent-facing texts describe the worker role, the generated name and the tray frame', () => {
+  it('both agent-facing texts describe the worker role, generated name and explicit grouping', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body.toLowerCase()).toContain('worker')
       // The name it will actually see back from `list`, and that the session name later wins.
       expect(body).toContain('· <agent>')
       expect(body.toLowerCase()).toContain('summary')
-      // The single-member rule, so a caller does not report a missing frame as a bug.
-      expect(body.toLowerCase()).toContain('second worker')
+      // Creation leaves grouping to an explicit command.
+      expect(body.toLowerCase()).toContain('creation never groups existing cards automatically')
       // And the two operator gestures that legitimately leave a worker outside the frame.
       expect(body.toLowerCase()).toContain('pinned')
     }
@@ -383,7 +383,7 @@ describe('parseControlRequest', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body.toLowerCase()).toContain('put')
       // Line-wrap tolerant: the SKILL body wraps this sentence, the marker block does not.
-      expect(body.toLowerCase()).toMatch(/neither touches the\s+session|keeps its session running/)
+      expect(body.toLowerCase()).toMatch(/neither touches the\s+session|keeps its\s+session running/)
     }
   })
 

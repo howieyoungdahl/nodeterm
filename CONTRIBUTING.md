@@ -547,3 +547,20 @@ omission allowance for the exact project and node. Browser/RPC JSON cannot suppl
 that authority. Ordinary saves and sweeps still preserve archived rows; explicit
 deletion keeps retained tombstones and archive receipt history, so stale snapshots
 cannot resurrect the removed card or its incident links and board assignments.
+
+Creation places only new cards. Neither Desktop nor Server creation automatically collects prior
+workers into frames; grouping and organization require explicit commands. Existing frame geometry,
+pins and manual placement remain operator choices.
+Publication comparisons normalize only the node defaults `titleAuto: true` and `collapsed: false`
+to omitted persisted values. Defined drafts, metadata and geometry still conflict with deletion.
+Per-bridge publication delivery waits for an in-flight save ACK, with a 64-event bound and
+unsubscribe cancellation. Observe complete publication receipts immediately for subsequent stamped
+canvas deltas; install content before advancing revision evidence. Delayed ACKs cannot rewind a
+newer revision, and save failures or missed publications still use the conflict guards.
+Runtime revision/publication and loaded-board evidence are not shared project edits.
+
+A host stale-save rejection may retry once only when every buffered complete publication reports
+successful content installation along a contiguous chain from the rejected snapshot to the current
+revision. Take a fresh merged snapshot and require its normal save ACK. Global revision drift alone,
+a conflict, missing chain, overflow, malformed ACK, failed installation or failed retry never grants
+recovery. Keep failure reporting behind this save promise instead of clearing UI warnings directly.

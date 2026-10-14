@@ -5,19 +5,82 @@ import { applyDeletedEntities } from './deletedEntities'
 
 // Build each snapshot AFTER the preceding acknowledgment. A racing edit stays unsaved;
 // acknowledgments advance revision evidence, never overwrite content with an old snapshot.
-let saveChain: Promise<unknown> = Promise.resolve()
-export function saveWorkspace(api: WorkspaceApi): Promise<void> {
-  const run = saveChain.then(async () => {
-    const snapshot = useProjects.getState().toWorkspace()
-    const ack = await api.save(snapshot)
-    // An older/unsupported host cannot acknowledge a write by returning nothing.
-    if (!ack || !/^[a-f0-9]{64}$/.test(ack.revision) || !ack.projectRevisions ||
-      Object.values(ack.projectRevisions).some((revision) => !/^[a-f0-9]{64}$/.test(revision))) {
-      throw new Error('workspace_conflict: revision acknowledgment missing; reload an updated host')
+export type PublicationDelivery =
+  | { kind: 'adopt'; before: string; after: string }
+  | { kind: 'duplicate'; revision: string }
+  | { kind: 'conflict' }
+type SaveCoordinator = { chain: Promise<unknown>; pending: boolean; refused: boolean; publications: (() => PublicationDelivery | void)[] }
+const coordinators = new WeakMap<WorkspaceApi, SaveCoordinator>()
+function coordinator(api: WorkspaceApi): SaveCoordinator {
+  let state = coordinators.get(api)
+  if (!state) { state = { chain: Promise.resolve(), pending: false, refused: false, publications: [] }; coordinators.set(api, state) }
+  return state
+}
+
+/** Publication callbacks may beat their preceding save RPC response. Hold complete events
+ * until that ACK installs revision evidence. A failed save still drains through the strict
+ * revision/content guards. Overflow refuses adoption, and unsubscribe cancels queued delivery. */
+export function subscribeWorkspacePublications(api: WorkspaceApi, listener: (project: Project) => PublicationDelivery | void, received?: (project: Project) => void): () => void {
+  const state = coordinator(api)
+  let alive = true
+  const unsubscribe = api.onServerChange(project => {
+    if (!alive) return
+    received?.(project)
+    if (!state.pending) { listener(project); return }
+    if (state.publications.length >= 64) {
+      state.refused = true
+      listener({ ...project, workspaceChange: undefined })
+      return
     }
-    useProjects.getState().acknowledgeSave(ack, snapshot)
+    state.publications.push(() => { if (alive) return listener(project) })
   })
-  saveChain = run.catch(() => {})
+  return () => { alive = false; unsubscribe() }
+}
+
+/** Retry evidence comes from completed content installation, not merely a changed store
+ * revision. Every buffered event must account for the same contiguous installed chain. */
+function drainPublications(state: SaveCoordinator, revision: string | undefined): boolean {
+  let cursor = revision, adopted = false, safe = !state.refused
+  const publications = state.publications.splice(0)
+  for (const deliver of publications) {
+    const evidence = deliver()
+    if (evidence?.kind === 'adopt' && evidence.before === cursor &&
+      /^[a-f0-9]{64}$/.test(evidence.after) && evidence.after !== cursor &&
+      useProjects.getState().revision === evidence.after) {
+      cursor = evidence.after
+      adopted = true
+    } else if (evidence?.kind !== 'duplicate' || evidence.revision !== cursor) safe = false
+  }
+  return safe && adopted && cursor === useProjects.getState().revision
+}
+
+export function saveWorkspace(api: WorkspaceApi): Promise<void> {
+  const state = coordinator(api)
+  const run = state.chain.then(async () => {
+    // One fresh-snapshot retry, only after a rejected host save and proven safe adoption.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const snapshot = useProjects.getState().toWorkspace()
+      state.pending = true
+      state.refused = false
+      let failure: unknown, failed = false, hostRejected = false
+      try {
+        const ack = await api.save(snapshot).catch(error => { hostRejected = true; throw error })
+        // Unsupported/malformed acknowledgments never admit a retry.
+        if (!ack || !/^[a-f0-9]{64}$/.test(ack.revision) || !ack.projectRevisions ||
+          Object.values(ack.projectRevisions).some(revision => !/^[a-f0-9]{64}$/.test(revision))) {
+          throw new Error('workspace_conflict: revision acknowledgment missing; reload an updated host')
+        }
+        useProjects.getState().acknowledgeSave(ack, snapshot)
+      } catch (error) { failed = true; failure = error }
+      finally { state.pending = false }
+      const safelyAdopted = drainPublications(state, failed ? snapshot.revision : useProjects.getState().revision)
+      if (!failed) return
+      if (attempt === 0 && hostRejected && failure instanceof Error &&
+        failure.message.includes('workspace_conflict:') && safelyAdopted) continue
+      throw failure
+    }
+  })
+  state.chain = run.catch(() => {})
   return run
 }
 

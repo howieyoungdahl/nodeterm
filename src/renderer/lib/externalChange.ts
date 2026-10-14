@@ -52,7 +52,11 @@ const NOT_SHARED_STATE: ReadonlySet<string> = new Set([
   'closed',
   'unavailable',
   'remote',
-  'deletedEntities'
+  'deletedEntities',
+  'revision',
+  'loadedKanban',
+  'workspaceChange',
+  'organizationChange'
 ])
 
 /** Stable JSON (object keys sorted at every depth) so two structurally equal values compare equal

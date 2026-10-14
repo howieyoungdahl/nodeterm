@@ -53,3 +53,24 @@ it.each(['__proto__', 'toString'])('treats an undefined own %s field like omissi
   expect(result.kind).toBe('adopt'); if (result.kind !== 'adopt') throw new Error('fixture')
   expect(result.projects[0].layoutRules).toBeUndefined()
 })
+
+// Flow materializes these defaults even when a saved card has never been edited.
+it('adopts deletion of a sparse unchanged card after renderer defaults materialize', () => {
+  const base = project(['A']), local = project(['A'])
+  local.nodes[0].collapsed = false
+  local.nodes[0].titleAuto = true
+  expect(merge(base, local, project([])).kind).toBe('adopt')
+})
+it.each([{ collapsed: true }, { titleAuto: false }, { text: 'unsent draft' }, { manualPlacement: true }])(
+  'retains meaningful local edit versus deletion: %j', edit => {
+    const base = project(['A']), local = project(['A'])
+    Object.assign(local.nodes[0], { collapsed: false, titleAuto: true }, edit)
+    expect(merge(base, local, project([]))).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+  })
+
+it('does not normalize defaults on opaque nested metadata', () => {
+  const base = project(['A']), local = project(['A']), incoming = project(['A'])
+  base.layoutRules = { unknown: {} } as unknown as Project['layoutRules']
+  local.layoutRules = { unknown: { collapsed: false, titleAuto: true } } as unknown as Project['layoutRules']
+  expect(merge(base, local, incoming)).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})

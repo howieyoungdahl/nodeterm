@@ -89,3 +89,51 @@ describe('RpcClient', () => {
     expect(closed).toBe(1)
   })
 })
+
+it.each([false, true])('keeps actual WS publication ordering behind the ACK barrier, stale-save=%s', async staleSave => {
+  const { useProjects } = await import('../state/projects')
+  const persistence = await import('../lib/workspacePersistence')
+  const { mergeWorkspacePublication } = await import('../lib/workspacePublication')
+  const a = 'a'.repeat(64), b = 'b'.repeat(64), c = 'c'.repeat(64)
+  const base = { id: 'p', name: 'P', color: '#888', viewport: { x: 0, y: 0, zoom: 1 }, nodes: [] }
+  const incoming = { ...base, name: 'Server edit' }
+  useProjects.getState().hydrate({ version: 2, activeProjectId: 'p', revision: a, projects: [base] })
+  useProjects.setState({ projects: [{ ...base, color: '#000' }] })
+  const snapshots: import('@shared/types').Workspace[] = []
+  wss.on('connection', sock => sock.on('message', data => {
+    const request = JSON.parse(data.toString())
+    snapshots.push(request.args[0])
+    if (staleSave && snapshots.length === 2) {
+      sock.send(JSON.stringify({ t: 'res', id: request.id, ok: true, result: { revision: c, projectRevisions: { p: c } } }))
+      return
+    }
+    // The next server transaction can finish before the previous RPC returns to the browser.
+    sock.send(JSON.stringify({ t: 'ev', channel: 'workspace:server-change', args: [{ ...incoming,
+      workspaceChange: { before: staleSave ? a : b, after: staleSave ? b : c, changes: [{ before: base, after: incoming }] } }] }))
+    sock.send(JSON.stringify(staleSave ? { t: 'res', id: request.id, ok: false, error: { code: 'E_WORKSPACE_CONFLICT', message: 'workspace_conflict: storage changed; reload before saving' } } : { t: 'res', id: request.id, ok: true, result: { revision: b, projectRevisions: { p: b } } }))
+  }))
+  const client = new RpcClient(`ws://127.0.0.1:${port}/`)
+  await client.ready()
+  const api = { save: (workspace: import('@shared/types').Workspace) => client.request('workspace:save', workspace),
+    onServerChange: (cb: (p: import('@shared/types').Project) => void) => client.subscribe('workspace:server-change', (...args) => cb(args[0] as import('@shared/types').Project)) } as import('@shared/types').WorkspaceApi
+  const conflicts: string[] = []
+  const handle = (p: import('@shared/types').Project) => {
+    const state = useProjects.getState()
+    const merged = mergeWorkspacePublication(state.revision, state.projects, p.workspaceChange)
+    if (merged.kind === 'conflict') { conflicts.push(merged.reason); return { kind: 'conflict' as const } }
+    if (merged.kind === 'duplicate') return { kind: 'duplicate' as const, revision: state.revision! }
+    useProjects.setState({ projects: merged.projects, revision: merged.revision })
+    return { kind: 'adopt' as const, before: p.workspaceChange!.before, after: merged.revision }
+  }
+  const unsubscribe = persistence.subscribeWorkspacePublications
+    ? persistence.subscribeWorkspacePublications(api, handle) : api.onServerChange(handle)
+  try {
+    await persistence.saveWorkspace(api)
+    expect(conflicts).toEqual([])
+    expect(useProjects.getState().revision).toBe(c)
+    expect(useProjects.getState().projects[0].name).toBe('Server edit')
+    expect(useProjects.getState().projects[0].color).toBe('#000')
+    expect(snapshots).toHaveLength(staleSave ? 2 : 1)
+    if (staleSave) expect(snapshots[1]).toMatchObject({ revision: b, projects: [{ name: 'Server edit', color: '#000' }] })
+  } finally { unsubscribe() }
+})

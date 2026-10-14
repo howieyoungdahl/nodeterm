@@ -332,12 +332,12 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  640×440 footprint); pass `--size normal` to use the configured manual-open size instead.',
     '  Manual UI opens remain normal-sized. Every node you open is marked a WORKER and is titled',
     '  after you (`<your name> · <agent>`) with a one-line owner+task summary, so a canvas full of',
-    '  sessions still says who asked for what; once the session names itself that name wins. From',
-    '  your SECOND worker on they are collected into a frame named after you — your own frame if',
-    '  you are already in one — so you do not have to group them yourself. The operator can put any',
-    '  card away (back to compact) or expand it from its header, and can pin one; a pinned or',
-    '  hand-placed card is never moved into a frame. Putting a card away keeps its session running',
-    '  — it is filing, not closing. `--group` parents the node(s) into a group frame; a worktree-bound group also',
+    '  sessions still says who asked for what; once the session names itself that name wins.',
+    '  Creation never groups existing cards automatically. Use explicit `group` or `organize`',
+    '  commands to collect workers. The operator can put any card away (back to compact) or',
+    '  expand it from its header, and can pin one. A pinned or hand-placed card keeps its placement.',
+    '  Putting a card away keeps its session running; it is filing, not closing.',
+    '  `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
     '  their work when it wakes — use it for "B needs what A produced" instead of polling. Only',
@@ -813,17 +813,12 @@ Verbs:
   a one-line owner+task summary, so a canvas full of sessions still says who asked for what. The
   title is an OPENING name: once the session names itself, that name replaces it, and the summary
   stays.
-  From your SECOND worker on, your workers are collected into a frame named after you — or into
-  your OWN frame, immediately, if you are already inside one. You do not need to \`group\` them
-  yourself. A single worker is left loose on purpose: a frame around one card is noise.
-  The operator can put any card away (back to the compact footprint, restoring the exact size and
-  position it had) or expand it, from the card header or its right-click menu; neither touches the
-  session. They can also pin a card. A pinned card, and a card they have dragged or resized
-  themselves, is never moved into a frame — so if a worker of yours is not in the frame with the
-  others, that is the operator's placement and not a failure.
+  Creation never groups existing cards automatically. Use explicit \`group\` or \`organize\`
+  commands to collect workers. The operator can put any card away (back to compact), expand it,
+  or pin it. A pinned or hand-placed card keeps its placement. Putting a card away keeps its
+  session running; it is filing, not closing.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
-  hands its worktree path down as the cwd. Naming a frame yourself turns the automatic collection
-  off for that open — your placement wins.
+  hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
   every listed station has gone idle — that is how you express "B needs what A produces" without
   sitting in a poll loop. The armed node is also context-linked to each station it waits on, so

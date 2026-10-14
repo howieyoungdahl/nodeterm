@@ -31,8 +31,6 @@ import {
   resolveControlNodeSizeName
 } from '../shared/control-node-size'
 import {
-  planWorkerFrame,
-  workerFrameLabel,
   workerNodeTitle,
   workerTaskSummary
 } from '../shared/worker-frame'
@@ -2019,58 +2017,6 @@ export class HeadlessNodeFactory {
     return done
   }
 
-  /**
-   * Put the workers this spawn just created under the spawner's tray frame (@shared/worker-frame).
-   * Mutates `project.nodes` in place — the caller is inside the workspace transaction and saves
-   * once, so a burst of spawns is a burst of single writes, not a write per node per frame.
-   *
-   * Presentation only: it creates no session, attaches to nothing, kills nothing and types
-   * nothing. Ownership is asked before any EXISTING node is re-parented, because re-parenting is
-   * a mutation and creator ownership is the boundary for those; the plan additionally refuses to
-   * move anything the operator pinned or placed by hand.
-   */
-  private applyWorkerFrame(
-    project: Project,
-    spawner: CanvasNodeState,
-    created: readonly CanvasNodeState[],
-    sourceNodeId: string
-  ): { groupId?: string; changed: CanvasNodeState[] } {
-    const plan = planWorkerFrame({
-      nodes: project.nodes,
-      spawnerId: spawner.id,
-      newWorkerIds: created.map((node) => node.id),
-      ropes: project.ropes ?? [],
-      owns: (id) => this.ownsSpawn(sourceNodeId, id)
-    })
-    if (plan.kind === 'none') return { changed: [] }
-    if (plan.kind === 'join') {
-      const joined = reparentPersistedNodes(project.nodes, plan.memberIds, plan.groupId)
-      project.nodes = joined.nodes
-      return { changed: joined.changed }
-    }
-    const grouped = groupPersistedNodes(
-      project.nodes,
-      plan.memberIds,
-      project.nodes.filter((node) => node.kind === 'group').length,
-      workerFrameLabel(spawner.title),
-      isNodeColor(spawner.color) ? spawner.color : undefined
-    )
-    if (!grouped) return { changed: [] }
-    // The tray marker is how the NEXT spawn finds this frame — by fact, not by name, so a frame
-    // the operator renamed is still the same tray. It ships EXPANDED: it used to ship collapsed
-    // ("put away is half of what a tray is for"), but `collapsed` on a frame only ever shrank the
-    // container its members are clamped into by `extent: 'parent'`, stacking every worker on one
-    // horizontal line — it put nothing away. See @shared/node-collapse; a real put-away is unbuilt.
-    project.nodes = grouped.nodes.map((node) =>
-      node.id === grouped.groupId ? { ...node, taskFrame: true } : node
-    )
-    const byId = new Map(project.nodes.map((node) => [node.id, node]))
-    return {
-      groupId: grouped.groupId,
-      changed: grouped.changed.map((node) => byId.get(node.id) ?? node)
-    }
-  }
-
   private async open(
     sourceNodeId: string,
     verb: 'open-terminal' | 'open-agent',
@@ -2304,26 +2250,14 @@ export class HeadlessNodeFactory {
       target.nodes.push(...created)
       target.ropes = ropes
       target.bridges = bridges
-      // The tray: collect this spawner's workers under one frame (see @shared/worker-frame).
-      // Runs INSIDE the same transaction as the append, so the frame and its members are one
-      // save and one publish — a burst of spawns must not become a burst of merges.
-      const framed = this.applyWorkerFrame(target, source.node, created, sourceNodeId)
-      const receipt = await this.recordCreation(sourceNodeId, target, args, [...created, ...(framed.groupId ? target.nodes.filter(n => n.id === framed.groupId) : [])])
+      // Creation places only the new cards. Grouping existing cards requires an explicit command.
+      const receipt = await this.recordCreation(sourceNodeId, target, args, created)
       await this.deps.workspaceStore.save(workspace)
       for (const node of created) {
         this.ownership.record(node.id, { sourceNodeId, projectId: target.id, assistantCreationId: receipt.id })
         this.launchesInFlight.add(node.id)
       }
-      if (framed.groupId) {
-        this.ownership.record(framed.groupId, { sourceNodeId, projectId: target.id, assistantCreationId: receipt.id })
-      }
-      // Publish in the project's own order, which `groupsFirst` has already made parent-first:
-      // React Flow requires a frame to arrive before the children parented to it.
-      const touched = new Set([
-        ...created.map((node) => node.id),
-        ...framed.changed.map((node) => node.id)
-      ])
-      this.publish(target, target.nodes.filter((node) => touched.has(node.id)))
+      this.publish(target, created)
       // The launch reads cwd/agent/account off these, never geometry — but returning the FINAL
       // objects keeps "what we persisted" and "what we launch" one thing.
       const finalById = new Map(target.nodes.map((node) => [node.id, node]))
