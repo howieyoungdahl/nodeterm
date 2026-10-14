@@ -221,6 +221,7 @@ export async function initServerCanvasControl(
     // identity gate still runs ahead of them, so an unverified caller never reaches here.
     list: (sourceNodeId, args) => factory.list(sourceNodeId, args),
     board: (sourceNodeId, args) => factory.board(sourceNodeId, args),
+    assign: (sourceNodeId, args, verified) => factory.assign(sourceNodeId, args, verified),
     openProject: (sourceNodeId, args, verified) =>
       factory.openProject(sourceNodeId, args, verified),
     openTerminal: (sourceNodeId, args, verified) =>

@@ -68,6 +68,16 @@ export interface ServerEditionControlActions {
   list(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
   /** Read-only: the caller's project as a kanban board. */
   board(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  /**
+   * Board metadata write: file a session card under a kanban column. Takes `verified` explicitly
+   * (the factory repeats the identity gate) but no creator-ownership check, because it never
+   * touches the node, its group, or its session.
+   */
+  assign(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
   openProject(
     sourceNodeId: string,
     args: Record<string, string>,
@@ -140,6 +150,9 @@ const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
   // action takes no `verified` argument — the shared gate below still refuses them unverified.
   'list',
   'board',
+  // The one board WRITE. Metadata only (an assignment in `project.kanban`), so unlike the
+  // structural verbs below it has no creator-ownership gate; see `HeadlessNodeFactory.assign`.
+  'assign',
   'open-project',
   'open-terminal',
   'open-agent',
@@ -216,6 +229,8 @@ export function createServerEditionControlHandler(actions: ServerEditionControlA
         return actions.list(nodeId, command.args)
       case 'board':
         return actions.board(nodeId, command.args)
+      case 'assign':
+        return actions.assign(nodeId, command.args, verified)
       case 'open-project':
         return actions.openProject(nodeId, command.args, verified)
       case 'open-terminal':

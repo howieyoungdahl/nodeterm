@@ -176,6 +176,7 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
   const actions = () => ({
     list: vi.fn(async () => ({ ok: true as const, result: { nodes: [] } })),
     board: vi.fn(async () => ({ ok: true as const, result: { columns: [], ungrouped: [] } })),
+    assign: vi.fn(async () => ({ ok: true as const, result: { node: 'term-a', column: 'kcol-1' } })),
     openProject: vi.fn(async () => ({ ok: true as const, result: { projectId: 'project-loop' } })),
     openTerminal: vi.fn(async () => ({ ok: true as const, result: { id: 'term-new' } })),
     openAgent: vi.fn(async () => ({ ok: true as const, result: { id: 'agent-new' } })),
@@ -366,6 +367,41 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
     })
   })
 
+  it('dispatches assign, forwarding the parsed args and verified identity', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({
+        verb: 'assign',
+        nodeId: 'term-source',
+        args: { node: 'term-a', column: 'In Progress', before: 'term-b', create: '' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.assign).toHaveBeenCalledWith(
+      'term-source',
+      { node: 'term-a', column: 'In Progress', before: 'term-b', create: '' },
+      true
+    )
+    // The shared parser still owns the --node requirement, ahead of any action.
+    await expect(
+      handler({ verb: 'assign', nodeId: 'term-source', args: { column: 'Done' }, verified: true })
+    ).resolves.toEqual({ ok: false, error: 'assign requires --node <id>' })
+    // And the whole-edition identity gate runs first, naming the verb.
+    await expect(
+      handler({
+        verb: 'assign',
+        nodeId: 'term-source',
+        args: { node: 'term-a', column: 'Done' },
+        verified: false
+      })
+    ).resolves.toEqual({
+      ok: false,
+      error: 'assign-identity-refused: Server Edition canvas control requires verified node identity'
+    })
+    expect(a.assign).toHaveBeenCalledTimes(1)
+  })
+
   it('dispatches the structural quartet, forwarding verified identity to each', async () => {
     // These four are the recovery path out of a frame, so a wiring miss here is exactly the bug
     // being fixed: the verb parses, the set admits it, and the switch still answers "unsupported".
@@ -488,12 +524,11 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
 
   it('keeps every deferred or unknown verb a clean permanent edition refusal', async () => {
     const handler = createServerEditionControlHandler(actions())
-    // `assign` is the deliberate near-miss: `board` reads the same model and is now supported,
-    // while writing a card into a column stays deferred. `list`/`board` are no longer in here —
-    // that removal is the whole point of the change and would be invisible without this note.
-    // `move`/`arrange` left this list with the structural quartet; `write` is the near-miss that
-    // stays deferred because it types into somebody's pane.
-    for (const verb of ['assign', 'browser', 'write', 'verify', 'spawn-team', 'not-a-verb']) {
+    // `list`/`board` are no longer in here, and neither is `assign` (the board write that pairs
+    // with `board`) — those removals are the point of their changes and would be invisible without
+    // this note. `move`/`arrange` left this list with the structural quartet; `write` is the
+    // near-miss that stays deferred because it types into somebody's pane.
+    for (const verb of ['browser', 'write', 'verify', 'spawn-team', 'not-a-verb']) {
       const reply = await handler({ verb, nodeId: 'term-source', args: {}, verified: true })
       expect(reply, verb).toMatchObject({ ok: false, error: CONTROL_UNSUPPORTED_ERROR })
       expect(reply.message, verb).toContain('do not retry')

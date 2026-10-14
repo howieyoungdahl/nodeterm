@@ -668,8 +668,8 @@ subject.
   live, exactly as the desktop board does (terminal / sticky / browser nodes are cards; frames and
   editors are not). A project whose file carries no board gets one virtual `Ungrouped` column and a
   line saying Server Edition v1 has no columns yet — the renderer's lazy default three columns are
-  deliberately *not* invented here, because their ids would exist nowhere and `assign` is not
-  implemented on this edition.
+  deliberately *not* invented here, because their ids would exist nowhere. Columns come from
+  `assign --create` or the browser UI.
 
 Both take the same verified-node-identity gate as every other enabled verb. Desktop's identity
 policy lists `list` as tolerant (`TOLERANT_CONTROL_VERBS`) so a legacy client can still orient
@@ -684,6 +684,11 @@ rename, resize, color, sticky updates, dependency targets, message delivery, and
 complete target set before any write or PTY kill; an unowned member refuses the whole operation.
 Queued messages repeat the creator check at flush time in addition to the existing verified and
 per-project switch gates.
+
+`assign --node <id> --column <id|title|ungrouped> [--before <nodeId>] [--create]` files a session
+card under a kanban column of the caller's project (desktop semantics; `board` shows the ids). It
+writes board metadata only, so it is verified-identity gated but, unlike the verbs above, has no
+creator-ownership gate. `--create` appends a missing column, but is refused on a GitHub-synced board.
 
 #### The structural quartet: `ungroup`, `move`, `arrange`, `align`
 
