@@ -592,3 +592,13 @@ save generation. Use the merge's canonical persisted equality to detect retained
 request persistence only for those, and never clear already dirty generations. Canonical
 Project.kanban.meta merges by nodeId so separate-card priorities coexist. Assignees/labels and
 arbitrary nested meta arrays remain atomic; competing same-card priority choices still conflict.
+
+Native lifecycle clocks live in the shared mirror, independently of activity and
+compatibility badges. Only explicit clean turn-end events advance `lastDoneAt`;
+tool output, idle rescue and failure events cannot extend cache warmth. The
+Server's additive `/opsapi/nodes` lifecycle contract is documented in
+`docs/SERVER.md`. It is observation, not cleanup or messaging authorization.
+Hookless lifecycle recovery uses the foreground agent predicate and an exact
+signed Codex binding (or Claude's saved session), never titles or rollout recency.
+Keep extended SGR color components separate from dim attributes when detecting
+prompts; a color channel equal to 2 does not mean the text is a suggestion.

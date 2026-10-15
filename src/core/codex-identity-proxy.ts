@@ -319,6 +319,30 @@ export function identityCandidates(
   return out
 }
 
+/** Reverse lookup for hookless inventory. A title, rollout mtime or daemon PID is never identity. */
+export function codexThreadForNode(
+  nodeId: string,
+  root = codexThreadIdentityRoot()
+): { threadId: string; scope: string } | undefined {
+  let budget = 2_000
+  const matches: Array<{ threadId: string; scope: string }> = []
+  const scan = (dir: string, scope: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (--budget < 0) throw new Error('Codex binding scan limit')
+      if (entry.isFile() && isSafeThreadId(entry.name)) {
+        if (readIdentityCandidate(entry.name, scope, root)?.nodeId === nodeId) matches.push({ threadId: entry.name, scope })
+      } else if (scope === SYSTEM_ACCOUNT_SCOPE && entry.isDirectory() && entry.name !== SYSTEM_ACCOUNT_SCOPE && isSafeCodexRecordScope(entry.name)) {
+        scan(path.join(dir, entry.name), entry.name)
+      }
+    }
+  }
+  try {
+    scan(root, SYSTEM_ACCOUNT_SCOPE)
+    if (matches.length !== 1 || identityCandidates(matches[0].threadId, root).length !== 1) return undefined
+    return matches[0]
+  } catch { return undefined } // Failed or truncated enumeration cannot prove uniqueness.
+}
+
 /** The record for a thread at a scope (`accountId` empty/undefined ⇒ system), or undefined. */
 export function readCodexThreadIdentity(
   threadId: string,

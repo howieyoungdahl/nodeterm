@@ -10,6 +10,9 @@ export interface NormalizedAgentEvent {
   agentId: AgentId
   kind: 'state' | 'subagent-start' | 'subagent-end' | 'recurring' | 'session' | 'background-task'
   state?: AgentState
+  /** Explicit clean Stop, distinct from failures, interrupts and idle rescues. */
+  cleanTurnEnd?: boolean
+  blockedKind?: 'permission' | 'question' | 'elicitation' | 'input'
   // done only: the turn ended because the user interrupted (Esc/Ctrl-C) — the renderer
   // skips the completion alert/unread for these (the user was right there).
   interrupted?: boolean
@@ -255,6 +258,7 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
       kind: 'state',
       state: 'done',
       interrupted: p.is_interrupt === true,
+      cleanTurnEnd: p.is_interrupt !== true,
       lastMessage: p.last_assistant_message
     }
   }
@@ -269,6 +273,7 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
       ...base,
       kind: 'state',
       state: 'blocked',
+      blockedKind: 'permission',
       lastMessage: p.last_assistant_message,
       // Deterministic-approval ticket (present only when the wait-branch of the managed hook ran).
       ...(p.nodeterm_pending_id ? { pendingId: p.nodeterm_pending_id } : {})
@@ -281,10 +286,10 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
     // elicitation_response / agent_completed are informational — must not touch state,
     // so unknown future types default to no-op rather than a sticky badge.
     if (p.notification_type === 'permission_prompt') {
-      return { ...base, kind: 'state', state: 'blocked', lastMessage: p.last_assistant_message }
+      return { ...base, kind: 'state', state: 'blocked', blockedKind: 'permission', lastMessage: p.last_assistant_message }
     }
     if (p.notification_type === 'elicitation_dialog' || p.notification_type === 'agent_needs_input') {
-      return { ...base, kind: 'state', state: 'waiting', lastMessage: p.last_assistant_message }
+      return { ...base, kind: 'state', state: 'waiting', blockedKind: p.notification_type === 'elicitation_dialog' ? 'elicitation' : 'input', lastMessage: p.last_assistant_message }
     }
     // `idle_prompt` = the CLI is sitting at its prompt waiting for you to type. It cannot be true
     // while a turn runs, which makes it the ONE signal that rescues a node stuck on `working` when
@@ -374,6 +379,7 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
       kind: 'state',
       state: 'waiting',
       awaitingInput: true,
+      blockedKind: 'question',
       ...(question ? { lastMessage: question } : {})
     }
   }
@@ -385,8 +391,10 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
   if (ev === 'PreToolUse' || ev === 'PostToolUse') {
     return { ...base, kind: 'state', state: 'working' }
   }
-  if (ev === 'PermissionRequest') return { ...base, kind: 'state', state: 'waiting' }
-  if (ev === 'Stop') return { ...base, kind: 'state', state: 'done' }
+  if (ev === 'SessionEnd') return { ...base, kind: 'session', sessionPhase: 'end' }
+  if (ev === 'PermissionRequest') return { ...base, kind: 'state', state: 'waiting', blockedKind: 'permission' }
+  if (ev === 'StopFailure') return { ...base, kind: 'state', state: 'done' }
+  if (ev === 'Stop') return { ...base, kind: 'state', state: 'done', cleanTurnEnd: true }
   return null
 }
 
