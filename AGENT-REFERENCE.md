@@ -3077,3 +3077,12 @@ save generation. Use the merge's canonical persisted equality to detect retained
 request persistence only for those, and never clear already dirty generations. Canonical
 Project.kanban.meta merges by nodeId so separate-card priorities coexist. Assignees/labels and
 arbitrary nested meta arrays remain atomic; competing same-card priority choices still conflict.
+
+## Native lifecycle observation
+
+The mirror persists clean completion, genuine prompt and blocked-kind clocks
+separately from activity. `src/core/lifecycle.ts` derives native state; the Server
+reader adds bounded silent-pane prompt detection and exact-session transcript
+fallback after restart. `/opsapi/nodes` exposes it additively while retaining
+`agentStatus`. Lifecycle never supplies messaging proof or archive eligibility.
+See `docs/SERVER.md` for timestamps, TTL configuration and fallback limitations.

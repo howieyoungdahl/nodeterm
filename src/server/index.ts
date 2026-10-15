@@ -1,3 +1,5 @@
+import { ServerLifecycleReader } from './lifecycle'
+import { recordLifecycleTranscript } from '../core/agent-status-mirror'
 import { AssistantCreationReceipts } from './assistant-creation-receipts'
 import { createReviewedCleanupProbe } from '../core/session-cleanup-reviewed-probe'
 import { SessionCleanup } from '../core/session-cleanup'
@@ -492,7 +494,15 @@ export async function startServer(
   let canvasControl: ServerCanvasControl | null = null
   const assistantCreationReceipts = new AssistantCreationReceipts(path.join(config.dataDir, 'assistant-creation-receipts'))
   const activeLoopNodes = new Set<string>()
+  const lifecycleReader = new ServerLifecycleReader({
+    entry: mirrorEntry,
+    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+    capture: (nodeId) => ptyManager.captureSession(nodeId, false, true),
+    userDataDir: config.dataDir,
+    config: config.lifecycle
+  })
   const nodeOps = new ServerNodeOps({
+    lifecycleOf: (nodeId, input) => lifecycleReader.read(nodeId, input),
     workspaceStore,
     backendGeneration: () => ptyManager.cleanupBackendGeneration(),
     sessionPresence: (nodeId) => ptyManager.sessionPresence(nodeId),
@@ -517,7 +527,7 @@ export async function startServer(
     createSession: (options) => ptyManager.createHeadless(options),
     sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
     onRemoved: (nodeIds) => {
-      for (const nodeId of nodeIds) clearNode(nodeId)
+      for (const nodeId of nodeIds) { clearNode(nodeId); lifecycleReader.forget(nodeId) }
       canvasControl?.forgetNodes(nodeIds)
     },
     // Same reasoning as the headless factory's publishProject (see server/canvas-control.ts): a
@@ -594,8 +604,14 @@ export async function startServer(
       void cleanupActivity.observe(event)
       canvasControl?.onAgentEvent(event)
     },
-    onSessionHook: (agentId, nodeId, payload, verified, transcriptPath) =>
+    onSessionHook: (agentId, nodeId, payload, verified, transcriptPath) => {
       operatorBindings.observeHook(agentId, nodeId, payload, verified, transcriptPath)
+      // Raw delivery precedes normalized reduction. Bind only after its exact session is current.
+      if (verified && transcriptPath && typeof payload.session_id === 'string') {
+        const sid = payload.session_id
+        queueMicrotask(() => recordLifecycleTranscript(nodeId, sid, transcriptPath))
+      }
+    }
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
