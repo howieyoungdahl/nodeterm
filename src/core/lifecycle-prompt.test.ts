@@ -18,6 +18,7 @@ describe('lifecycle prompt signatures', () => {
     'The error says Hooks need review.\n1. First fix\n2. Another fix',
     '❯ Hooks need review\n  1. Trust these hooks',
     '\x1b[2mHooks need review\n1. Trust these hooks\x1b[0m',
+    '❯ \x1b[0;2mExplain this prompt:\nHooks need review\n1. Trust these hooks\x1b[22m',
     ''
   ])('does not match normal input or quoted prose: %s', capture => {
     expect(detectLifecyclePrompt('claude', capture)).toBeNull()
@@ -25,7 +26,7 @@ describe('lifecycle prompt signatures', () => {
   })
   it('does not match a captured Claude dim composer suggestion', () => {
     const capture = fs.readFileSync(path.join(__dirname, '__fixtures__/lifecycle/claude-dim-suggestion.ansi'), 'utf8')
-    expect(detectLifecyclePrompt('claude', capture)).toBeNull()
+    expect(detectLifecyclePrompt('claude', capture.replace(/\\u001b/g, '\x1b'))).toBeNull()
   })
   it('versions the signature contract', () => expect(LIFECYCLE_PROMPT_SIGNATURE_VERSION).toBe(1))
 })

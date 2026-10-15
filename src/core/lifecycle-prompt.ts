@@ -11,7 +11,7 @@ export const LIFECYCLE_PROMPT_SIGNATURES: readonly { provider: string; kind: Blo
 
 export function detectLifecyclePrompt(provider: string | null, capture: string): { kind: BlockedKind; detail: string } | null {
   // Dim completion suggestions are not typed input or active prompts. Drop them before stripping ANSI.
-  const text = capture.replace(/\x1b\[2m[\s\S]*?\x1b\[(?:0|22)m/g, '')
+  const text = capture.replace(/\x1b\[(?:\d+;)*2(?:;\d+)*m[\s\S]*?\x1b\[(?:0|22)(?:;\d+)*m/g, '')
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
   if (!/^\s*[❯›>●]?\s*1[.)]\s+\S/m.test(text)) return null
   for (const signature of LIFECYCLE_PROMPT_SIGNATURES) {
