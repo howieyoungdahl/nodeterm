@@ -482,7 +482,7 @@ export class ServerNodeOps {
           const paneState = await this.paneState(project, node)
           const mirror = this.deps.mirrorOf?.(node.id)
           const provider = mirror?.agentId ?? node.agentId ?? null
-          const sessionId = mirror?.sessionId ?? null
+          const sessionId = mirror?.sessionId ?? node.agentSessionId ?? null
           const lifecycleInput: LifecycleInput = {
             paneState, provider, sessionId, isAgent: !!provider, createdAt: createdAtFromNodeId(node.id, this.now())
           }

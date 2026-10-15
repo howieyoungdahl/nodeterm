@@ -497,6 +497,7 @@ export async function startServer(
   const lifecycleReader = new ServerLifecycleReader({
     entry: mirrorEntry,
     paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+    paneOwner: (nodeId) => ptyManager.paneOwner(nodeId),
     capture: (nodeId) => ptyManager.captureSession(nodeId, false, true),
     userDataDir: config.dataDir,
     config: config.lifecycle

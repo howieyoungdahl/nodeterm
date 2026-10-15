@@ -22,7 +22,7 @@ function write(file: string, provider: string) {
 }
 async function read(entry: MirrorEntry) {
   const reader = new ServerLifecycleReader({ entry: () => entry, now: () => at + 100, userDataDir: path.join(home, 'data'),
-    capture: async () => '', paneCommand: async () => 'node' })
+    capture: async () => '', paneCommand: async () => 'node', paneOwner: async () => null })
   return reader.read('n', { paneState: 'alive', isAgent: true, provider: entry.agentId, sessionId: entry.sessionId })
 }
 const restored = (agentId: 'claude' | 'codex', transcriptPath?: string): MirrorEntry => ({

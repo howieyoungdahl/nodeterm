@@ -26,9 +26,9 @@ describe('deriveLifecycle', () => {
     ['unknown', { isAgent: false }, now],
     ['unknown', { ...done, lastDoneClean: false }, now],
     ['unknown', { state: 'done' }, now],
-    ['unknown', { ...done, restored: true }, now],
+    ['idle-warm', { ...done, restored: true }, now],
     ['idle-warm', { ...done, restored: true, transcriptDone: { at: now - 100, clean: false } }, now],
-    ['idle-cold', { ...done, restored: true, transcriptDone: { at: now - 300_000, clean: true } }, now],
+    ['idle-warm', { ...done, restored: true, transcriptDone: { at: now - 300_000, clean: true } }, now],
   ] as const)('%s from %j', (expected, overrides, clock) => {
     expect(deriveLifecycle({ ...base, ...overrides }, clock).state).toBe(expected)
   })
@@ -44,6 +44,13 @@ describe('deriveLifecycle', () => {
   it('uses the clean completion clock for coldAt and the transition time for since', () => {
     expect(deriveLifecycle({ ...done, lastDoneAt: now - 400_000, updatedAt: now }, now))
       .toMatchObject({ state: 'idle-cold', lastDoneAt: now - 400_000, coldAt: now - 100_000, since: now - 100_000 })
+  })
+  it('uses the newer clean persisted end or transcript end after restore', () => {
+    expect(deriveLifecycle({ ...done, restored: true, transcriptDone: { at: now - 400_000, clean: false } }, now))
+      .toMatchObject({ state: 'idle-warm', lastDoneAt: done.lastDoneAt, lastDoneClean: true })
+    expect(deriveLifecycle({ ...done, restored: true, lastDoneAt: now - 400_000, transcriptDone: { at: now - 100, clean: false } }, now))
+      .toMatchObject({ state: 'idle-warm', lastDoneAt: now - 100, lastDoneClean: false })
+    expect(deriveLifecycle({ ...done, restored: true, lastDoneClean: false }, now).state).toBe('unknown')
   })
   it('validates optional env overrides and accepts explicit config', () => {
     const config = lifecycleConfigFromEnv({ NODETERM_LIFECYCLE_CODEX_TTL_MS: '1234', NODETERM_LIFECYCLE_CLAUDE_TTL_MS: '-1', NODETERM_LIFECYCLE_DEFAULT_TTL_MS: 'NaN' })

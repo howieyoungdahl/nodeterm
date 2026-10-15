@@ -3083,6 +3083,10 @@ arbitrary nested meta arrays remain atomic; competing same-card priority choices
 The mirror persists clean completion, genuine prompt and blocked-kind clocks
 separately from activity. `src/core/lifecycle.ts` derives native state; the Server
 reader adds bounded silent-pane prompt detection and exact-session transcript
-fallback after restart. `/opsapi/nodes` exposes it additively while retaining
+fallback after restart or absent hooks. Hookless providers require the kernel pane
+predicate; Codex session recovery requires an unambiguous signed binding, including
+its account home. Restored clocks use the newer clean persisted end or transcript
+end; tool-use assistant records never prove Claude turn completion.
+`/opsapi/nodes` exposes it additively while retaining
 `agentStatus`. Lifecycle never supplies messaging proof or archive eligibility.
 See `docs/SERVER.md` for timestamps, TTL configuration and fallback limitations.

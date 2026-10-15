@@ -2,7 +2,8 @@
 export function latestLifecycleTurn(text: string, provider: string, now: number): { at: number; clean: boolean } | null {
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
-    let row: { type?: string; timestamp?: unknown; payload?: { type?: string }; message?: { role?: string } }
+    let row: { type?: string; timestamp?: unknown; payload?: { type?: string };
+      message?: { role?: string; content?: unknown; stop_reason?: unknown } }
     try { row = JSON.parse(lines[i]) } catch { continue }
     if (provider === 'codex') {
       if (row.type !== 'event_msg') continue
@@ -12,6 +13,9 @@ export function latestLifecycleTurn(text: string, provider: string, now: number)
       // A newer submitted prompt is evidence that the previous assistant is no longer idle.
       if (row.type === 'user') return null
       if (row.type !== 'assistant') continue
+      // Do not walk past an unfinished tool turn and revive an older completed answer.
+      if (Array.isArray(row.message?.content) && row.message.content.some(block => block?.type === 'tool_use')) return null
+      if (row.message?.stop_reason != null && row.message.stop_reason !== 'end_turn') return null
     } else return null
     const at = typeof row.timestamp === 'number' ? row.timestamp : typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN
     if (!Number.isFinite(at) || at < 0 || at > now) return null

@@ -9,7 +9,9 @@ import { readSmallTail, resolveTranscriptPath } from '../core/transcript-reader'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
 import { linkedClaudeConfigDirs } from '../core/claude-config-dir'
 import { resolveCodexHomeRouting } from '../core/codex-home-routing'
+import { codexThreadForNode, SYSTEM_ACCOUNT_SCOPE } from '../core/codex-identity-proxy'
 import { isShellCommand } from '../shared/agents/pane'
+import { isAgentPane, type PaneOwner } from '../shared/agents/pane-owner-predicate'
 
 export const PROMPT_PROBE_INTERVAL_MS = 30_000
 export const SILENT_HOOK_MS = 60_000
@@ -17,6 +19,7 @@ interface Observation { provider?: string | null; at: number; eventAt?: number; 
 interface LifecycleReaderDeps {
   entry(nodeId: string): MirrorEntry | undefined
   paneCommand(nodeId: string): Promise<string | null>
+  paneOwner(nodeId: string): Promise<PaneOwner | null>
   capture(nodeId: string): Promise<string>
   userDataDir: string
   now?: () => number
@@ -29,6 +32,7 @@ export class ServerLifecycleReader {
   private observations = new Map<string, Observation>()
   private inflight = new Map<string, Promise<Lifecycle>>()
   private fallback = new Map<string, { entry: MirrorEntry; at: number; done: LifecycleInput['transcriptDone'] }>()
+  private hookless = new Map<string, { at: number; provider: string | null; savedSessionId?: string | null; entry?: MirrorEntry }>()
   private readonly now: () => number
   private readonly config: LifecycleConfig
   constructor(private readonly deps: LifecycleReaderDeps) {
@@ -38,6 +42,7 @@ export class ServerLifecycleReader {
   forget(nodeId: string): void {
     this.observations.delete(nodeId)
     this.fallback.delete(nodeId)
+    this.hookless.delete(nodeId)
   }
   read(nodeId: string, input: LifecycleInput): Promise<Lifecycle> {
     // Concurrent polls share a capture, so a slow tmux command cannot defeat the 30 s cap.
@@ -50,6 +55,32 @@ export class ServerLifecycleReader {
   private async observe(nodeId: string, input: LifecycleInput): Promise<Lifecycle> {
     const now = this.now()
     const entry = this.deps.entry(nodeId)
+    let evidence = entry
+    if (input.paneState === 'alive' && !entry) {
+      let owner: PaneOwner | null = null
+      try { owner = await this.deps.paneOwner(nodeId) } catch { /* unknown */ }
+      const providers = ['codex', 'claude'].filter(provider => isAgentPane(owner, provider) === 'agent')
+      const provider = providers.length === 1 ? providers[0] : null
+      const cached = this.hookless.get(nodeId)
+      const savedSessionId = input.sessionId
+      if (cached && cached.provider === provider && cached.savedSessionId === savedSessionId && now - cached.at < PROMPT_PROBE_INTERVAL_MS) evidence = cached.entry
+      else {
+        if (provider === 'codex') {
+          const binding = codexThreadForNode(nodeId, path.join(this.deps.userDataDir, 'codex-thread-nodes'))
+          if (binding) {
+            try {
+              const route = resolveCodexHomeRouting(undefined, binding.scope === SYSTEM_ACCOUNT_SCOPE ? undefined : binding.scope)
+              evidence = { agentId: provider, sessionId: binding.threadId, codexHome: route.home, codexAccountId: route.accountId, restored: true, updatedAt: 0 }
+            } catch { /* Unsupported account evidence stays unknown. */ }
+          }
+        } else if (provider === 'claude' && savedSessionId) {
+          evidence = { agentId: provider, sessionId: savedSessionId, restored: true, updatedAt: 0 }
+        }
+        this.hookless.set(nodeId, { at: now, provider, savedSessionId, entry: evidence })
+      }
+      // Kernel evidence supplies the provider. Only a signed binding supplies a Codex session.
+      input = { ...input, provider, isAgent: provider !== null || input.isAgent, sessionId: evidence?.sessionId ?? null, restored: evidence?.restored ?? false }
+    }
     let shell = false
     let detectedPrompt: BlockedOn | null = null
     let transcriptDone: LifecycleInput['transcriptDone'] = null
@@ -58,36 +89,37 @@ export class ServerLifecycleReader {
       const silent = !entry?.state || (entry.state === 'working' && now - (entry.lastEventAt ?? entry.updatedAt) > SILENT_HOOK_MS)
       if (!shell && silent) {
         const previous = this.observations.get(nodeId)
-        if (previous && (previous.eventAt !== entry?.lastEventAt || previous.sessionId !== entry?.sessionId || previous.provider !== input.provider)) previous.prompt = null
+        if (previous && (previous.eventAt !== entry?.lastEventAt || previous.sessionId !== evidence?.sessionId || previous.provider !== input.provider)) previous.prompt = null
         if (!previous || now - previous.at >= PROMPT_PROBE_INTERVAL_MS) {
-          const observation: Observation = { provider: input.provider, at: now, eventAt: entry?.lastEventAt, sessionId: entry?.sessionId, prompt: null }
+          const observation: Observation = { provider: input.provider, at: now, eventAt: entry?.lastEventAt, sessionId: evidence?.sessionId, prompt: null }
           this.observations.set(nodeId, observation)
           try {
             const hit = detectLifecyclePrompt(input.provider ?? null, await this.deps.capture(nodeId))
-            if (hit) observation.prompt = { ...hit, since: previous?.prompt?.kind === hit.kind && previous.sessionId === entry?.sessionId &&
+            if (hit) observation.prompt = { ...hit, since: previous?.prompt?.kind === hit.kind && previous.sessionId === evidence?.sessionId &&
               previous.eventAt === entry?.lastEventAt ? previous.prompt.since : now }
           } catch { /* Failed capture is unknown, never positive prompt evidence. */ }
         }
         const observed = this.observations.get(nodeId)
-        if (observed?.eventAt === entry?.lastEventAt && observed?.sessionId === entry?.sessionId) detectedPrompt = observed?.prompt ?? null
+        if (observed?.eventAt === entry?.lastEventAt && observed?.sessionId === evidence?.sessionId) detectedPrompt = observed?.prompt ?? null
       }
       if (!silent || shell) {
         const previous = this.observations.get(nodeId)
         if (previous) previous.prompt = null
       }
-      if (!shell && entry?.restored) {
+      if (!shell && evidence?.restored) {
         const cached = this.fallback.get(nodeId)
-        if (cached?.entry === entry && now - cached.at < PROMPT_PROBE_INTERVAL_MS) transcriptDone = cached.done
+        if (cached?.entry === evidence && now - cached.at < PROMPT_PROBE_INTERVAL_MS) transcriptDone = cached.done
         else {
-          try { transcriptDone = await (this.deps.transcriptDone?.(nodeId, entry) ?? this.readTranscript(entry, now)) } catch { /* unknown */ }
-          this.fallback.set(nodeId, { entry, at: now, done: transcriptDone })
+          try { transcriptDone = await (this.deps.transcriptDone?.(nodeId, evidence) ?? this.readTranscript(evidence, now)) } catch { /* unknown */ }
+          this.fallback.set(nodeId, { entry: evidence, at: now, done: transcriptDone })
         }
       }
     }
     // A hook arriving during a capture/read wins over the older observation.
     const fresh = this.deps.entry(nodeId)
-    if (fresh !== entry) return deriveLifecycle({ ...input, ...fresh, provider: fresh?.agentId ?? input.provider, sessionId: fresh?.sessionId ?? input.sessionId, detectedPrompt: null, shell }, this.now(), this.config)
-    return deriveLifecycle({ ...input, ...entry, shell, detectedPrompt, transcriptDone }, now, this.config)
+    if (fresh !== entry) return deriveLifecycle({ ...input, ...fresh, restored: fresh?.restored ?? false,
+      provider: fresh?.agentId ?? input.provider, sessionId: fresh?.sessionId ?? input.sessionId, detectedPrompt: null, shell }, this.now(), this.config)
+    return deriveLifecycle({ ...input, ...evidence, shell, detectedPrompt, transcriptDone }, now, this.config)
   }
   private async readTranscript(entry: MirrorEntry, now: number): Promise<LifecycleInput['transcriptDone']> {
     const sid = entry.sessionId

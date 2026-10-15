@@ -360,13 +360,24 @@ per 30 seconds, including concurrent requests. A cached detection can lag pane
 changes by up to 30 seconds; a fresh hook supersedes it immediately. Other prompts
 remain unknown until a hook or a future signature identifies them.
 
-After Server restart, restored mirror state is not live evidence. A bounded 1 MiB
-transcript tail can recover a timestamp for the exact saved session: Claude's latest
-assistant record (`lastDoneClean: false`), or Codex's `task_complete`
-(`lastDoneClean: true`). A newer user prompt/task start makes the fallback unknown.
-Missing, unreadable or unresolved transcripts yield `unknown`. Paths remain jailed
+After Server restart, restored mirror state is not live evidence. The newer of a
+persisted clean `lastDoneAt` and a bounded 1 MiB transcript tail supplies the completion
+clock. Claude fallback accepts an assistant without tool-use blocks and requires
+`end_turn` when a stop reason is present (`lastDoneClean: false`); Codex accepts
+`task_complete` (`lastDoneClean: true`). A newer user prompt/task start or incomplete
+Claude assistant prevents transcript completion evidence. Missing, unreadable or
+unresolved transcripts yield `unknown` unless a persisted clean end is available. Paths remain jailed
 to configured provider roots; the old mirror's six hour expiry still applies.
 Fallback never restores verified messaging authority or changes `agentStatus`.
+
+Cards with no mirror entry also use this fallback. Their provider comes from the
+pane's kernel foreground argv through the shared agent predicate, never its title.
+Codex session identity requires one unambiguous HMAC-verified thread binding for
+that node; its signed account scope selects the rollout home. Missing, invalid or
+ambiguous bindings remain `unknown`, without borrowing neighboring rollouts.
+Claude uses the card's saved `agentSessionId`. Silent-pane prompt detection also
+runs for these cards, even before a binding exists. Binding and transcript lookup
+are bounded and cached for at most 30 seconds. This is read-only observation.
 
 Defaults are Claude 45 minutes, Codex and other providers 5 minutes, starting grace
 3 minutes. Configure positive integer milliseconds with

@@ -56,7 +56,9 @@ export interface Lifecycle {
 export function deriveLifecycle(input: LifecycleInput, now: number,
   config: LifecycleConfig = DEFAULT_LIFECYCLE_CONFIG): Lifecycle {
   const ttlMs = input.provider === 'claude' ? config.ttlMs.claude : input.provider === 'codex' ? config.ttlMs.codex : config.ttlMs.default
-  const done = input.restored ? input.transcriptDone : null
+  const persistedDone = input.lastDoneAt !== undefined && input.lastDoneClean ? { at: input.lastDoneAt, clean: true } : null
+  const transcriptDone = input.restored ? input.transcriptDone : null
+  const done = input.restored ? (persistedDone && (!transcriptDone || persistedDone.at >= transcriptDone.at) ? persistedDone : transcriptDone) : null
   const lastDoneAt = done?.at ?? input.lastDoneAt ?? null
   const coldAt = lastDoneAt === null ? null : lastDoneAt + ttlMs
   const result: Lifecycle = {

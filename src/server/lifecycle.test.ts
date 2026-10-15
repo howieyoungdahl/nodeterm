@@ -9,8 +9,9 @@ function harness(initial?: MirrorEntry) {
   let now = 1_000_000
   const capture = vi.fn(async () => prompts['codex-hooks-review'])
   const paneCommand = vi.fn(async (): Promise<string | null> => 'node')
+  const paneOwner = vi.fn(async () => ({ panePid: 10, tty: '/dev/pts/1', command: 'node', argv: ['/usr/bin/codex --remote unix:///fixture.sock'] }))
   const transcriptDone = vi.fn(async (): Promise<{ at: number; clean: boolean } | null> => null)
-  const reader = new ServerLifecycleReader({ entry: () => entry, now: () => now, userDataDir: '/unused', capture, paneCommand, transcriptDone })
+  const reader = new ServerLifecycleReader({ entry: () => entry, now: () => now, userDataDir: '/unused', capture, paneCommand, paneOwner, transcriptDone })
   return { reader, capture, paneCommand, transcriptDone, tick: (ms: number) => { now += ms }, set: (value?: MirrorEntry) => { entry = value } }
 }
 describe('ServerLifecycleReader', () => {
@@ -36,9 +37,9 @@ describe('ServerLifecycleReader', () => {
     }
     expect(h.capture).toHaveBeenCalledTimes(1)
   })
-  it('skips dead, remote/unknown and non-agent panes', async () => {
+  it('skips dead and remote/unknown panes', async () => {
     const h = harness()
-    for (const input of [{ ...alive, paneState: 'dead' as const }, { ...alive, paneState: 'unknown' as const }, { ...alive, isAgent: false }]) await h.reader.read('n', input)
+    for (const input of [{ ...alive, paneState: 'dead' as const }, { ...alive, paneState: 'unknown' as const }]) await h.reader.read('n', input)
     expect(h.capture).not.toHaveBeenCalled()
     expect(h.paneCommand).not.toHaveBeenCalled()
   })
@@ -62,6 +63,15 @@ describe('ServerLifecycleReader', () => {
     })
     expect((await h.reader.read('n', alive)).state).toBe('idle-warm')
   })
+  it('a first hook during an absent-mirror probe supersedes fallback mode', async () => {
+    const h = harness()
+    h.capture.mockImplementation(async () => {
+      h.set({ agentId: 'codex', sessionId: 'new-session', state: 'working', updatedAt: 1_000_000 })
+      return prompts['codex-hooks-review']
+    })
+    expect(await h.reader.read('n', { ...alive, provider: null, isAgent: false }))
+      .toMatchObject({ state: 'working', provider: 'codex', sessionId: 'new-session' })
+  })
   it('active hooks do not reset the per-node capture rate limit', async () => {
     const h = harness()
     await h.reader.read('n', alive)
@@ -77,12 +87,19 @@ describe('ServerLifecycleReader', () => {
     expect(h.capture).toHaveBeenCalledTimes(1)
   })
   it('restored state uses transcript timestamp or stays unknown, without changing mirror authority', async () => {
-    const entry: MirrorEntry = { state: 'done', updatedAt: 0, restored: true, lastDoneAt: 123, lastDoneClean: true }
+    const entry: MirrorEntry = { state: 'done', updatedAt: 0, restored: true }
     const h = harness(entry)
     expect((await h.reader.read('n', alive)).state).toBe('unknown')
     h.tick(PROMPT_PROBE_INTERVAL_MS)
     h.transcriptDone.mockResolvedValue({ at: 1_000_000, clean: false })
     expect(await h.reader.read('n', alive)).toMatchObject({ state: 'idle-warm', lastDoneAt: 1_000_000, lastDoneClean: false })
-    expect(entry).toMatchObject({ restored: true, lastDoneAt: 123 })
+    expect(entry).toEqual({ state: 'done', updatedAt: 0, restored: true })
+  })
+  it('retains a newer persisted clean completion when a restored transcript is missing or older', async () => {
+    const h = harness({ state: 'done', updatedAt: 0, restored: true, lastDoneAt: 999_900, lastDoneClean: true })
+    expect(await h.reader.read('n', alive)).toMatchObject({ state: 'idle-warm', lastDoneAt: 999_900, lastDoneClean: true })
+    h.tick(PROMPT_PROBE_INTERVAL_MS)
+    h.transcriptDone.mockResolvedValue({ at: 100, clean: false })
+    expect(await h.reader.read('n', alive)).toMatchObject({ state: 'idle-warm', lastDoneAt: 999_900, lastDoneClean: true })
   })
 })

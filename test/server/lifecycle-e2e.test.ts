@@ -6,25 +6,29 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { startServer } from '../../src/server/index'
 import { hookServer } from '../../src/core/agents/hook-server'
 import { _resetForTest } from '../../src/core/agent-status-mirror'
+import { writeCodexThreadIdentity } from '../../src/core/codex-identity-proxy'
+import { buildManagedScript } from '../../src/core/agents/hooks/managed-script'
 import { TMUX_SOCKET, sessionName } from '../../src/core/tmux-naming'
 import { privateTmuxSocketReason } from '../../src/core/tmux-test-socket'
 import type { Workspace } from '../../src/shared/types'
 
 const hasTmux = (() => { try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); return true } catch { return false } })()
 const refusal = privateTmuxSocketReason()
-const ids = ['nt-life-claude', 'nt-life-codex', 'nt-life-restored', 'nt-life-prompt', 'nt-life-shell']
+const ids = ['nt-life-claude', 'nt-life-codex', 'nt-life-restored', 'nt-life-prompt', 'nt-life-shell', 'nt-life-hookless', 'nt-life-unbound']
 
 describe.skipIf(!hasTmux || !!refusal)('native lifecycle through disposable Server HTTP', () => {
   let dir: string
   let base: string
   let auth: { authorization: string }
   let close: (() => Promise<void>) | undefined
+  let home: string
+  let dataDir: string
   const restoredSid = '00000000-1111-2222-3333-444444444444'
   const restoredAt = Date.now() - 310_000
   beforeAll(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-lifecycle-e2e-'))
-    const home = path.join(dir, 'home')
-    const dataDir = path.join(dir, 'data')
+    home = path.join(dir, 'home')
+    dataDir = path.join(dir, 'data')
     fs.mkdirSync(home, { recursive: true })
     fs.mkdirSync(dataDir)
     vi.stubEnv('HOME', home)
@@ -40,19 +44,23 @@ describe.skipIf(!hasTmux || !!refusal)('native lifecycle through disposable Serv
     const workspace: Workspace = { version: 2, activeProjectId: 'life', projects: [{
       id: 'life', name: 'Lifecycle fixture', color: '#fff', viewport: { x: 0, y: 0, zoom: 1 }, bridges: [], ropes: [],
       nodes: [...ids, 'nt-life-dead'].map(id => ({ id, kind: 'terminal', title: id, color: '#fff', group: null,
-        position: { x: 0, y: 0 }, agentId: id.includes('claude') ? 'claude' : 'codex' }))
+        position: { x: 0, y: 0 }, ...(['nt-life-hookless', 'nt-life-prompt', 'nt-life-unbound'].includes(id) ? {} : { agentId: id.includes('claude') ? 'claude' : 'codex' }) }))
     }] }
     fs.writeFileSync(path.join(dataDir, 'workspace.json'), JSON.stringify(workspace))
+    // The kernel predicate sees a CLI-shaped argv without launching a provider or shared daemon.
+    const fakeCodex = path.join(dir, 'codex')
+    fs.writeFileSync(fakeCodex, "if (process.argv[2] === 'prompt') console.log('Hooks need review\\n\\n1. Trust these hooks\\n2. Continue without hooks'); setInterval(() => {}, 1000)")
     for (const id of ids) {
       // Only private-socket fixture panes. No agent CLI, provider request or real session is used.
       const command = id === 'nt-life-shell' ? 'bash --noprofile --norc' :
-        id === 'nt-life-prompt' ? "printf 'Hooks need review\\n\\n1. Trust these hooks\\n2. Continue without hooks\\n'; sleep 120" : 'sleep 120'
+        ['nt-life-hookless', 'nt-life-prompt', 'nt-life-unbound'].includes(id) ? `${process.execPath} ${fakeCodex}${id === 'nt-life-prompt' ? ' prompt' : ''}` : 'sleep 120'
       execFileSync('tmux', ['-L', TMUX_SOCKET, 'new-session', '-d', '-s', sessionName(id), '-x', '120', '-y', '36', command])
     }
     _resetForTest()
     const server = await startServer({ port: 0, host: '127.0.0.1', dataDir, rendererDir: path.join(dir, 'no-renderer'),
       insecureHttp: false, passwordSeed: 'lifecycle-fixture', installHooks: false, deadCardReapMinutes: 0 })
     close = server.close
+    writeCodexThreadIdentity(restoredSid, 'nt-life-hookless', path.join(dataDir, 'hook-endpoint.env'), path.join(dataDir, 'codex-thread-nodes'))
     base = `http://127.0.0.1:${server.port}`
     auth = { authorization: `Bearer ${fs.readFileSync(path.join(dataDir, 'ops-token'), 'utf8').trim()}` }
   }, 30_000)
@@ -99,6 +107,21 @@ describe.skipIf(!hasTmux || !!refusal)('native lifecycle through disposable Serv
       lifecycle: { state: 'blocked', blockedOn: { kind: 'codex-hooks-review' } } })
     expect(rows.find(n => n.id === 'nt-life-shell')!.lifecycle.state).toBe('exited')
     expect(rows.find(n => n.id === 'nt-life-dead')!.lifecycle.state).toBe('dead')
+    expect(rows.find(n => n.id === 'nt-life-hookless')).toMatchObject({ provider: 'codex', sessionId: restoredSid, agentStatus: null,
+      lifecycle: { state: 'idle-cold', lastDoneAt: restoredAt } })
+    expect(rows.find(n => n.id === 'nt-life-unbound')).toMatchObject({ provider: 'codex', sessionId: null, agentStatus: null,
+      lifecycle: { state: 'unknown', lastDoneAt: null } })
+  })
+  it('a daemon-shaped environment recovers hook identity from stdin through the actual endpoint', async () => {
+    // Mint only this disposable node's capability. No ambient live endpoint or node identity enters sh.
+    hookServer.buildPtyEnv('nt-life-hookless', 'codex')
+    const script = path.join(dir, 'managed-codex.sh')
+    fs.writeFileSync(script, buildManagedScript('codex', path.join(dataDir, 'codex-thread-nodes')))
+    execFileSync('/bin/sh', [script], { timeout: 10_000,
+      env: { HOME: home, PATH: process.env.PATH, CODEX_HOME: path.join(home, '.codex') },
+      input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: restoredSid }) })
+    await expect.poll(async () => (await inventory()).find(n => n.id === 'nt-life-hookless')?.agentStatus, { timeout: 5000 }).toBe('working')
+    expect((await inventory()).find(n => n.id === 'nt-life-hookless')).toMatchObject({ provider: 'codex', sessionId: restoredSid, lifecycle: { state: 'working' } })
   })
   it('does not call a failed turn clean, and observes SessionEnd separately', async () => {
     await post('claude', 'nt-life-claude', 'UserPromptSubmit')

@@ -12,6 +12,13 @@ describe('lifecycle prompt signatures', () => {
   it('accepts Claude alternate folder trust heading', () => {
     expect(detectLifecyclePrompt('claude', 'Trust this folder?\n❯ 1. Yes\n  2. No')?.kind).toBe('claude-folder-trust')
   })
+  it.each(['38;2;120;180;240', '38;5;2', '48;2;2;10;20', '58;5;2'])('preserves extended color %s as visible text', sgr => {
+    expect(detectLifecyclePrompt('codex', `\x1b[${sgr}mHooks need review\x1b[0m\n1. Trust these hooks`)?.kind).toBe('codex-hooks-review')
+  })
+  it.each(['0', '22', ''])('ends real dim text at SGR %s', reset => {
+    expect(detectLifecyclePrompt('codex', `\x1b[2mSuggestion\x1b[${reset}mHooks need review\n1. Trust these hooks`)?.kind).toBe('codex-hooks-review')
+    expect(detectLifecyclePrompt('codex', `\x1b[38;2;100;200;50;2mHooks need review\n1. Trust these hooks\x1b[${reset}m`)).toBeNull()
+  })
   it.each([
     'Done.\n❯ Write tests for @filename',
     'Which implementation?\n❯ 1. Use defaults\n  2. Customize',
