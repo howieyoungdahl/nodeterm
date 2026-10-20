@@ -51,6 +51,7 @@ import {
 import { assembleLaunchCommand } from '../shared/agents/launch'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 import { oneLine } from '../shared/one-line'
+import { CODEX_SANDBOX_MODES, isCodexSandboxMode } from '../core/codex-session-name'
 import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
 import type {
   BridgeLink,
@@ -2125,6 +2126,8 @@ export class HeadlessNodeFactory {
               'model',
               'remote-control',
               'size',
+              'title',
+              'sandbox',
               ...creationFlags
             ])
       )
@@ -2192,6 +2195,20 @@ export class HeadlessNodeFactory {
           error: 'remote-control-agent-refused: --remote-control requires --agent claude'
         }
       }
+      const sandbox = args.sandbox
+      if (sandbox !== undefined && agentId !== 'codex') {
+        return { ok: false, error: 'sandbox-agent-refused: --sandbox requires --agent codex' }
+      }
+      if (sandbox !== undefined && !isCodexSandboxMode(sandbox)) {
+        return {
+          ok: false,
+          error: `sandbox-mode-refused: --sandbox must be one of ${CODEX_SANDBOX_MODES.join('|')}`
+        }
+      }
+      const explicitTitle = args.title === undefined ? undefined : oneLine(args.title)
+      if (explicitTitle !== undefined && !explicitTitle) {
+        return { ok: false, error: 'open-agent: --title must not be empty' }
+      }
       if (remoteControl !== undefined && caps?.remoteControlFlag !== true) {
         return {
           ok: false,
@@ -2253,7 +2270,9 @@ export class HeadlessNodeFactory {
         let permissionMode
         if (verb === 'open-agent') {
           const config = AGENT_CONFIG[agentId as BuiltinAgentId]
-          title = workerNodeTitle(ownerTitle, config.label, priorOpenedCount + i + 1)
+          title = explicitTitle
+            ? (count > 1 ? `${explicitTitle} ${i + 1}` : explicitTitle)
+            : workerNodeTitle(ownerTitle, config.label, priorOpenedCount + i + 1)
           color = config.color
           const resolvedMode = resolvePermissionMode(target, settings)
           permissionMode = agentId === 'claude'
@@ -2274,7 +2293,8 @@ export class HeadlessNodeFactory {
               launchCmdOverride: settings.agentLaunchCommands?.[agentId as BuiltinAgentId],
               sharedIdentity: codexSharedIdentity,
               model: args.model,
-              remoteControl
+              remoteControl,
+              sandbox
             },
             this.deps.env ?? process.env
           ).command
@@ -2298,7 +2318,8 @@ export class HeadlessNodeFactory {
           size: { ...nodeSize },
           ...(nodeSizeName ? { controlSize: nodeSizeName } : {}),
           title,
-          ...(verb === 'open-agent' ? { titleAuto: true } : {}),
+          // An explicit --title is the caller naming the card; the session must not rename it.
+          ...(verb === 'open-agent' ? { titleAuto: explicitTitle === undefined } : {}),
           // Every node the control plane opens is a delegated WORKER: the only kind automatic
           // placement is allowed to arrange. Manual UI opens carry no role and read as `primary`.
           role: 'worker' as const,
