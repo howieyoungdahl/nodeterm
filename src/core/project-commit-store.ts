@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { renameAtomic } from './fs-atomic'
+import { workspaceWriterOwner } from './workspace-writer-identity'
 import { publicationFence, assertPublicationAdmission, withPublicationAdmissionFence } from './workspace-publication-platform'
 import { reconcileProjectDocuments, type ProjectDocument, type ProjectMerge } from '../shared/project-reconciliation'
 
@@ -36,7 +37,7 @@ export interface FileCommitResult {
   merge?: ProjectMerge
   message?: string
 }
-export type PublicationPhase = 'creation-prepared' | 'journaled' | 'before-displace' | 'displaced' | 'before-publish' | 'published' | 'receipted'
+export type PublicationPhase = 'locked' | 'creation-prepared' | 'journaled' | 'before-displace' | 'displaced' | 'before-publish' | 'published' | 'receipted'
 export const revisionOf = (raw: string): string => createHash('sha256').update(raw).digest('hex')
 const errorCode = (error: unknown): string => (error as NodeJS.ErrnoException)?.code ?? ''
 export class PublicationReadError extends Error {
@@ -357,7 +358,7 @@ export class ProjectCommitStore {
     let published = false
     try {
       await this.durable(path.join(op, 'request.json'), requestRaw)
-      await this.durable(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, operation: path.basename(op) }))
+      await this.durable(path.join(lock, 'owner.json'), JSON.stringify(await workspaceWriterOwner(path.basename(op))))
       // Persist the lock's name before any publication phase. Syncing owner.json and the
       // lock directory alone does not make the writer.lock entry durable in its parent.
       await this.syncDirectory(this.recovery)
@@ -457,8 +458,9 @@ export class ProjectCommitStore {
     try {
       // Preserve the submitted bytes even when its base is unknown or its revision has expired.
       await this.durable(path.join(op, 'request.json'), requestRaw)
-      await this.durable(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, operation: path.basename(op) }))
+      await this.durable(path.join(lock, 'owner.json'), JSON.stringify(await workspaceWriterOwner(path.basename(op))))
       await this.syncDirectory(this.recovery)
+      await this.phase?.('locked')
       const baseRaw = await this.known(request.expectedRevision)
       if (!baseRaw) return await this.finish(op, result('stale-base', { message: 'The exact acknowledged base is not retained.' }))
       const current = await this.observeUnlocked()

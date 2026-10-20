@@ -509,6 +509,13 @@ fence and visibility-only save path; retained metadata, pending requests or cras
 evidence forbid downgrade. Native Windows archive enrollment explicitly refuses
 until directory durability has a real adapter. Do not replace that refusal with
 an atomic-overwrite fallback.
+Linux Server startup can recover interrupted workspace publications only with exact
+same-host boot/process-birth evidence that the writer exited. It preserves known
+current bytes or exclusively restores retained displaced bytes, then archives the
+lock with its original operation. It never replays the proposal or invents a commit
+receipt. Reads and autosave retries still refuse locks; legacy owners, foreign hosts,
+unreadable evidence, uncompleted first creation and unknown winners need operator
+recovery. Keep startup recovery before hooks, watchers and workspace requests.
 Native Windows creation/organization uses an explicit private flushed-file receipt
 acknowledgment before save/spawn; it does not claim directory or power-loss durability.
 Linux receipts also sync directories. The read-only creation contract reports the

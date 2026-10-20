@@ -179,6 +179,18 @@ adding terminal-session features, extend the interface — do not reach around i
 
 ## State & persistence model
 
+Linux Server startup recovers interrupted workspace index/project publications before
+starting hooks or watchers. New writer owners retain a hashed machine/hostname identity,
+boot ID, PID namespace, UID and process start ticks. Recovery requires that exact same-host
+writer to be gone (a different boot, missing same-namespace process, or different process
+birth), never an age/PID guess. It keeps a known destination or restores retained displaced
+bytes through an exclusive link, and archives the lock into its original operation.
+The deterministic nonempty archive fences competing recoverers from moving a later lock.
+Requests, candidates, displaced files and receipts remain; recovery does not replay a
+request or acknowledge its commit. Invalid/legacy/foreign evidence and unfinished first
+creation still refuse. Ordinary readers never clear a lock. This startup path is Linux
+Server-only; Desktop and native Windows retain explicit operator recovery.
+
 Automatic worker layout triggers are retired. Only an explicit `organize` request can reach
 the layout service; the renderer previews it and applies after confirmation. Existing
 `canvasLayout.enabled` settings enable that manual command, never background sorting.

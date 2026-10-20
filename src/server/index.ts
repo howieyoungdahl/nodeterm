@@ -26,6 +26,7 @@ import type { ServerConfig } from './config'
 import { initPlatform } from '../core/platform'
 import { SettingsStore } from '../core/settings-store'
 import { WorkspaceStore } from '../core/workspace-store'
+import { recoverWorkspacePublications } from '../core/workspace-publication-recovery'
 import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
@@ -226,6 +227,13 @@ export async function startServer(
 
   // Core services — same construction + registration order as src/main/index.ts.
   const settingsStore = new SettingsStore()
+  // Run before hooks, watchers or requests can start workspace writers. This is a
+  // startup operation, never an implicit side effect of a read or an autosave retry.
+  try {
+    for (const result of await recoverWorkspacePublications(config.dataDir)) {
+      if (result.status !== 'none') console.warn('[workspace] startup publication recovery', result)
+    }
+  } catch (error) { console.warn('[workspace] startup publication recovery unavailable', error) }
   const cleanupActivity = new CleanupActivity((id, claim) =>
     createCleanupStartupWitness(() => ptyManager.getTmuxBin(), cleanupActivity.bootId)(id, claim))
   const ptyManager = new PtyManager({ cleanupBootId: cleanupActivity.bootId })
