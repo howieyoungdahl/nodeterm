@@ -54,12 +54,24 @@ describe('Server Edition external workspace watcher', () => {
     watcher = createServerWorkspaceWatcher(store, { debounceMs: 10, exclusive })
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
-    store.publicationPhase = async (phase, file) => { if (phase === 'published' && file.endsWith('project.json')) await gate }
+    let published!: () => void
+    const atPublication = new Promise<void>(resolve => { published = resolve })
+    store.publicationPhase = async (phase, file) => {
+      if (phase === 'published' && file.endsWith('project.json')) { published(); await gate }
+    }
     const changed = await store.load()
     changed.projects[0].nodes[0].title = 'normal server title update'
     const save = queue.run(() => store.save(changed))
     try {
-      await vi.waitFor(() => expect(entered).toHaveBeenCalled())
+      await atPublication
+      // A file-bound inotify watcher can see displacement while the name is absent.
+      // Touch the published inode until rebind finishes, so this test actually gets
+      // a delayed self-write notification instead of depending on event timing.
+      await vi.waitFor(async () => {
+        const now = new Date()
+        await fs.utimes(path.join(projectDir, '.nodeterm', 'project.json'), now, now)
+        expect(entered).toHaveBeenCalled()
+      })
       release()
       await save
       await queue.run(async () => {})

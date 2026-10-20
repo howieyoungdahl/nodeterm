@@ -286,6 +286,16 @@ ops_curl -X POST http://127.0.0.1:8443/opsapi/adopt-orphans
 ops_curl http://127.0.0.1:8443/opsapi/health
 ```
 
+On Linux, startup inspects interrupted retained workspace publications before enabling
+workspace writers. Exact host/boot/process-birth evidence must prove the old writer has
+exited. Recovery preserves the current known publication or restores retained previous
+bytes only into an absent destination. Its lock and recovery record stay under the
+original `.recovery/<filename>/operations/<operation>/` directory. Interrupted proposals
+are not replayed and no commit acknowledgment is fabricated. Legacy locks, foreign
+hosts/namespaces, incomplete identity, unknown external bytes and unpublished first
+creations stay unavailable for explicit operator review. Other platforms keep their
+existing conservative recovery behavior. No terminal backend is opened by this repair.
+
 The v1 contract is deliberately narrow:
 
 - `GET /opsapi/nodes` returns `{nodes:[...]}` for every persisted card across every loaded project.
