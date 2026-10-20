@@ -4,6 +4,7 @@ name: CI
 # fork's integration branches: the browser server on the canvas host is updated from
 # integration/server-fixes-*, so a PR into it needs a check before auto-merge can trust it.
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main, 'integration/**', 'feat/oct4-operational-release']
   push:
