@@ -111,13 +111,17 @@ describe.skipIf(process.platform !== 'linux')('explicit Linux startup recovery',
     expect(await recoverInterruptedPublication(file)).toMatchObject({ status: 'recovered' })
   })
 
-  it.each(['external-winner', 'corrupt-current', 'corrupt-candidate', 'unknown-displaced', 'redirected-operation'] as const)
+  it.each(['external-winner', 'corrupt-current', 'corrupt-candidate', 'unknown-displaced', 'unretained-restoration', 'redirected-operation'] as const)
   ('refuses %s and preserves uncertain evidence', async kind => {
     await interrupt('displaced')
     if (kind === 'external-winner') await fs.writeFile(file, '{"external":"winner"}')
     if (kind === 'corrupt-current') await fs.writeFile(file, '{')
     if (kind === 'corrupt-candidate') await fs.writeFile(path.join(op(), 'candidate.json'), '{')
     if (kind === 'unknown-displaced') await fs.writeFile(path.join(op(), 'displaced.json'), '{"external":"unknown"}')
+    if (kind === 'unretained-restoration') {
+      await fs.writeFile(path.join(op(), 'displaced.json'), '{"external":"unknown"}')
+      await fs.writeFile(file, '{"external":"unknown"}')
+    }
     if (kind === 'redirected-operation') {
       const target = op() + '-redirected'; await fs.rename(op(), target); await fs.symlink(target, op())
     }

@@ -93,7 +93,7 @@ export async function recoverInterruptedPublication(file: string): Promise<Publi
     }
     if (current === undefined) return refused('the destination is unavailable')
     document(current)
-    if (current !== candidate && current !== displaced && !(displaced === undefined && await known(current)))
+    if (current !== candidate && !((displaced === undefined || current === displaced) && await known(current)))
       return refused('the destination differs from retained publication evidence')
     // Never mint a successful commit receipt for an interrupted request. Its original
     // outcome stays unknown, and a fresh save must enroll the recovered file normally.
