@@ -2117,6 +2117,57 @@ describe('HeadlessNodeFactory', () => {
     })
   })
 
+  it('starts a Codex thread under an explicit --sandbox, lifted by the managed launcher', async () => {
+    codexSharedIdentity = true
+
+    const reply = await factory.openAgent(
+      'term-source',
+      { agent: 'codex', prompt: 'commit and push', sandbox: 'danger-full-access' },
+      true
+    )
+
+    expect(reply.ok).toBe(true)
+    const id = (reply.result as { id: string }).id
+    expect(pty.sends.at(-1)).toEqual({
+      nodeId: id,
+      text: "nodeterm-codex 'commit and push' --ask-for-approval untrusted --sandbox 'danger-full-access'"
+    })
+  })
+
+  it('refuses --sandbox for a non-Codex agent or an unknown mode before creating anything', async () => {
+    const before = await store.load({ sideline: false })
+    await expect(
+      factory.openAgent('term-source', { agent: 'claude', sandbox: 'danger-full-access' }, true)
+    ).resolves.toEqual({ ok: false, error: 'sandbox-agent-refused: --sandbox requires --agent codex' })
+    await expect(
+      factory.openAgent('term-source', { agent: 'codex', sandbox: 'yolo' }, true)
+    ).resolves.toEqual({
+      ok: false,
+      error: 'sandbox-mode-refused: --sandbox must be one of read-only|workspace-write|danger-full-access'
+    })
+    expect(pty.creates).toEqual([])
+    expect(await store.load({ sideline: false })).toEqual(before)
+  })
+
+  it('names agent cards from --title and keeps the session from renaming them', async () => {
+    const one = await factory.openAgent('term-source', { agent: 'codex', title: '  W-0300 K2c\nfixes ' }, true)
+    const two = await factory.openAgent('term-source', { agent: 'claude', title: 'Review', count: '2' }, true)
+    expect(one.ok && two.ok).toBe(true)
+    const workspace = await store.load({ sideline: false })
+    const titled = workspace.projects[0].nodes
+      .filter((node) => ['W-0300 K2c fixes', 'Review 1', 'Review 2'].includes(node.title ?? ''))
+      .map((node) => [node.title, node.titleAuto])
+    expect(titled).toEqual([
+      ['W-0300 K2c fixes', false],
+      ['Review 1', false],
+      ['Review 2', false]
+    ])
+    await expect(factory.openAgent('term-source', { agent: 'codex', title: '   ' }, true)).resolves.toEqual({
+      ok: false,
+      error: 'open-agent: --title must not be empty'
+    })
+  })
+
   it('persists --after without launching, then flushes exactly once on the idle state', async () => {
     states['term-upstream'] = 'working'
     const reply = await factory.openAgent(
