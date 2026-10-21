@@ -33,7 +33,7 @@ import type { PtyManager } from '../core/pty-manager'
 import type { WorkspaceStore } from '../core/workspace-store'
 import type { NormalizedAgentEvent } from '../shared/agents/normalize'
 import { IPC } from '../shared/ipc'
-import type { Project, Settings } from '../shared/types'
+import type { Project, Settings, Workspace } from '../shared/types'
 import type { AgentMessageOutcome } from '../core/agents/agent-message-decide'
 import {
   createServerEditionControlHandler,
@@ -170,6 +170,7 @@ export async function initServerCanvasControl(
       deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
+    sessionTitleOf: (nodeId) => mirrorEntry(nodeId)?.name,
     paneProjectOf: paneOwnerProject,
     creationReceipts: deps.creationReceipts,
     ownership: deps.ownership,
@@ -184,6 +185,9 @@ export async function initServerCanvasControl(
     // merges them (renderer/lib/serverChange.ts) and is never asked to choose.
     publishProject: (project: Project) => platform().broadcast(IPC.workspaceServerChange, project)
   })
+
+  const observeClientWorkspace = (workspace: Workspace, source: { senderId: number; accepted: boolean }) => factory.observeClientWorkspace(workspace, source)
+  deps.workspaceStore.onClientSaveSnapshot = observeClientWorkspace
 
   const messaging: AgentMessagingDeps = {
     paneOwner: (nodeId) => deps.ptyManager.paneOwner(nodeId),
@@ -283,6 +287,7 @@ export async function initServerCanvasControl(
     forgetNodes: (nodeIds) => factory.forgetNodes(nodeIds),
     installSkillInto,
     stop: () => {
+      if (deps.workspaceStore.onClientSaveSnapshot === observeClientWorkspace) deps.workspaceStore.onClientSaveSnapshot = undefined
       factory.stop()
       queue.resetForTests()
     }
