@@ -8,6 +8,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import path from 'node:path'
 
 import { publishCanvasMutation } from '../core/canvas-sync'
+import { isCanvasMutation } from '../shared/canvas-mutations'
 import { gateProjectTarget, GRANT_CAP } from '../core/project-grants'
 import {
   alignPositions,
@@ -113,6 +114,7 @@ export interface HeadlessNodeFactoryDeps {
   /** Hook-mirror lookups. A stored agentId wins; these cover a plain terminal running an agent. */
   stateOf(nodeId: string): AgentState | undefined
   agentIdOf?(nodeId: string): string | undefined
+  sessionTitleOf?(nodeId: string): string | undefined
   /** Current-run pane provenance recorded at the pane's genuine spawn. Never file-derived. */
   paneProjectOf?(nodeId: string): string | undefined
   env?: Record<string, string | undefined>
@@ -763,6 +765,8 @@ export class HeadlessNodeFactory {
   private handLaunchedNodes = new Set<string>()
   /** Current-run terminal snapshots used only to reconstruct a live pane lost by a stale save. */
   private runtimeNodes = new Map<string, { projectId: string; node: CanvasNodeState }>()
+  /** Bounded browser presentation cache. Never supplies creator or pane/project authority. */
+  private clientNodes = new Map<string, { projectId: string; senderId: number; node: CanvasNodeState; absolutePosition: { x: number; y: number } }>()
   /** Keep the missing-card recovery warning to one line once per source. */
   private warnedRecoveredSources = new Set<string>()
   /** Nodes already noted as "open in an attached client, not yet saved" — its own set, so a later
@@ -861,6 +865,50 @@ export class HeadlessNodeFactory {
     this.runtimeNodes.set(node.id, { projectId, node: structuredClone(node) })
   }
 
+  /** A refused whole-workspace save still tells us how the user placed/named a fresh card.
+   * Remember only presentation for a pane whose current-run project is already proven. */
+  observeClientWorkspace(workspace: Workspace, source = { senderId: 0, accepted: false }): void {
+    if (this.stopped || !workspace || !/^[a-f0-9]{64}$/.test(workspace.revision ?? '') || !Array.isArray(workspace.projects)) return
+    for (const project of workspace.projects) {
+      if (!project || project.ssh || !Array.isArray(project.nodes)) continue
+      const byId = new Map(project.nodes.filter(n => n && isCanvasMutation({ op: 'upsert', node: n })).map(n => [n.id, n]))
+      for (const node of byId.values()) {
+        if (node.kind !== 'terminal' || this.deps.paneProjectOf?.(node.id) !== project.id ||
+          typeof node.title !== 'string' || typeof node.color !== 'string' ||
+          !node.size || !Number.isFinite(node.size.width) || !Number.isFinite(node.size.height)) continue
+        const prior = this.clientNodes.get(node.id)
+        // A stale peer's refused snapshot must not rename/relocate the reporting tab's card.
+        // Only a completed save can switch reporters. This is presentation, never ownership.
+        if (prior?.projectId === project.id && prior.senderId !== source.senderId && !source.accepted) continue
+        const absolutePosition = { ...node.position }, seen = new Set([node.id])
+        let parent = node.parentId ? byId.get(node.parentId) : undefined
+        while (parent && !seen.has(parent.id)) {
+          seen.add(parent.id)
+          absolutePosition.x += parent.position.x
+          absolutePosition.y += parent.position.y
+          parent = parent.parentId ? byId.get(parent.parentId) : undefined
+        }
+        if (!Number.isFinite(absolutePosition.x) || !Number.isFinite(absolutePosition.y)) continue
+        // Whitelist presentation: client shell/cwd, agent identity, creator receipts and launch
+        // commands cannot become part of a recovered card through a rejected save.
+        const presentation: CanvasNodeState = {
+          id: node.id, kind: 'terminal', title: oneLine(node.title).slice(0, 4096), color: node.color,
+          position: { ...node.position }, size: { ...node.size },
+          group: typeof node.group === 'string' ? node.group : null,
+          ...(typeof node.parentId === 'string' ? { parentId: node.parentId } : {}),
+          tags: Array.isArray(node.tags) ? node.tags.filter(t => typeof t === 'string').slice(0, 64).map(t => oneLine(t).slice(0, 256)) : [],
+          ...(typeof node.titleAuto === 'boolean' ? { titleAuto: node.titleAuto } : {}),
+          ...(typeof node.pinned === 'boolean' ? { pinned: node.pinned } : {}),
+          ...(typeof node.manualPlacement === 'boolean' ? { manualPlacement: node.manualPlacement } : {}),
+          ...(typeof node.collapsed === 'boolean' ? { collapsed: node.collapsed } : {})
+        }
+        this.clientNodes.delete(node.id)
+        if (this.clientNodes.size >= 1024) this.clientNodes.delete(this.clientNodes.keys().next().value!)
+        this.clientNodes.set(node.id, { projectId: project.id, senderId: source.senderId, node: presentation, absolutePosition })
+      }
+    }
+  }
+
   private sourceProjectError(nodeId: string, ambiguous = false): ServerControlReply {
     return {
       ok: false,
@@ -927,6 +975,9 @@ export class HeadlessNodeFactory {
     if (!project || project.deletedEntities?.nodes?.includes(nodeId) || !(await this.paneIsAlive(nodeId))) return null
 
     const remembered = this.runtimeNodes.get(nodeId)
+    const client = this.clientNodes.get(nodeId)
+    const presentation = client?.projectId === project.id ? client : undefined
+    const sessionTitle = oneLine(this.deps.sessionTitleOf?.(nodeId) ?? '').slice(0, 4096)
     const normalSize = terminalSize(this.deps.settings())
     const right = project.nodes.reduce(
       (edge, node) => Math.max(edge, node.position.x + (node.size?.width ?? normalSize.width)),
@@ -940,7 +991,7 @@ export class HeadlessNodeFactory {
             kind: 'terminal',
             position: { x: right + H_GAP, y: 120 },
             size: normalSize,
-            title: `${agentId} (recovered)`,
+            title: sessionTitle || `${agentId} (recovered)`,
             titleAuto: true,
             color: '#d97757',
             group: null,
@@ -948,6 +999,17 @@ export class HeadlessNodeFactory {
             ...(project.cwd ? { cwd: project.cwd } : {}),
             agentId
           }
+    if (presentation) {
+      // Omission in the latest browser presentation clears an old parent or override too.
+      for (const key of ['parentId', 'titleAuto', 'pinned', 'manualPlacement', 'collapsed'] as const) delete node[key]
+      Object.assign(node, structuredClone(presentation.node), { agentId })
+      if (node.parentId && !project.nodes.some(n => n.id === node.parentId && n.kind === 'group')) {
+        delete node.parentId
+        node.group = null
+        node.position = { ...presentation.absolutePosition }
+      }
+    }
+    if (sessionTitle && node.titleAuto !== false) node.title = sessionTitle
     project.nodes.push(node)
     this.handLaunchedNodes.add(nodeId)
     await this.deps.workspaceStore.save(workspace)
@@ -1049,6 +1111,7 @@ export class HeadlessNodeFactory {
       this.runtimeAgents.delete(id)
       this.handLaunchedNodes.delete(id)
       this.runtimeNodes.delete(id)
+      this.clientNodes.delete(id)
       this.warnedRecoveredSources.delete(id)
       this.notedUnsavedSources.delete(id)
       this.retryCount.delete(id)
@@ -2713,6 +2776,7 @@ export class HeadlessNodeFactory {
     this.runtimeAgents.clear()
     this.handLaunchedNodes.clear()
     this.runtimeNodes.clear()
+    this.clientNodes.clear()
     this.warnedRecoveredSources.clear()
     this.notedUnsavedSources.clear()
   }

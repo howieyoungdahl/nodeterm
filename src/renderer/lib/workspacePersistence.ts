@@ -2,6 +2,7 @@ import type { Project, Workspace, WorkspaceApi } from '@shared/types'
 import { useProjects } from '../state/projects'
 import { reloadKeepingOpenNodes } from './externalChange'
 import { applyDeletedEntities } from './deletedEntities'
+import { WorkspaceSaveSupersededError } from './savePersistence'
 
 // Build each snapshot AFTER the preceding acknowledgment. A racing edit stays unsaved;
 // acknowledgments advance revision evidence, never overwrite content with an old snapshot.
@@ -75,8 +76,13 @@ export function saveWorkspace(api: WorkspaceApi): Promise<void> {
       finally { state.pending = false }
       const safelyAdopted = drainPublications(state, failed ? snapshot.revision : useProjects.getState().revision)
       if (!failed) return
-      if (attempt === 0 && hostRejected && failure instanceof Error &&
-        failure.message.includes('workspace_conflict:') && safelyAdopted) continue
+      if (hostRejected && failure instanceof Error &&
+        failure.message.includes('workspace_conflict:') && safelyAdopted) {
+        if (attempt === 0) continue
+        // Do not latch the conflict bar after a second safe collision. The existing bounded
+        // delivery backoff gets a fresh snapshot later, without another user edit or a hot loop.
+        throw new WorkspaceSaveSupersededError(failure)
+      }
       throw failure
     }
   })

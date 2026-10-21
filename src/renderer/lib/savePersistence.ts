@@ -18,6 +18,15 @@
 /** The ordinary debounce: how long canvas edits settle before the whole workspace is written. */
 export const SAVE_DEBOUNCE_MS = 800
 
+/** Created only after complete publications have safely installed every intervening change.
+ * A second collision is delivery contention, not an unresolved choice between user edits. */
+export class WorkspaceSaveSupersededError extends Error {
+  constructor(cause: Error) {
+    super('Canvas save was overtaken by safely merged changes; retrying delivery.', { cause })
+    this.name = 'WorkspaceSaveSupersededError'
+  }
+}
+
 /**
  * Backoff between retries of a REFUSED save, indexed by the number of attempts already made.
  * `null` = the schedule is exhausted; nothing will retry on its own.

@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SaveFailureBar } from '../components/SaveFailureBar'
 import { useAutosave, useCreateFlush, useSavePersistence } from './useSavePersistence'
+import { WorkspaceSaveSupersededError } from './savePersistence'
 
 let root: Root
 let container: HTMLDivElement
@@ -88,6 +89,19 @@ describe('save flush on card creation', () => {
 })
 
 describe('workspace persistence in a mounted canvas', () => {
+  it('backs off safely superseded saves without latching the conflict warning', async () => {
+    const write = vi.fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new WorkspaceSaveSupersededError(new Error('workspace_conflict: storage changed')))
+      .mockResolvedValue(undefined)
+    await act(async () => root.render(<Harness write={write} />))
+    await advance(800)
+    expect(container.textContent).toContain('unsaved')
+    expect(container.textContent).toContain('not being saved')
+    expect(container.textContent).not.toContain('Reload or keep local edits')
+    await advance(500)
+    expect(write).toHaveBeenCalledTimes(2)
+    expect(container.textContent).toBe('clean')
+  })
   it('keeps edits unsaved and stops retries after an authoritative revision conflict', async () => {
     const write = vi.fn<() => Promise<void>>().mockRejectedValue(new Error('workspace_conflict: storage changed'))
     await act(async () => root.render(<Harness write={write} />))
