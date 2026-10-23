@@ -1415,8 +1415,7 @@ function withNodeRect(
           width: rect.width,
           height: rect.height,
           style: { ...n.style, width: rect.width, height: rect.height },
-          // Drop the stale measurement in the same tick: flowToNodeStates prefers `measured` over
-          // `width`/`height`, and a commit racing the re-measure would persist the OLD size.
+          // Drop the stale measurement too, so React Flow paints the new geometry immediately.
           measured: undefined,
           data: { ...n.data, expandedHeight: rect.height, ...dataPatch }
         }
@@ -2000,11 +1999,14 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         kind,
         position: n.position,
         size: {
-          width: n.measured?.width ?? n.width ?? sizeFor(kind).width,
+          // Explicit geometry is the saved layout (and NodeResizer updates it for hand
+          // resizes). ResizeObserver measures integer DOM pixels, so preferring `measured`
+          // invents edits to fractional saved sizes and conflicts with an operator close.
+          width: n.width ?? n.measured?.width ?? sizeFor(kind).width,
           // While collapsed, persist the expanded height, not the shrunk one.
           height: collapsed
             ? n.data.expandedHeight ?? sizeFor(kind).height
-            : n.measured?.height ?? n.height ?? sizeFor(kind).height
+            : n.height ?? n.measured?.height ?? sizeFor(kind).height
         },
         title: n.data.title,
         cleanupArchiveId: n.data.cleanupArchiveId,
@@ -2070,7 +2072,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
  * and the touched one keeps `selected` and its local-only data.
  *
  * `measured` is deliberately NOT carried over on the patched node: React Flow's measured size wins
- * over `width`/`height` in flowToNodeStates, so keeping a stale one would make us serialize the OLD
+ * in React Flow, so keeping a stale one would make the renderer use the OLD
  * size after a peer resized the node — and re-publish it, fighting the peer. Dropping it lets React
  * Flow re-measure from the incoming `style`, which is what the peer sent.
  */
