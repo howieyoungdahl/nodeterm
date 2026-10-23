@@ -1006,6 +1006,7 @@ export async function startServer(
     nodes: () => nodeOps.list(),
     sweep: (dryRun, force) => nodeOps.sweep(dryRun, force),
     remove: (nodeId, force) => nodeOps.remove(nodeId, force),
+    removeDead: (nodeId) => nodeOps.removeDead(nodeId),
     adoptOrphans: () => nodeOps.adoptOrphans(),
     createNode: (input) => nodeOps.create(input),
     updateNode: (nodeId, input, force) => nodeOps.update(nodeId, input, force),

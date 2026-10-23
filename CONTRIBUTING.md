@@ -157,7 +157,10 @@ mutations and message delivery validate every target before writing anything; mi
  named refusal. There is no agent ownership exception for global dead-card cleanup. The separately
 authenticated operator API and its periodic reaper share one engine; it skips SSH projects and
 removes a local terminal card only after two definitive absent-session probes. Failed or unreadable
-probes preserve it. The same engine runs that rule BACKWARDS at boot and on `POST
+probes preserve it. For exact dead-card removal, the authenticated Server endpoint
+`DELETE /opsapi/dead-nodes/<id>` requires a local, definitively dead terminal and returns
+`forced:false`; it never kills a live backend. Legacy `/opsapi/nodes/<id>` deletion is unchanged
+and may implicitly force operator-created nodes, so it is not a dead-only substitute. The same engine runs that rule BACKWARDS at boot and on `POST
 /opsapi/adopt-orphans`: a live `nt-<id>` session no project still lists gets a card again, in the
 project whose folder is its pane's nearest ancestor. That is not an inert-boot exception — it adds a
 card for a backend it just proved exists, creates and attaches and types nothing, and puts the
