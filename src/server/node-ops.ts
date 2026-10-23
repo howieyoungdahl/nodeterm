@@ -678,6 +678,68 @@ export class ServerNodeOps {
     })
   }
 
+  /** Strict dead-card deletion. Ownership never upgrades this operation to a forced close. */
+  removeDead(nodeId: string): Promise<OpsRemoveResult> {
+    return this.runExclusive(async () => {
+      const workspace = await this.deps.workspaceStore.load({ sideline: false })
+      const matches = workspace.projects.flatMap((project) =>
+        project.nodes.filter((node) => node.id === nodeId).map((node) => ({ project, node }))
+      )
+      if (matches.length === 0) return { ok: false, status: 404, error: 'node_not_found' }
+      if (matches.length !== 1) return { ok: false, status: 409, error: 'ambiguous_node_id' }
+      const { project, node } = matches[0]
+      if (node.kind !== 'terminal') return { ok: false, status: 409, error: 'not_terminal' }
+      if (project.ssh) return { ok: false, status: 409, error: 'remote_terminal_unverifiable', paneState: 'unknown' }
+      if (node.text?.trim() || node.pendingLaunch)
+        return { ok: false, status: 409, error: 'card_has_unsent_text_or_pending_launch' }
+      const protectedIds = new Set([
+        ...(await this.deps.protectedCleanupNodeIds?.() ?? []),
+        ...(this.deps.liveProtectedCleanupNodeIds?.(workspace) ?? [])
+      ])
+      if (protectedIds.has(node.id) || ['working', 'blocked'].includes(this.deps.statusOf(node.id)?.state ?? ''))
+        return { ok: false, status: 409, error: 'node_protected' }
+      // Probe inside the shared mutation queue, never from inventory captured before waiting.
+      let generation: string | null = null
+      try { generation = await this.deps.backendGeneration?.() ?? null } catch { /* unknown */ }
+      if (!generation) return { ok: false, status: 503, error: 'backend_state_unknown', paneState: 'unknown' }
+      for (let pass = 0; pass < 2; pass += 1) {
+        const paneState = await this.paneState(project, node)
+        if (paneState !== 'dead') return { ok: false, status: paneState === 'alive' ? 409 : 503,
+          error: paneState === 'alive' ? 'pane_alive' : 'pane_state_unknown', paneState }
+        if (pass === 0) {
+          let confirmedGeneration: string | null = null
+          try { confirmedGeneration = await this.deps.backendGeneration?.() ?? null } catch { /* unknown */ }
+          if (generation !== confirmedGeneration)
+            return { ok: false, status: 503, error: 'backend_state_changed', paneState: 'unknown' }
+        }
+      }
+      // The final pane probe can yield to backend replacement or new cleanup reservations.
+      const protectedAtApply = new Set(await this.deps.protectedCleanupNodeIds?.() ?? [])
+      let applyGeneration: string | null = null
+      try { applyGeneration = await this.deps.backendGeneration?.() ?? null } catch { /* unknown */ }
+      if (applyGeneration !== generation)
+        return { ok: false, status: 503, error: 'backend_state_changed', paneState: 'unknown' }
+      // Hooks and loop registration can change during the last await. Read them synchronously
+      // at the mutation boundary, as the conservative sweep does.
+      const liveProtected = new Set(this.deps.liveProtectedCleanupNodeIds?.(workspace) ?? [])
+      if (protectedAtApply.has(node.id) || liveProtected.has(node.id) ||
+          ['working', 'blocked'].includes(this.deps.statusOf(node.id)?.state ?? ''))
+        return { ok: false, status: 409, error: 'node_protected' }
+      // No destroySession call belongs on this path, even for an operator-created node.
+      removeNodeCard(project, node.id)
+      await this.deps.workspaceStore.save(workspace, {
+        [operatorArchiveRemoval]: new Map([[project.id, new Set([node.id])]])
+      })
+      const persisted = await this.deps.workspaceStore.load({ sideline: false })
+      if (persisted.projects.some(p => p.nodes.some(n => n.id === node.id)))
+        return { ok: false, status: 503, error: 'card_removal_not_persisted', paneState: 'dead' }
+      this.deps.publishProject?.(project)
+      this.deps.publishRemoval?.(project.id, node.id, project.workspaceChange?.after)
+      this.deps.onRemoved?.([node.id])
+      return { ok: true, removedIds: [node.id], forced: false }
+    })
+  }
+
   remove(nodeId: string, force: boolean): Promise<OpsRemoveResult> {
     return this.runExclusive(async () => {
       const workspace = await this.deps.workspaceStore.load({ sideline: false })
