@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act } from 'react'
+import { applyNodeChanges } from '@xyflow/react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { CanvasNodeState, Project, WorkspacePublication } from '@shared/types'
@@ -205,4 +206,36 @@ it('an index-only publication while viewing a different project does not request
   expect(plan.localEditsRemain).toBe(false)
   applyWorkspaceFlowPublication(plan, { content: vi.fn(), acknowledge: vi.fn(), created: vi.fn(), defer: work => work(), persistLocalEdits: persist })
   expect(persist).not.toHaveBeenCalled()
+})
+
+// ResizeObserver reads integer offsetWidth/offsetHeight. Those observations are not hand edits
+// to the fractional geometry saved by a drag/resize at a non-integer canvas zoom.
+it.each(['close', 'resize', 'move', 'file', 'create'] as const)(
+  'automatically adopts operator %s after rounded DOM measurements without inventing local edits', action => {
+    const f = fixture()
+    f.base.nodes[0].size = { width: 500.25, height: 400.25 }
+    f.incoming.nodes = structuredClone(f.base.nodes)
+    const live = applyNodeChanges<CanvasNode>([{ id: 'same', type: 'dimensions',
+      dimensions: { width: 500, height: 400 } }], nodeStatesToFlow(f.base.nodes))
+    live[1].selected = true
+    if (action === 'close') f.incoming.nodes.shift()
+    if (action === 'resize') f.incoming.nodes[0].size = { width: 700.75, height: 600.75 }
+    if (action === 'move') f.incoming.nodes[0].position = { x: 123.5, y: 321.25 }
+    if (action === 'file') f.incoming.kanban!.assignments = [{ nodeId: 'same', columnId: 'manual' }]
+    if (action === 'create') f.incoming.nodes.push(node('new'))
+    const plan = planWorkspaceFlowPublication({ revision, projects: [f.base], activeProjectId: 'p', nodes: live,
+      change: { before: revision, after, changes: [{ before: f.base, after: f.incoming }] } })
+    expect(plan.kind).toBe('adopt'); if (plan.kind !== 'adopt') throw new Error('fixture')
+    expect(plan.localEditsRemain).toBe(false)
+    expect(flowToNodeStates(plan.nodes)).toMatchObject(f.incoming.nodes)
+    expect(plan.nodes.find(n => n.id === 'local')?.selected).toBe(true)
+  })
+it('preserves genuine user resize versus operator deletion after measured geometry arrives', () => {
+  const f = fixture()
+  const live = applyNodeChanges<CanvasNode>([{ id: 'same', type: 'dimensions',
+    dimensions: { width: 650.5, height: 550.5 }, resizing: true, setAttributes: true }], f.live)
+  f.incoming.nodes.shift()
+  expect(planWorkspaceFlowPublication({ revision, projects: [f.base], activeProjectId: 'p', nodes: live,
+    change: { before: revision, after, changes: [{ before: f.base, after: f.incoming }] } }))
+    .toEqual({ kind: 'conflict', reason: 'overlapping-content' })
 })

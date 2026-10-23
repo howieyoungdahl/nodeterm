@@ -1293,3 +1293,23 @@ describe('PR-A node fields survive a save/load round trip', () => {
     expect(t1.data.taskSummary).toBeUndefined()
   })
 })
+
+
+describe('saved geometry versus DOM observations', () => {
+  it('preserves fractional explicit geometry while falling back to measured dimensions when absent', () => {
+    const node = term('geometry', { x: 12.25, y: 34.75 })
+    node.width = 320.25; node.height = 240.75
+    node.measured = { width: 320, height: 241 }
+    expect(flowToNodeStates([node])[0]).toMatchObject({
+      position: { x: 12.25, y: 34.75 }, size: { width: 320.25, height: 240.75 }
+    })
+    delete node.width; delete node.height
+    expect(flowToNodeStates([node])[0].size).toEqual({ width: 320, height: 241 })
+  })
+  it('keeps collapsed cards expanded height independently of observed or explicit header height', () => {
+    const node = term('collapsed-geometry', { x: 0, y: 0 })
+    node.data.collapsed = true; node.data.expandedHeight = 440.75
+    node.height = 40; node.measured = { width: 320, height: 40 }
+    expect(flowToNodeStates([node])[0].size.height).toBe(440.75)
+  })
+})
