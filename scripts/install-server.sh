@@ -219,6 +219,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Prefer the UI and its tmux server under CPU contention; this is a weight, not a cap.
+CPUWeight=1000
 Type=simple
 WorkingDirectory=$APP_DIR
 Environment=NODETERM_HEADLESS=1
