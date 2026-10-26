@@ -18,6 +18,12 @@ are kept. Older operation directories are eligible only with a completed `commit
 publication locks are never age-pruned. Current bytes and candidate modification times are
 rechecked at deletion. Pruning never rewrites the project or publishes content.
 
+Expired operation payloads leave a small permanent `expired.json` marker, durably synced before
+request deletion. Writers check it before read-back and under their lock, refusing expired keys
+with stale-base rather than replaying during pruning. Interrupted cleanup resumes from this marker.
+Native Windows defers operation cleanup because Node cannot supply directory durability there;
+version cleanup remains available. Blank or invalid numeric environment values keep defaults.
+
 Expired operation receipts no longer provide operation-ID deduplication, and expired bases cause
 the existing stale-base refusal. Clients must reload and submit a fresh operation in that case.
 Deleting history is irreversible. Disabling maintenance stops further removal; reverting code
@@ -64,7 +70,8 @@ On a Linux/WSL2 private copy measured on 2026-10-25:
 | Full history, after fix | 20.58 ms | 720.98 ms | 643.30 ms |
 
 The copy had 11013 versions. The seven-day experiment retained 6844 versions and removed 4167
-completed operations, freeing 3173990692 bytes. This estimates the first maintenance backlog for
+completed operations, removing 3173990692 bytes of payload. The permanent expiry markers add roughly 17 MB
+of allocated space for those operations on a filesystem with 4 KiB blocks. This estimates the first maintenance backlog for
 that snapshot; a seven-day window does not remove the entire roughly 8 GB history. The timings
 measure uncontended reads, not a live incident trace. The startup tests separately hold the read
 pending and exercise rejected reads with the mounted welcome/loading components.

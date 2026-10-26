@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 export interface RecoveryRetentionPolicy { days: number; minVersions: number; batchSize: number }
 const number = (value: string | undefined, fallback: number, min: number, max: number) => {
   const parsed = Number(value)
-  return value !== undefined && Number.isFinite(parsed) ? Math.min(max, Math.max(min, Math.floor(parsed))) : fallback
+  return value !== undefined && value.trim() !== '' && Number.isFinite(parsed) ? Math.min(max, Math.max(min, Math.floor(parsed))) : fallback
 }
 export function recoveryRetentionPolicy(): RecoveryRetentionPolicy {
   return {
@@ -20,7 +20,8 @@ const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'E
 async function realDirectory(dir: string): Promise<boolean> {
   try { return (await fs.lstat(dir)).isDirectory() } catch (error) { if (missing(error)) return false; throw error }
 }
-interface Candidate { file: string; mtime: number; operation: boolean }
+const expiry = '{"version":1}\n'
+interface Candidate { file: string; mtime: number; operation: boolean; expired?: boolean }
 
 /** Immutable history only. No publication destination, tombstone, lock or unknown operation
  * is removed. Planning and deletion are asynchronous and never awaited by a publication.
@@ -57,7 +58,14 @@ export class RecoveryRetention {
     if (await realDirectory(operations)) for (const name of await fs.readdir(operations)) {
       if (!leaf.test(name)) continue
       const file = path.join(operations, name), stat = await fs.lstat(file).catch(() => undefined)
-      if (stat?.isDirectory() && stat.mtimeMs < oldest) result.push({ file, mtime: stat.mtimeMs, operation: true })
+      if (!stat?.isDirectory()) continue
+      const marker = path.join(file, 'expired.json')
+      let expired = false
+      try { expired = (await fs.lstat(marker)).isFile() && await fs.readFile(marker, 'utf8') === expiry }
+      catch (error) { if (!missing(error)) continue }
+      // A crash after expiry enrollment resumes payload cleanup regardless of the new mtime.
+      if (expired && (await fs.readdir(file)).every(name => name === 'expired.json')) continue
+      if (expired || stat.mtimeMs < oldest) result.push({ file, mtime: stat.mtimeMs, operation: true, expired })
     }
     return result.sort((a, b) => a.mtime - b.mtime)
   }
@@ -74,21 +82,45 @@ export class RecoveryRetention {
       const stat = await fs.lstat(candidate.file).catch(() => undefined)
       if (!stat || stat.mtimeMs !== candidate.mtime || stat.isSymbolicLink()) continue
       if (candidate.operation) {
-        if (!stat.isDirectory()) continue
-        let receipt: { kind?: string }
-        try {
-          const receiptFile = path.join(candidate.file, 'receipt.json')
-          if (!(await fs.lstat(receiptFile)).isFile()) continue
-          receipt = JSON.parse(await fs.readFile(receiptFile, 'utf8'))
-        } catch { continue }
-        if (!['committed', 'already-applied'].includes(receipt.kind ?? '')) continue
-        // Delete the receipt last. An interrupted partial prune stays recognizable on restart.
+        if (!stat.isDirectory() || process.platform === 'win32') continue
+        if (!candidate.expired) {
+          try {
+            const receiptFile = path.join(candidate.file, 'receipt.json')
+            if (!(await fs.lstat(receiptFile)).isFile()) continue
+            const receipt = JSON.parse(await fs.readFile(receiptFile, 'utf8')) as { kind?: string }
+            if (!['committed', 'already-applied'].includes(receipt.kind ?? '')) continue
+          } catch { continue }
+        }
         const entries = await fs.readdir(candidate.file, { withFileTypes: true })
         if (entries.length > 16 || entries.some(entry => !entry.isFile())) continue
-        for (const entry of entries.filter(entry => entry.name !== 'receipt.json'))
-          await fs.unlink(path.join(candidate.file, entry.name))
-        await fs.unlink(path.join(candidate.file, 'receipt.json'))
-        await fs.rmdir(candidate.file)
+        {
+          // Permanently retire the key BEFORE removing request.json. Writers check this both
+          // before read-back and under writer.lock. A crash cannot turn a partial prune into
+          // permission to replay, and concurrent pruners only unlink immutable expired payloads.
+          const marker = path.join(candidate.file, 'expired.json')
+          let handle
+          try { handle = await fs.open(marker, 'wx', 0o600) }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+          if (handle) {
+            try { await handle.writeFile(expiry); await handle.sync() } finally { await handle.close() }
+          }
+          if (!(await fs.lstat(marker)).isFile() || await fs.readFile(marker, 'utf8') !== expiry) continue
+          // A resumed or concurrent pass must flush the existing marker too. Its bytes may
+          // have been observed before the process that created it finished syncing.
+          const retained = await fs.open(marker, 'r')
+          try { await retained.sync() } finally { await retained.close() }
+          // POSIX directory durability is required before deleting payloads. Unsupported
+          // platforms defer cleanup; do not acknowledge a marker that could disappear alone.
+          const directory = await fs.open(candidate.file, 'r')
+          try { await directory.sync() } finally { await directory.close() }
+        }
+        for (const entry of entries.filter(entry => !['receipt.json', 'expired.json'].includes(entry.name))) {
+          try { await fs.unlink(path.join(candidate.file, entry.name)) }
+          catch (error) { if (!missing(error)) throw error }
+        }
+        try { await fs.unlink(path.join(candidate.file, 'receipt.json')) }
+        catch (error) { if (!missing(error)) throw error }
+        // Keep only the small expiry marker. Removing it would reopen the operation-ID race.
       } else {
         if (!stat.isFile()) continue
         // Recheck at the deletion boundary, not merely when a potentially old plan was built.

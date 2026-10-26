@@ -298,6 +298,11 @@ export class ProjectCommitStore {
     } catch { return undefined }
   }
 
+  private async expiredOperation(op: string): Promise<boolean> {
+    try { await fs.lstat(path.join(op, 'expired.json')); return true }
+    catch (error) { if (errorCode(error) === 'ENOENT') return false; throw error }
+  }
+
   async receipt(clientId: string, operationId: string): Promise<FileCommitResult | undefined> {
     const op = path.join(this.recovery, 'operations', revisionOf(`${clientId}\0${operationId}`))
     try { return JSON.parse(await fs.readFile(path.join(op, 'receipt.json'), 'utf8')) as FileCommitResult }
@@ -322,6 +327,7 @@ export class ProjectCommitStore {
     const requestRaw = JSON.stringify(request)
     const result = (kind: FileCommitResult['kind'], extra: Partial<FileCommitResult> = {}): FileCommitResult =>
       ({ kind, recovery: op, ...extra })
+    if (await this.expiredOperation(op)) return result('stale-base', { message: 'Operation history expired. Reload and use a new operation ID.' })
     try { await assertPublicationAdmission(this.file) }
     catch (error) { return result('busy', { message: String(error) }) }
     for (const parent of [path.dirname(this.file), path.dirname(this.recovery), this.recovery]) {
@@ -364,6 +370,7 @@ export class ProjectCommitStore {
     await fs.mkdir(lock)
     let published = false
     try {
+      if (await this.expiredOperation(op)) return result('stale-base', { message: 'Operation history expired. Reload and use a new operation ID.' })
       await this.durable(path.join(op, 'request.json'), requestRaw)
       await this.durable(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, operation: path.basename(op) }))
       // Persist the lock's name before any publication phase. Syncing owner.json and the
@@ -439,6 +446,7 @@ export class ProjectCommitStore {
     const requestRaw = JSON.stringify(request)
     const result = (kind: FileCommitResult['kind'], extra: Partial<FileCommitResult> = {}): FileCommitResult =>
       ({ kind, recovery: op, ...extra })
+    if (await this.expiredOperation(op)) return result('stale-base', { message: 'Operation history expired. Reload and use a new operation ID.' })
     try { await assertPublicationAdmission(this.file) }
     catch (error) { return result('busy', { message: String(error) }) }
     try { await this.directory(op) }
@@ -464,6 +472,7 @@ export class ProjectCommitStore {
     const displacedFile = path.join(op, 'displaced.json')
     try {
       // Preserve the submitted bytes even when its base is unknown or its revision has expired.
+      if (await this.expiredOperation(op)) return result('stale-base', { message: 'Operation history expired. Reload and use a new operation ID.' })
       await this.durable(path.join(op, 'request.json'), requestRaw)
       await this.durable(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, operation: path.basename(op) }))
       await this.syncDirectory(this.recovery)

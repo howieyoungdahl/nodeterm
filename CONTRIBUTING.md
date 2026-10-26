@@ -428,6 +428,9 @@ Project recovery retention never expires deletion tombstones or unfinished opera
 background work separate from publication, and preserve the renderer's loading/error state until
 workspace hydration succeeds. See `docs/recovery-retention.md` for limits and the disposable
 history benchmark. Never run that fixture against a live project directory.
+Completed operation payload cleanup retains permanent expired-key markers. Never remove those
+markers or reuse their operation IDs. Native Windows defers operation cleanup until directory
+durability is available; version retention still applies.
 
 Terminal and board-modal headers reserve a row for the title; put badges and secondary actions
 in the wrapping toolbar. Collapsed terminals keep the title row and close button within 40px.
