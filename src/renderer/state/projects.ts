@@ -22,6 +22,9 @@ import type { WorkspaceSaveAck } from '@shared/types'
 interface ProjectsState {
   /** Last content proven durable, separate from locally committed edits. */
   adoptedProjects?: Project[]
+  deletedNodeIds: Record<string, string[]>
+  saveRescues: Record<string, CanvasNodeState[]>
+  recordNodeDeletions(projectId: string, nodeIds: string[]): void
   revision?: string
   acknowledgeSave(ack: WorkspaceSaveAck, saved?: Workspace): void
   acknowledgeOrganizationChange(project: Project): void
@@ -277,18 +280,32 @@ function mapProjectNodes(
 
 export const useProjects = create<ProjectsState>((set, get) => ({
   projects: [],
+  saveRescues: {},
+  deletedNodeIds: {},
   activeProjectId: '',
   reloadNonce: 0,
 
   hydrate(ws) {
-    set({ adoptedProjects: structuredClone(ws.projects), projects: withUniqueIds(ws.projects).map((p) => ({ ...p, loadedKanban: p.kanban ?? null })), activeProjectId: ws.activeProjectId, revision: ws.revision })
+    set({ adoptedProjects: structuredClone(ws.projects), deletedNodeIds: {}, saveRescues: {}, projects: withUniqueIds(ws.projects).map((p) => ({ ...p, loadedKanban: p.kanban ?? null })), activeProjectId: ws.activeProjectId, revision: ws.revision })
   },
 
   acknowledgeSave(ack, saved) {
     // A delayed ACK may only advance the snapshot it saved, never newer adopted evidence.
     if (saved && get().revision !== saved.revision) return
-    set((s) => ({ adoptedProjects: saved ? structuredClone(saved.projects).map(p => ({ ...p, revision: ack.projectRevisions[p.id] ?? p.revision })) : s.adoptedProjects, revision: ack.revision, projects: s.projects.map((p) =>
+    set((s) => ({ revision: ack.revision,
+      adoptedProjects: saved ? structuredClone(saved.projects).map(p => ({ ...p,
+        revision: ack.projectRevisions[p.id] ?? p.revision,
+        nodes: [...p.nodes, ...(ack.rescuedNodes?.[p.id] ?? []).filter(n => !p.nodes.some(held => held.id === n.id))]
+      })) : s.adoptedProjects,
+      saveRescues: ack.rescuedNodes ?? {},
+      // Clear only the exact intent arrays this snapshot acknowledged. Deletes made during
+      // the request allocate new arrays and remain owed to the next save.
+      deletedNodeIds: Object.fromEntries(Object.entries(s.deletedNodeIds).filter(([id, ids]) =>
+        ids !== saved?.deletedNodeIds?.[id])),
+      projects: s.projects.map((p) =>
       ack.projectRevisions[p.id] ? { ...p, revision: ack.projectRevisions[p.id],
+        nodes: [...p.nodes, ...(ack.rescuedNodes?.[p.id] ?? []).filter(n =>
+          !p.nodes.some(held => held.id === n.id) && !s.deletedNodeIds[p.id]?.includes(n.id))],
         ...(saved ? { loadedKanban: saved.projects.find((held) => held.id === p.id)?.kanban ?? null } : {}) } : p) }))
   },
 
@@ -510,7 +527,14 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     }))
   },
 
+  recordNodeDeletions(projectId, nodeIds) {
+    if (!nodeIds.length) return
+    set(s => ({ deletedNodeIds: { ...s.deletedNodeIds,
+      [projectId]: [...new Set([...(s.deletedNodeIds[projectId] ?? []), ...nodeIds])] } }))
+  },
+
   removeNode(projectId, nodeId) {
+    get().recordNodeDeletions(projectId, [nodeId])
     set((s) => ({
       projects: mapProjectNodes(s.projects, projectId, (nodes) =>
         nodes.filter((n) => n.id !== nodeId)
@@ -598,6 +622,7 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   },
 
   deleteProject(id) {
+    get().recordNodeDeletions(id, get().getProject(id)?.nodes.map(n => n.id) ?? [])
     const { projects, activeProjectId } = get()
     const index = projects.findIndex((p) => p.id === id)
     const remaining = projects.filter((p) => p.id !== id)
@@ -681,10 +706,10 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   },
 
   toWorkspace() {
-    const { projects, activeProjectId, revision } = get()
+    const { projects, activeProjectId, revision, deletedNodeIds } = get()
     // A relay tab (`remote`) is a live connection to another machine's project, never a
     // workspace on this disk — exclude it so it can't be written into this client's
     // workspace.json (the disk writer skips it too; see core/workspace-files.ts).
-    return { version: 2, activeProjectId, projects: projects.filter((p) => !p.remote), ...(revision ? { revision } : {}) }
+    return { version: 2, activeProjectId, ...(Object.keys(deletedNodeIds).length ? { deletedNodeIds } : {}), projects: projects.filter((p) => !p.remote), ...(revision ? { revision } : {}) }
   }
 }))

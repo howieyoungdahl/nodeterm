@@ -33,6 +33,60 @@ afterEach(async () => {
 })
 
 describe('save → load round trip (v3)', () => {
+  it('UI project removal requires intent for its saved cards', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const incoming = await store.load()
+    incoming.projects = []
+    await expect(store.save(incoming, { client: 'ui:51', requireRevision: true })).rejects.toThrow('without delete intent')
+    expect((await new WorkspaceStore().load()).projects[0].nodes.map(n => n.id)).toEqual(['term-1'])
+    incoming.deletedNodeIds = { p1: ['term-1'] }
+    await store.save(incoming, { client: 'ui:51', requireRevision: true })
+    expect((await new WorkspaceStore().load()).projects).toEqual([])
+  })
+
+  it.each([false, true])('UI deletion evidence removes a card even with live backend %s', async live => {
+    const store = new WorkspaceStore(undefined, { hasLiveBackend: () => live, wasDeleted: () => false })
+    await store.save(ws([project({ cwd: projRoot })]))
+    const incoming = await store.load()
+    incoming.projects[0].nodes = []
+    incoming.deletedNodeIds = { p1: ['term-1'] }
+    await store.save(incoming, { client: 'ui:51', requireRevision: true })
+    expect((await new WorkspaceStore().load()).projects[0].nodes).toEqual([])
+  })
+
+  it('a different clients tombstone and loaded deletion ledger do not authorize UI omission', async () => {
+    const store = new WorkspaceStore(undefined, { hasLiveBackend: () => false, wasDeleted: () => true })
+    await store.save(ws([project({ cwd: projRoot })]))
+    const incoming = await store.load()
+    incoming.projects[0].nodes = []
+    incoming.projects[0].deletedEntities = { nodes: ['term-1'], bridges: [], ropes: [] }
+    const ack = await store.save(incoming, { client: 'ui:51', requireRevision: true })
+    expect(ack.rescuedNodes?.p1.map(n => n.id)).toEqual(['term-1'])
+    expect((await new WorkspaceStore().load()).projects[0].nodes.map(n => n.id)).toEqual(['term-1'])
+  })
+
+  it('UI omission also keeps inline cards without backends', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project()]))
+    const incoming = await store.load()
+    incoming.projects[0].nodes = []
+    const ack = await store.save(incoming, { client: 'ui:51', requireRevision: true })
+    expect(ack.rescuedNodes?.p1.map(n => n.id)).toEqual(['term-1'])
+    expect((await new WorkspaceStore().load()).projects[0].nodes.map(n => n.id)).toEqual(['term-1'])
+  })
+
+  it('ui save that omits a card without deletion evidence keeps it when its backend is dead', async () => {
+    const store = new WorkspaceStore(undefined, { hasLiveBackend: () => false, wasDeleted: () => false })
+    await store.save(ws([project({ cwd: projRoot })]))
+    const incoming = await store.load()
+    incoming.projects[0].nodes = []
+    await store.save(incoming, { client: 'ui:51', requireRevision: true, publish: true })
+    const disk = JSON.parse(await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf8'))
+    expect(disk.nodes.map((n: { id: string }) => n.id)).toEqual(['term-1'])
+    expect((await new WorkspaceStore().load()).projects[0].nodes.map(n => n.id)).toEqual(['term-1'])
+  })
+
   it('creates and preserves a machine-local approval id outside the shared project file', async () => {
     const store = new WorkspaceStore()
     const workspace = ws([project({ cwd: projRoot })])

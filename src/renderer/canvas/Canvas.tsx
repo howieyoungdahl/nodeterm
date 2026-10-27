@@ -1,4 +1,5 @@
 import { loadWorkspaceForResync, isWorkspaceResyncCurrent } from '../lib/workspacePersistence'
+import { mergeIncomingNodes } from '../lib/externalChange'
 import { planWorkspaceFlowPublication, applyWorkspaceFlowPublication } from '../lib/workspaceFlowPublication'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
@@ -2407,6 +2408,17 @@ export function Canvas() {
     }
   }, [commitActiveToStore, api.workspace, retrySave, bumpDirty, writeDisk])
 
+  // Retained cards arrive in the save acknowledgement; preserve in-flight canvas edits.
+  const saveRescues = useProjects(s => s.saveRescues)
+  useEffect(() => {
+    const state = useProjects.getState()
+    const deleted = new Set(state.deletedNodeIds[activeProjectId] ?? [])
+    const present = new Set(state.getProject(activeProjectId)?.nodes.map(n => n.id) ?? [])
+    const added = (saveRescues[activeProjectId] ?? []).filter(n => present.has(n.id) && !deleted.has(n.id))
+    const next = mergeIncomingNodes(nodesRef.current, nodeStatesToFlow(added))
+    if (next !== nodesRef.current) { nodesRef.current = next; setNodes(next) }
+  }, [saveRescues, activeProjectId, setNodes])
+
   // Merge saved publications immediately; catch up missing chains and outside-file changes
   // through a full read against the separate durable base. Only content overlap needs a choice.
   useEffect(() => {
@@ -2956,6 +2968,8 @@ export function Canvas() {
         }
         return true
       })
+      useProjects.getState().recordNodeDeletions(useProjects.getState().activeProjectId,
+        managed.filter(c => c.type === 'remove').map(c => c.id))
       onNodesChange(managed)
       // "I put it there": the durable memory automatic placement reads as a refusal. Only a HAND
       // gesture reaches here — a drag end (`dragging: false`) or a live resize (`resizing`).
@@ -4697,6 +4711,7 @@ export function Canvas() {
   const deleteNodes = useCallback(
     (ids: string[], opts?: { record?: boolean }) => {
       const set = new Set(ids)
+      useProjects.getState().recordNodeDeletions(useProjects.getState().activeProjectId, ids)
       if (opts?.record !== false) {
         const snapshots = nodesRef.current
           .filter((n) => set.has(n.id))
@@ -4967,6 +4982,7 @@ export function Canvas() {
       // pruned path cannot come back as an orphan the bind dialog offers.
       const wasBound = !!nodesRef.current.find((n) => n.id === groupId)?.data.worktree
       const released = wasBound ? releaseWorktreeBinding(groupId) : null
+      useProjects.getState().recordNodeDeletions(useProjects.getState().activeProjectId, [groupId])
       setNodes((ns) => ungroupNodes(ns as CanvasNode[], groupId))
       markDirty()
       if (released) void released.finally(() => refreshWorktreeStore({ unbound: groupId }))
@@ -9288,6 +9304,7 @@ export function Canvas() {
               return
             }
             const freed = live.filter((nd) => nd.parentId === gid).map((nd) => nd.id)
+            useProjects.getState().recordNodeDeletions(useProjects.getState().activeProjectId, [gid])
             setNodes(ungroupNodes(live, gid))
             markDirty()
             reply({ ok: true, message: `ungrouped ${gid}, freed ${freed.length} node(s)`, result: { freed } })

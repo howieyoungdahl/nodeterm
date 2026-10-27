@@ -971,7 +971,7 @@ export class WorkspaceStore {
   ): Promise<ProjectFileV1> {
     const incoming = new Set(candidate.nodes.map((n) => n.id))
     const omitted = prev.nodes.filter((n) => !incoming.has(n.id))
-    if (!omitted.length) return candidate
+    if (!omitted.length || client.startsWith('ui:')) return candidate
     const rescued: CanvasNodeState[] = []
     for (const node of omitted) {
       if (await this.backends.wasDeleted(node.id)) continue
@@ -1019,6 +1019,36 @@ export class WorkspaceStore {
       let beforeContent: Workspace | undefined
       try { beforeContent = await new WorkspaceStore(this.remoteIO).load({ sideline: false }) }
       catch { /* No acknowledgment evidence; the existing save failure/guard path still owns errors. */ }
+      // A UI snapshot is not a deletion ledger. Keep even exited terminals and non-terminal
+      // cards unless this save carries the client's explicit delete intent. Do this before
+      // splitting so folder, inline and SSH-cache projects share the same rule.
+      const rescuedNodes: Record<string, CanvasNodeState[]> = {}
+      if (opts?.client?.startsWith('ui:')) {
+        if (!beforeContent) throw new Error('workspace_conflict: cannot verify saved cards')
+        for (const previous of beforeContent.projects) {
+          if (workspace.projects.some(p => p.id === previous.id)) continue
+          const deleted = new Set(workspace.deletedNodeIds?.[previous.id] ?? [])
+          if (previous.nodes.some(n => !deleted.has(n.id)))
+            throw new Error('workspace_conflict: omitted project contains saved cards without delete intent')
+        }
+        workspace = { ...workspace, projects: workspace.projects.map(project => {
+          const previous = beforeContent.projects.find(p => p.id === project.id)
+          const present = new Set(project.nodes.map(n => n.id))
+          const deleted = new Set(workspace.deletedNodeIds?.[project.id] ?? [])
+          const rescued = previous?.nodes.filter(n => !present.has(n.id) && !deleted.has(n.id)) ?? []
+          if (!rescued.length) return project
+          const nodes = [...project.nodes, ...rescued]
+          const ids = new Set(nodes.map(n => n.id))
+          const rooted = nodes.map(n => {
+            if (!n.parentId || ids.has(n.parentId)) return n
+            const { parentId: _gone, ...root } = n
+            return root
+          })
+          rescuedNodes[project.id] = rooted.filter(n => !present.has(n.id))
+          console.warn(`[workspace] kept omitted UI cards ${rescued.map(n => n.id).join(', ')} (client ${opts.client})`)
+          return { ...project, nodes: rooted }
+        }) }
+      }
       const beforeRevision = beforeContent?.revision
       if (workspace.revision && beforeRevision && workspace.revision !== beforeRevision)
         throw new Error('workspace_conflict: storage changed during publication snapshot')
@@ -1071,7 +1101,7 @@ export class WorkspaceStore {
         if (opts?.publish && publication && beforeRevision !== revision)
           platform().broadcast(IPC.workspaceServerChange, { ...publication, workspaceChange })
       }
-      return { revision, projectRevisions }
+      return { revision, projectRevisions, ...(Object.keys(rescuedNodes).length ? { rescuedNodes } : {}) }
     })
     this.saveChain = run.catch(() => {})
     return run

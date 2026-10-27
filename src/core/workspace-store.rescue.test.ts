@@ -157,9 +157,9 @@ describe('local save rescue', () => {
     warn.mockClear()
 
     await store.save(ws([project({ cwd: projRoot, nodes: [] })]), { client: 'ui:7' })
-    const lines = warn.mock.calls.map((call) => String(call[0])).filter((l) => l.includes('[workspace] rescued'))
+    const lines = warn.mock.calls.map((call) => String(call[0])).filter((l) => l.includes('[workspace] kept omitted UI cards'))
     expect(lines).toHaveLength(1)
-    expect(lines[0]).toContain('rescued 2 node(s) with live backends that a save omitted')
+    expect(lines[0]).toContain('kept omitted UI cards')
     expect(lines[0]).toContain('term-1, term-2')
     expect(lines[0]).toContain('(client ui:7)')
   })
@@ -218,7 +218,7 @@ describe('save receipts', () => {
 
     info.mockClear()
     await store.save(
-      ws([project({ cwd: projRoot, nodes: [node('term-2'), node('term-3')] })]),
+      { ...ws([project({ cwd: projRoot, nodes: [node('term-2'), node('term-3')] })]), deletedNodeIds: { p1: ['term-1'] } },
       { client: 'ui:4' }
     )
     const second = receipts(info)

@@ -38,7 +38,7 @@ function fixture() {
     const base = project(), next = { ...project(), name: 'Published' }
     return { ...next, workspaceChange: { before, after, changes: [{ before: base, after: next }] } }
   }
-  return { api, start, resolve: () => resolve({ revision: b, projectRevisions: { p: b } }),
+  return { api, start, resolve: (ack: WorkspaceSaveAck = { revision: b, projectRevisions: { p: b } }) => resolve(ack),
     reject: () => reject(new Error('save failed')), emit: (p = incoming()) => listener(p), incoming,
     conflicts, delivered, observed, unsubscribe }
 }
@@ -186,4 +186,37 @@ it('rejects a read when revision advances in a microtask before the caller insta
   expect(read).toBeDefined()
   expect(persistence.isWorkspaceResyncCurrent(read!)).toBe(false)
   expect(useProjects.getState().revision).toBe(b)
+})
+
+it('save ACK restores only omitted cards and preserves edits made while saving', async () => {
+  const f = fixture()
+  const saving = persistence.saveWorkspace(f.api)
+  await f.start
+  const card = { id: 'rescued', kind: 'sticky' as const, title: 'Kept', color: '#fff', group: null,
+    position: { x: 0, y: 0 }, size: { width: 100, height: 100 } }
+  useProjects.getState().renameProject('p', 'Typing during save')
+  f.resolve({ revision: b, projectRevisions: { p: b }, rescuedNodes: { p: [card] } })
+  await saving
+  expect(useProjects.getState().projects[0].name).toBe('Typing during save')
+  expect(useProjects.getState().projects[0].nodes).toEqual([card])
+  expect(useProjects.getState().saveRescues.p).toEqual([card])
+  expect(useProjects.getState().adoptedProjects?.[0].nodes).toEqual([card])
+  useProjects.getState().removeNode('p', 'rescued')
+  expect(useProjects.getState().toWorkspace().deletedNodeIds).toEqual({ p: ['rescued'] })
+  useProjects.getState().acknowledgeSave({ revision: c, projectRevisions: { p: c }, rescuedNodes: { p: [card] } })
+  expect(useProjects.getState().projects[0].nodes).toEqual([])
+  f.unsubscribe()
+})
+
+it('ACK retires only deletion intent that its snapshot actually saved', () => {
+  const state = useProjects.getState()
+  state.recordNodeDeletions('p', ['old'])
+  const saved = state.toWorkspace()
+  state.recordNodeDeletions('p', ['new'])
+  state.acknowledgeSave({ revision: b, projectRevisions: { p: b } }, saved)
+  expect(useProjects.getState().toWorkspace().deletedNodeIds?.p).toEqual(['old', 'new'])
+  const latest = useProjects.getState().toWorkspace()
+  state.acknowledgeSave({ revision: c, projectRevisions: { p: c } }, latest)
+  expect(useProjects.getState().toWorkspace().deletedNodeIds).toBeUndefined()
+  expect(useProjects.getState().saveRescues).toEqual({})
 })
