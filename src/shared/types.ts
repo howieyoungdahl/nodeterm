@@ -843,6 +843,8 @@ export interface WorkspacePublication {
 
 /** The full workspace written to / read from disk. */
 export interface Workspace {
+  /** Transient intent recorded by this tab, never inferred from a missing card or loaded tombstones. */
+  deletedNodeIds?: Record<string, string[]>
   /** Authoritative loaded/acknowledged storage revision. A stale whole-workspace save rejects. */
   revision?: string
   version: 2
@@ -1023,6 +1025,8 @@ export interface WorkspaceApi {
 }
 
 export interface WorkspaceSaveAck {
+  /** Cards retained by the host because this client omitted them without delete intent. */
+  rescuedNodes?: Record<string, CanvasNodeState[]>
   revision: string
   projectRevisions: Record<string, string>
 }

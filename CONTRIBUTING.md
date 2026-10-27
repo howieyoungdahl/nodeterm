@@ -427,6 +427,13 @@ and instruction installation; temporary test paths must never reach live provide
 The session budget may reap only orphaned backends. Every card in a saved project, including
 closed projects, protects its session. Both runtime compositions use raw workspace reads through
 `cleanupReaperGuards`; missing, corrupt or publishing metadata must stop reaping.
+## UI save deletion intent
+
+A UI workspace save must include `deletedNodeIds` for explicit card deletions. Missing cards,
+exited backends and loaded tombstones do not authorize deletion. Record intent in the operator
+remove path, never by comparing snapshots. Retained cards return in `WorkspaceSaveAck.rescuedNodes`
+and are added to the saving tab without replacing live edits. Omitting a populated project
+without delete intent rejects the save.
 
 ## Testing
 
