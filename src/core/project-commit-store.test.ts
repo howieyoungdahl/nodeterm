@@ -33,6 +33,22 @@ const request = (base: string, proposed: string, operationId = 'op') =>
 const creation = (operationId = 'create', proposed = original) => ({ clientId: 'client', operationId,
   expectedAbsence: true as const, indexRevision: revisionOf('fixture enrolled index'), proposed })
 
+it.skipIf(process.platform === 'win32')('does not rewrite existing deletion evidence and still refuses raw deleted-card replay', async () => {
+  const store = new ProjectCommitStore(file)
+  const deleted = edit(original, doc => {
+    doc._reconciliation = { version: 1, deleted: { nodes: ['gone'], bridges: [], ropes: [] } }
+  })
+  await fs.writeFile(file, deleted)
+  await store.observe()
+  const open = vi.spyOn(fs, 'open')
+  const result = await store.commit(request(revisionOf(deleted), edit(deleted, doc => { doc.name = 'Updated' })))
+  expect(result.kind).toBe('committed')
+  expect(open.mock.calls.filter(([target]) => String(target).includes(`${path.sep}tombstones${path.sep}`))).toHaveLength(0)
+  // Restoring old raw bytes without their portable metadata still cannot resurrect the card.
+  await fs.writeFile(file, edit(original, doc => { doc.nodes.push({ id: 'gone', title: 'Deleted' }) }))
+  await expect(store.observe()).rejects.toThrow('E_DELETED_ID_REPLAY')
+})
+
 it.each(['update', 'creation'] as const)('refuses unavailable directory durability for %s while retaining exact unconfirmed intent', async kind => {
   const target = kind === 'creation' ? path.join(dir, 'fresh.json') : file
   const store = new ProjectCommitStore(target), input = kind === 'creation' ? creation() : request(revisionOf(original), edit(original, d => { d.name = 'proposal' }))

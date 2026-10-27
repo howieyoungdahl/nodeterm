@@ -137,6 +137,7 @@ import {
   KanbanView
 } from '../components/lazyPanels'
 import { WelcomeScreen } from '../components/WelcomeScreen'
+import { useWorkspaceStartup, WorkspaceStartupGate } from '../lib/useWorkspaceStartup'
 import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunch'
 import type { DictationTarget } from '../components/DictationOverlay'
@@ -2029,9 +2030,14 @@ export function Canvas() {
     [nodes, sessionsOpen]
   )
 
-  // 1) Load the whole workspace once and hydrate the projects store.
+  const workspaceStartup = useWorkspaceStartup(() => api.workspace.load(), (ws) => {
+    const projects = ws.projects.map(migrateProjectTags)
+    useProjects.getState().hydrate({ ...ws, projects })
+    void attemptSave(() => saveWorkspace(api.workspace))
+  })
+
+  // 1) Hydrate install settings independently of the workspace read.
   useEffect(() => {
-    let cancelled = false
     // Pull the current license status: the main process broadcasts it on launch, but that
     // broadcast races renderer load and is dropped if it fires first — without this pull a
     // Pro user can start (and stay) gated as free until the next restart.
@@ -2059,21 +2065,6 @@ export function Canvas() {
           markMobileLaunchSeen()
         }
       })
-    api.workspace.load().then((ws) => {
-      if (cancelled) return
-      // One-time unification: fold legacy free-text node `tags` into board labels (idempotent —
-      // a project with no tagged nodes is returned unchanged). The unconditional save below then
-      // persists the conversion, so the next load is a no-op.
-      const projects = ws.projects.map(migrateProjectTags)
-      useProjects.getState().hydrate({ ...ws, projects })
-      // Upgrade the on-disk format (e.g. v1 -> v2 migration) right away. Reported like every
-      // other save: a `void` here used to make the very first write of the session the one write
-      // that could fail with no signal at all — including the format migration.
-      void attemptSave(() => saveWorkspace(api.workspace))
-    })
-    return () => {
-      cancelled = true
-    }
   }, [])
 
   // 2) Whenever the active project changes — or an in-place reload is requested (`reloadNonce`,
@@ -2672,14 +2663,14 @@ export function Canvas() {
   // appears WHILE dirty, so without this gate the 800ms timer would fire and silently "keep mine"
   // (overwrite the external disk version) before the user can choose. `conflict` is a dep so
   // resolving it (either button clears it) re-arms the save.
-  useAutosave(dirty, !!conflict || revisionConflict, persist, resaveTick, saveDelivery)
+  useAutosave(dirty, !workspaceStartup.ready || !!conflict || revisionConflict, persist, resaveTick, saveDelivery)
 
   // Creating a terminal-backed card ALSO flushes the save immediately, on top of the debounce
   // above: a brand-new card was otherwise not on disk for at least 800ms (4.5s to 55s in the
   // field), and every server-side decision that reads the file — agent-hook recovery,
   // canvas-control source resolution — raced it. Same conflict gate as the debounce, so the
   // flush can never bypass the bar's "keep mine or reload" choice.
-  const flushSave = useCreateFlush(persist, !conflict && !revisionConflict)
+  const flushSave = useCreateFlush(persist, workspaceStartup.ready && !conflict && !revisionConflict)
   /** Ask for that flush. A no-op during a programmatic load, mirroring `markDirty`. */
   const requestSaveFlush = useCallback(() => {
     if (!loadingRef.current) flushSave()
@@ -12380,6 +12371,7 @@ export function Canvas() {
 
         <PresenceNamePrompt />
 
+        <WorkspaceStartupGate {...workspaceStartup}>
         {(!hasProjects || welcomeOpen) && (
           <WelcomeScreen
             onNewProject={() => {
@@ -12409,6 +12401,8 @@ export function Canvas() {
             overBoard={kanbanOpen}
           />
         )}
+
+        </WorkspaceStartupGate>
 
         <CloneRepoDialog
           open={cloneDialogOpen}

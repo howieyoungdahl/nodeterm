@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { renameAtomic } from './fs-atomic'
+import { scheduleRecoveryRetention } from './project-recovery-retention'
 import { publicationFence, assertPublicationAdmission, withPublicationAdmissionFence } from './workspace-publication-platform'
 import { reconcileProjectDocuments, type ProjectDocument, type ProjectMerge } from '../shared/project-reconciliation'
 
@@ -245,7 +246,7 @@ export class ProjectCommitStore {
     return publicationRead(this.file, () => this.observeUnlocked())
   }
 
-  private async observeUnlocked(): Promise<FileRevision> {
+  private async observeUnlocked(deleted?: Tombstones): Promise<FileRevision> {
     if (!(await fs.lstat(this.file)).isFile()) throw new Error('E_REGULAR_FILE_REQUIRED')
     const raw = await fs.readFile(this.file, 'utf8')
     jsonObject(raw)
@@ -254,13 +255,15 @@ export class ProjectCommitStore {
     const metadata = jsonObject(raw)._reconciliation
     if (metadata !== undefined && (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || metadata.version !== 1))
       throw new Error('E_UNSUPPORTED_RECONCILIATION_METADATA: exact bytes retained without rewriting')
-    const deleted = await this.retainedDeleted()
+    deleted ??= await this.retainedDeleted()
     // Import portable evidence before returning a base. A later raw old-file replacement may
     // erase its embedded metadata, but cannot erase what this host already learned.
     const portable = tombstones(jsonObject(raw))
     for (const key of collections) for (const id of portable[key]) {
-      await this.durable(path.join(this.recovery, 'tombstones', key, `${revisionOf(id)}.json`), JSON.stringify({ id }))
-      if (!deleted[key].includes(id)) deleted[key].push(id)
+      if (!deleted[key].includes(id)) {
+        await this.durable(path.join(this.recovery, 'tombstones', key, `${revisionOf(id)}.json`), JSON.stringify({ id }))
+        deleted[key].push(id)
+      }
     }
     if (collections.some((key) => ids(jsonObject(raw), key).some((id) => deleted[key].includes(id))))
       throw new Error('E_DELETED_ID_REPLAY: incoming bytes are retained but cannot become a new base')
@@ -273,10 +276,15 @@ export class ProjectCommitStore {
       const dir = path.join(this.recovery, 'tombstones', key)
       let files: string[]
       try { files = await fs.readdir(dir) } catch (error) { if (errorCode(error) === 'ENOENT') continue; throw error }
-      for (const file of files) {
-        const value = JSON.parse(await fs.readFile(path.join(dir, file), 'utf8'))
-        if (typeof value.id !== 'string' || file !== `${revisionOf(value.id)}.json`) throw new Error('Invalid tombstone evidence')
-        deleted[key].push(value.id)
+      // Bound I/O concurrency; serialized reads of thousands of immutable tombstones also
+      // stalled ordinary publications, even after removing their redundant fsyncs.
+      for (let offset = 0; offset < files.length; offset += 32) {
+        const ids = await Promise.all(files.slice(offset, offset + 32).map(async file => {
+          const value = JSON.parse(await fs.readFile(path.join(dir, file), 'utf8'))
+          if (typeof value.id !== 'string' || file !== `${revisionOf(value.id)}.json`) throw new Error('Invalid tombstone evidence')
+          return value.id as string
+        }))
+        deleted[key].push(...ids)
       }
     }
     return deleted
@@ -288,6 +296,11 @@ export class ProjectCommitStore {
       const raw = await fs.readFile(path.join(this.recovery, 'versions', `${revision}.json`), 'utf8')
       return revisionOf(raw) === revision ? raw : undefined
     } catch { return undefined }
+  }
+
+  private async expiredOperation(op: string): Promise<boolean> {
+    try { await fs.lstat(path.join(op, 'expired.json')); return true }
+    catch (error) { if (errorCode(error) === 'ENOENT') return false; throw error }
   }
 
   async receipt(clientId: string, operationId: string): Promise<FileCommitResult | undefined> {
@@ -314,6 +327,7 @@ export class ProjectCommitStore {
     const requestRaw = JSON.stringify(request)
     const result = (kind: FileCommitResult['kind'], extra: Partial<FileCommitResult> = {}): FileCommitResult =>
       ({ kind, recovery: op, ...extra })
+    if (await this.expiredOperation(op)) return result('stale-base', { message: 'Operation history expired. Reload and use a new operation ID.' })
     try { await assertPublicationAdmission(this.file) }
     catch (error) { return result('busy', { message: String(error) }) }
     for (const parent of [path.dirname(this.file), path.dirname(this.recovery), this.recovery]) {
@@ -356,6 +370,7 @@ export class ProjectCommitStore {
     await fs.mkdir(lock)
     let published = false
     try {
+      if (await this.expiredOperation(op)) return result('stale-base', { message: 'Operation history expired. Reload and use a new operation ID.' })
       await this.durable(path.join(op, 'request.json'), requestRaw)
       await this.durable(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, operation: path.basename(op) }))
       // Persist the lock's name before any publication phase. Syncing owner.json and the
@@ -431,6 +446,7 @@ export class ProjectCommitStore {
     const requestRaw = JSON.stringify(request)
     const result = (kind: FileCommitResult['kind'], extra: Partial<FileCommitResult> = {}): FileCommitResult =>
       ({ kind, recovery: op, ...extra })
+    if (await this.expiredOperation(op)) return result('stale-base', { message: 'Operation history expired. Reload and use a new operation ID.' })
     try { await assertPublicationAdmission(this.file) }
     catch (error) { return result('busy', { message: String(error) }) }
     try { await this.directory(op) }
@@ -456,12 +472,14 @@ export class ProjectCommitStore {
     const displacedFile = path.join(op, 'displaced.json')
     try {
       // Preserve the submitted bytes even when its base is unknown or its revision has expired.
+      if (await this.expiredOperation(op)) return result('stale-base', { message: 'Operation history expired. Reload and use a new operation ID.' })
       await this.durable(path.join(op, 'request.json'), requestRaw)
       await this.durable(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, operation: path.basename(op) }))
       await this.syncDirectory(this.recovery)
       const baseRaw = await this.known(request.expectedRevision)
       if (!baseRaw) return await this.finish(op, result('stale-base', { message: 'The exact acknowledged base is not retained.' }))
-      const current = await this.observeUnlocked()
+      const retained = await this.retainedDeleted()
+      const current = await this.observeUnlocked(retained)
       if (conditional && !conditional.mergeRetainedBase && current.revision !== request.expectedRevision)
         return await this.finish(op, result('publication-refused', { current, message: 'stale-revision' }))
       const check = async (): Promise<void> => {
@@ -473,7 +491,6 @@ export class ProjectCommitStore {
       if (base.id !== incoming.id || (!conditional?.allowLegacyIdentityChange && base.id !== local.id))
         return await this.finish(op, result('conflict', { current, message: 'Project file identity changed; explicit re-enrollment is required.' }))
       const deleted = tombstones(incoming)
-      const retained = await this.retainedDeleted()
       for (const key of collections) deleted[key] = [...new Set([...deleted[key], ...retained[key]])]
       if (base.version === 3 && collections.some(key => ids(local, key).some(id => deleted[key].includes(id))))
         return await this.finish(op, result('conflict', { current, message: 'Inline canvas replays a retained deleted entity.' }))
@@ -542,7 +559,7 @@ export class ProjectCommitStore {
           'The destination changed after publication. The operation and displaced file remain recoverable.' }))
       }
       const committed = { revision: revisionOf(candidate), raw: candidate }
-      for (const key of collections) for (const id of deleted[key])
+      for (const key of collections) for (const id of deleted[key].filter(id => !retained[key].includes(id)))
         await this.durable(path.join(this.recovery, 'tombstones', key, `${revisionOf(id)}.json`), JSON.stringify({ id }))
       await this.durable(path.join(this.recovery, 'versions', `${committed.revision}.json`), candidate)
       const receipt = await this.finish(op, result('committed', { current: committed }))
@@ -577,6 +594,8 @@ export class ProjectCommitStore {
 
   private async finish(op: string, result: FileCommitResult): Promise<FileCommitResult> {
     await this.durable(path.join(op, 'receipt.json'), JSON.stringify(result))
+    // A read-only coordinator must not enroll a file in destructive maintenance.
+    if (result.kind === 'committed') scheduleRecoveryRetention(this.file)
     return result
   }
 }

@@ -179,6 +179,16 @@ adding terminal-session features, extend the interface — do not reach around i
 
 ## State & persistence model
 
+Recovery history maintenance is asynchronous and bounded. Versions keep a seven-day window, a
+200-version floor and the current published revision; only older completed operations expire.
+Tombstones, interrupted operations and unconfirmed evidence remain permanent. Never reintroduce
+full-history tombstone writes into a save. Initial renderer reads must show loading, retry failures
+and suppress saves until hydration succeeds. Policy, risks and the private-copy Server benchmark:
+`docs/recovery-retention.md`.
+Completed operation payload cleanup retains permanent expired-key markers. Never remove those
+markers or reuse their operation IDs. Native Windows defers operation cleanup until directory
+durability is available; version retention still applies.
+
 Automatic worker layout triggers are retired. Only an explicit `organize` request can reach
 the layout service; the renderer previews it and applies after confirmation. Existing
 `canvasLayout.enabled` settings enable that manual command, never background sorting.
