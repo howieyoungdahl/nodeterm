@@ -8569,6 +8569,18 @@ export function Canvas() {
         })
         return
       }
+      // `--sandbox` is Server-only for the same reason, and the stakes are higher: ignoring it
+      // would open a sandboxed Codex session for a caller that asked for a different filesystem
+      // policy and believes it got one.
+      if (args.sandbox !== undefined) {
+        reply({
+          ok: false,
+          error:
+            'sandbox-server-only: open-agent --sandbox is available from Server Edition canvas ' +
+            'control; on desktop the Codex session uses its own configured sandbox'
+        })
+        return
+      }
 
       // ── `--project` targeted opens (issue #338 Task 2.3) — the three open verbs, early ──────
       // Main's gateProjectTarget already enforced own-or-granted BEFORE forwarding (spec §3):

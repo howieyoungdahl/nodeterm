@@ -214,6 +214,9 @@ export function parseControlRequest(
   if (args['remote-control'] !== undefined && (v !== 'open-agent' || args.agent !== 'claude')) {
     return { error: '--remote-control is supported only by open-agent --agent claude' }
   }
+  if (args.sandbox !== undefined && (v !== 'open-agent' || args.agent !== 'codex')) {
+    return { error: '--sandbox is supported only by open-agent --agent codex' }
+  }
   if (
     (v === 'open-agent' || v === 'open-claude') &&
     args.size !== undefined &&
@@ -327,7 +330,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
     '- `open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
-    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--remote-control[=NAME]] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--remote-control[=NAME]] [--title T] [--sandbox MODE] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
     '  any agent CLI. Canvas-control agent nodes default to `compact` (440×320, half the stock',
     '  640×440 footprint); pass `--size normal` to use the configured manual-open size instead.',
     '  Manual UI opens remain normal-sized. Every node you open is marked a WORKER and is titled',
@@ -368,6 +371,21 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  the launch flag only when the installed Claude CLI advertises support; otherwise it refuses',
     '  before creating a node. Desktop control refuses this Server-only option. In either case,',
     '  open Claude normally and run `/rc [name]` inside the session as the manual fallback.',
+    '  Server Edition requires a creation envelope on every `open-terminal` and `open-agent`:',
+    '  `--task-id <id> --creation-id <key> --owner <name> --workstream <slug> --functional-role <slug>',
+    '  --organization-project <projectId>`. `--organization-project` is the canvas project the card',
+    '  opens in (yours, or the `--project` target); ids and keys are 8-128 of `A-Za-z0-9._-`. Without',
+    '  it the open is refused with `assistant_creation_requires_task_owner_organization_and_exact_creation_key`.',
+    '  Use a fresh `--creation-id` per creation: a reused key is refused with',
+    '  `assistant_creation_receipt_exists_inspect_do_not_repeat`, so run `list` instead of repeating.',
+    '  `--title T` (Server Edition) names the card yourself instead of the `<your name> · <agent>`',
+    '  default, and the session will not rename it; with `--count N` each card gets ` 1`..` N`.',
+    '  `--sandbox read-only|workspace-write|danger-full-access` (Server Edition, `--agent codex`',
+    '  only) sets the Codex filesystem sandbox the thread starts with. Without it Codex uses its',
+    '  own configuration, and a repository `.codex/config.toml` overrides your user config: a',
+    '  repo that sets `workspace-write` gives the worker a read-only `.git` and no network even when',
+    '  the permission mode is "Bypass all", which skips approvals only. Pass `--sandbox` when the',
+    '  worker must commit, push or reach the network. Desktop control refuses this option.',
     '- `open-project --cwd </abs/path> [--name N] [--color C]` — register (or find) the project for a',
     '  local directory; the reply carries `{ projectId, name, cwd, created }`. Idempotent: the same',
     '  cwd always returns the same project, never a duplicate. Creating/adding asks the user to',
@@ -804,7 +822,7 @@ Verbs:
   is also what to run when you are unsure whether the control endpoint is alive.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]\` — open N plain terminals (default 1).
 - \`open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--remote-control[=NAME]] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--size compact|normal] [--remote-control[=NAME]] [--title T] [--sandbox MODE] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
   Canvas-control agent nodes default to \`compact\` (440×320, exactly half the stock 640×440
   footprint). Pass \`--size normal\` to use the configured manual-open dimensions instead. Nodes
   opened manually in the UI remain normal-sized.
@@ -862,6 +880,21 @@ Verbs:
   the launch flag only when the installed Claude CLI advertises support; otherwise it refuses
   before creating a node. Desktop control refuses this Server-only option. In either case, open
   Claude normally and run \`/rc [name]\` inside the session as the manual fallback.
+  Server Edition requires a creation envelope on every \`open-terminal\` and \`open-agent\`:
+  \`--task-id <id> --creation-id <key> --owner <name> --workstream <slug> --functional-role <slug>
+  --organization-project <projectId>\`. \`--organization-project\` is the canvas project the card
+  opens in (yours, or the \`--project\` target); ids and keys are 8-128 of \`A-Za-z0-9._-\`. Without
+  it the open is refused with \`assistant_creation_requires_task_owner_organization_and_exact_creation_key\`.
+  Use a fresh \`--creation-id\` per creation: a reused key is refused with
+  \`assistant_creation_receipt_exists_inspect_do_not_repeat\`, so run \`list\` instead of repeating.
+  \`--title T\` (Server Edition) names the card yourself instead of the \`<your name> · <agent>\`
+  default, and the session will not rename it; with \`--count N\` each card gets \` 1\`..\` N\`.
+  \`--sandbox read-only|workspace-write|danger-full-access\` (Server Edition, \`--agent codex\` only)
+  sets the Codex filesystem sandbox the thread starts with. Without it Codex uses its own
+  configuration, and a repository \`.codex/config.toml\` overrides your user config: a repo that
+  sets \`workspace-write\` gives the worker a read-only \`.git\` and no network even when the
+  permission mode is "Bypass all", which skips approvals only. Pass \`--sandbox\` when the worker
+  must commit, push or reach the network. Desktop control refuses this option.
 - \`open-project --cwd </abs/path> [--name N] [--color C]\` — register (or find) the project for a
   local directory; the reply carries \`{ projectId, name, cwd, created }\`. Idempotent: the same
   cwd always returns the same project, never a duplicate — and \`--name\`/\`--color\` apply only
