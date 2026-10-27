@@ -413,7 +413,7 @@ export function hostMemReader(platform: NodeJS.Platform = process.platform): () 
 }
 
 export interface SessionReaperOpts {
-  /** Presentation archives retain their original backend. An unreadable ledger protects all. */
+  /** Saved cards retain their backend, including ordinary and closed-project cards. An unreadable workspace protects all. */
   protectedSessions?: (socket: string) => Promise<Iterable<string>>
   /** An archive and a reaper kill cannot hold the same session-scoped lease. */
   reserveKill?: (socket: string, name: string) => (() => void | Promise<void>) | null | Promise<(() => void | Promise<void>) | null>

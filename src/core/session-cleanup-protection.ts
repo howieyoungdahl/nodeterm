@@ -3,12 +3,12 @@ import path from 'node:path'
 import { sessionName } from './tmux-naming'
 import { FileCleanupReservations } from './session-cleanup-reservations'
 
-/** Both runtime compositions consume exactly these fail-closed guards. */
+/** Both runtime compositions protect every saved card, including closed projects and exited agents. */
 export function cleanupReaperGuards(dataDir: string, leases = new FileCleanupReservations(),
   extraNodeIds: () => Promise<string[]> = async () => []) {
   return {
     reserveKill: (socket: string, name: string) => leases.reserve([name], socket),
-    protectedSessions: async () => [...await readCleanupProtection(path.join(dataDir, 'workspace.json')),
+    protectedSessions: async () => [...await readCleanupProtection(path.join(dataDir, 'workspace.json'), true),
       ...(await extraNodeIds()).map(sessionName)]
   }
 }
@@ -16,7 +16,7 @@ export function cleanupReaperGuards(dataDir: string, leases = new FileCleanupRes
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 /** Raw read, never a WorkspaceStore fallback to empty. Missing, corrupt or publishing metadata
  * freezes reaping. Checking both bytes and PR30's writer lock fences observed publication races. */
-export async function readCleanupProtection(indexPath: string): Promise<string[]> {
+export async function readCleanupProtection(indexPath: string, allSavedCards = false): Promise<string[]> {
   const read = async (file: string): Promise<Record<string, unknown>> => {
     const lock = path.join(path.dirname(file), '.recovery', path.basename(file), 'writer.lock')
     const unlocked = async () => {
@@ -37,7 +37,7 @@ export async function readCleanupProtection(indexPath: string): Promise<string[]
     for (const node of project.nodes) {
       if (!object(node) || typeof node.id !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(node.id))
         throw new Error('cleanup-protection-invalid-node')
-      if (node.cleanupArchiveId) names.add(sessionName(node.id))
+      if (allSavedCards || node.cleanupArchiveId) names.add(sessionName(node.id))
     }
   }
   if (index.version === 2 && Array.isArray(index.projects)) {

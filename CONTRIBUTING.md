@@ -422,6 +422,12 @@ the original expiry unchanged. Server session presence must include detached tmu
 that probe runs only after the free permission/status checks. Test fixtures disable agent-hook
 and instruction installation; temporary test paths must never reach live provider homes.
 
+## Saved cards and session cleanup
+
+The session budget may reap only orphaned backends. Every card in a saved project, including
+closed projects, protects its session. Both runtime compositions use raw workspace reads through
+`cleanupReaperGuards`; missing, corrupt or publishing metadata must stop reaping.
+
 ## Testing
 
 Project recovery retention never expires deletion tombstones or unfinished operations. Keep its
