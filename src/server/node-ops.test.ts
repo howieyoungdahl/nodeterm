@@ -45,6 +45,7 @@ function harness(opts: {
   listSessions?: () => Promise<string[]>
   protectedIds?: () => Promise<string[]>
   liveProtectedIds?: () => readonly string[]
+  sessionIdOf?: (nodeId: string) => string | undefined
   remote?: boolean
   destroyError?: Error
   massLimit?: DeadCardMassLimit
@@ -81,6 +82,7 @@ function harness(opts: {
   let saves = 0
   const removed: string[] = []
   const destroyed: string[] = []
+  const retainedExited: string[] = []
   const probes: string[] = []
   const warnings: string[] = []
   const ownership = createHeadlessNodeOwnership()
@@ -118,6 +120,8 @@ function harness(opts: {
       if (opts.destroyError) throw opts.destroyError
     },
     statusOf: (id) => opts.status?.[id],
+    sessionIdOf: opts.sessionIdOf,
+    protectAdopted: async (ids) => { retainedExited.push(...ids) },
     ownerOf: (id) => ownership.ownerOf(id),
     recordOwnership: (id, owner) => ownership.record(id, owner),
     ...(opts.noCreateSession
@@ -144,6 +148,7 @@ function harness(opts: {
   })
   return {
     service,
+    retainedExited,
     create: (input: Parameters<ServerNodeOps['create']>[0]) => {
       const projectId = input.projectId ?? 'p1', key = randomUUID(), owner = 'Declared test task owner'
       return service.create({ projectId, organization: { owner, projectId, workstream: 'fixture', functionalRole: 'ops' },
@@ -236,9 +241,7 @@ describe('ServerNodeOps', () => {
     await h.service.sweep(false)
     expect((await h.service.sweep(false)).affectedIds).toEqual(['worker'])
     expect(h.workspace().projects[0].nodes.map(n => n.id)).toEqual(['human', 'unknown', 'director', 'live'])
-    expect(h.probes).not.toContain('human')
-    expect(h.probes).not.toContain('unknown')
-    expect(h.probes).not.toContain('director')
+    expect(h.retainedExited).toEqual(['human', 'unknown', 'director', 'human', 'unknown', 'director'])
     expect(h.destroyed).toEqual([])
   })
 
@@ -750,6 +753,35 @@ describe('bounded confirmed backlog cleanup', () => {
       } })
     await h.service.sweep(false)
     expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(h.saves()).toBe(0)
+  })
+  it('keeps a resumable card after its backend exits across automatic sweep passes', async () => {
+    const h = harness({ nodes: [node('resumable', 'terminal', { agentId: 'claude', agentSessionId: 'saved-session' }), node('live')], pane: { live: true } })
+    await h.service.sweep(false)
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(h.workspace().projects[0].nodes.map(n => n.id)).toContain('resumable')
+    expect(h.saves()).toBe(0)
+  })
+  it('keeps a mirror-known resumable card even when its saved session field is absent', async () => {
+    const h = harness({ nodes: [node('resumable'), node('live')], pane: { live: true },
+      sessionIdOf: id => id === 'resumable' ? 'hook-session' : undefined })
+    await h.service.sweep(false)
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(h.retainedExited).toEqual(['resumable', 'resumable'])
+    expect(h.destroyed).toEqual([])
+  })
+  it('keeps a resumable session discovered during the last backend generation probe', async () => {
+    let reads = 0, session: string | undefined
+    const h = harness({ nodes: [node('resumable'), node('live')], pane: { live: true },
+      sessionIdOf: id => id === 'resumable' ? session : undefined,
+      generation: async () => {
+        if (++reads === 3) session = 'just-observed-session'
+        return 'one'
+      } })
+    await h.service.sweep(false)
+    expect((await h.service.sweep(false)).affectedIds).toEqual([])
+    expect(reads).toBe(3)
+    expect(h.workspace().projects[0].nodes.map(n => n.id)).toContain('resumable')
     expect(h.saves()).toBe(0)
   })
   it('retains working and blocked cards despite absent backends', async () => {

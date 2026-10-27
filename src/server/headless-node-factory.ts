@@ -88,9 +88,8 @@ export interface HeadlessPty {
   /** Strict recovery probe. Only `alive` may restore a card missing from the workspace. */
   sessionPresence?(persistKey: string): Promise<'alive' | 'dead' | 'unknown'>
   /**
-   * Does a UI client still hold this node's pane? A card an attached client holds is on that
-   * client's canvas and will be persisted by that client's own save, so recovery must leave it
-   * alone. Optional: an unwired seam means "unknown", which keeps the pre-existing behaviour.
+   * Does a UI client still hold this node's pane? Give its save a short head start before
+   * publishing original observed presentation through the serialized recovery path.
    */
   hasAttachedClient?(persistKey: string): boolean
   sendText(nodeId: string, text: string, opts?: { enter?: boolean }): Promise<boolean>
@@ -767,6 +766,7 @@ export class HeadlessNodeFactory {
   private runtimeNodes = new Map<string, { projectId: string; node: CanvasNodeState; board?: Project['kanban'] }>()
   /** Bounded browser presentation cache. Never supplies creator or pane/project authority. */
   private clientNodes = new Map<string, { projectId: string; senderId: number; node: CanvasNodeState; absolutePosition: { x: number; y: number }; board?: Project['kanban'] }>()
+  private clientRecoveryTimer?: ReturnType<typeof setTimeout>
   /** Keep the missing-card recovery warning to one line once per source. */
   private warnedRecoveredSources = new Set<string>()
   /** Nodes already noted as "open in an attached client, not yet saved" — its own set, so a later
@@ -860,10 +860,23 @@ export class HeadlessNodeFactory {
   private runtimeAgentId = (nodeId: string): string | undefined =>
     this.runtimeAgents.get(nodeId) ?? this.deps.agentIdOf?.(nodeId)
 
-  private recoveryBoard(project: Project, nodeId: string): Project['kanban'] {
+  private recoveryBoard(project: Project, nodeId: string): Project['kanban'] | null {
     const board = project.kanban
-    if (!board) return undefined
-    return structuredClone({ columns: [], assignments: Array.isArray(board.assignments) ? board.assignments.filter(a => a.nodeId === nodeId) : [],
+    if (board === undefined) return undefined
+    if (!board || !Array.isArray(board.columns) || !Array.isArray(board.assignments)) return null
+    const columns = new Set<string>(), assigned = new Set<string>()
+    for (const c of board.columns) {
+      if (!c || typeof c.id !== 'string' || !c.id.trim() || columns.has(c.id) ||
+          typeof c.title !== 'string' || !c.title.trim()) return null
+      columns.add(c.id)
+    }
+    for (const a of board.assignments) {
+      if (!a || typeof a.nodeId !== 'string' || !a.nodeId.trim() || assigned.has(a.nodeId) ||
+          typeof a.columnId !== 'string' || !columns.has(a.columnId)) return null
+      assigned.add(a.nodeId)
+    }
+    const assignments = board.assignments.filter(a => a.nodeId === nodeId)
+    return structuredClone({ columns: board.columns.filter(c => assignments.some(a => a.columnId === c.id)), assignments,
       meta: Array.isArray(board.meta) ? board.meta.filter(m => m.nodeId === nodeId) : undefined,
       manualAssignments: board.manualAssignments?.[nodeId] ? { [nodeId]: true as const } : undefined,
       manualAssignmentVersions: board.manualAssignmentVersions?.[nodeId] ? { [nodeId]: board.manualAssignmentVersions[nodeId] } : undefined })
@@ -871,7 +884,9 @@ export class HeadlessNodeFactory {
 
   private rememberRuntimeNode(project: Project, node: CanvasNodeState): void {
     if (node.kind !== 'terminal') return
-    this.runtimeNodes.set(node.id, { projectId: project.id, node: structuredClone(node), board: this.recoveryBoard(project, node.id) })
+    const board = this.recoveryBoard(project, node.id)
+    if (board === null) { this.runtimeNodes.delete(node.id); return }
+    this.runtimeNodes.set(node.id, { projectId: project.id, node: structuredClone(node), board })
   }
 
   /** A refused whole-workspace save still tells us how the user placed/named a fresh card.
@@ -882,6 +897,8 @@ export class HeadlessNodeFactory {
       if (!project || project.ssh || !Array.isArray(project.nodes)) continue
       const byId = new Map(project.nodes.filter(n => n && isCanvasMutation({ op: 'upsert', node: n })).map(n => [n.id, n]))
       for (const node of byId.values()) {
+        const board = this.recoveryBoard(project, node.id)
+        if (board === null) continue
         if (node.kind !== 'terminal' || this.deps.paneProjectOf?.(node.id) !== project.id ||
           typeof node.title !== 'string' || typeof node.color !== 'string' ||
           !node.size || !Number.isFinite(node.size.width) || !Number.isFinite(node.size.height)) continue
@@ -913,8 +930,24 @@ export class HeadlessNodeFactory {
         }
         this.clientNodes.delete(node.id)
         if (this.clientNodes.size >= 1024) this.clientNodes.delete(this.clientNodes.keys().next().value!)
-        this.clientNodes.set(node.id, { projectId: project.id, senderId: source.senderId, node: presentation, absolutePosition, board: this.recoveryBoard(project, node.id) })
+        this.clientNodes.set(node.id, { projectId: project.id, senderId: source.senderId, node: presentation, absolutePosition, board })
       }
+    }
+    // Do not let repeated refused saves reset the deadline. Quiet shells need this path too:
+    // their current-run pane provenance supplies identity without an agent hook.
+    if (this.clientNodes.size && this.clientRecoveryTimer === undefined) {
+      this.clientRecoveryTimer = (this.deps.schedule ?? setTimeout)(() => {
+        this.clientRecoveryTimer = undefined
+        void this.runExclusive('client-card-recovery', async () => {
+          if (this.stopped) return
+          const current = await this.deps.workspaceStore.load({ sideline: false })
+          for (const [nodeId] of this.clientNodes) {
+            if (sourceProjects(current, nodeId).length) continue
+            await this.recoverMissingSource(current, nodeId, this.runtimeAgentId(nodeId) as AgentId | undefined, true)
+          }
+        }).catch(error => console.warn('[server-canvas-control] could not persist observed browser cards', error))
+      }, 10_000) as ReturnType<typeof setTimeout>
+      this.clientRecoveryTimer?.unref?.()
     }
   }
 
@@ -951,23 +984,22 @@ export class HeadlessNodeFactory {
   }
 
   /**
-   * Recover the one safe missing-card shape: this process saw a verified hook from the node, the
-   * pane still exists, and the fresh-spawn provenance ledger names one loaded local project. The
+   * Recover only with original observed presentation, a live pane, and current-run spawn
+   * provenance naming one loaded local project. Hooks can also request this recovery. The
    * project file alone can prove none of those facts, so it never participates in this decision.
    *
-   * A card is only recoverable when no attached UI client can still save it. A pane with a live
-   * subscriber has a card on that client's canvas, and that client's debounced whole-file save
-   * will persist it; minting a replacement mid-race relocated and renamed cards the user had just
-   * created. `'attached'` reports that skip so callers can say so without re-probing.
+   * Give attached clients ten seconds to save. After that, original observed presentation can
+   * be published without minting a replacement identity, title or board placement.
    */
   private async recoverMissingSource(
     workspace: Workspace,
     nodeId: string,
-    agentId: AgentId
+    agentId?: AgentId,
+    allowAttached = false
   ): Promise<{ project: Project; node: CanvasNodeState } | 'attached' | null> {
     // Before anything is built, including the remembered-runtime-node branch: a live tab's state
     // beats any memory of ours.
-    if (this.deps.ptyManager.hasAttachedClient?.(nodeId)) {
+    if (!allowAttached && this.deps.ptyManager.hasAttachedClient?.(nodeId)) {
       if (!this.notedUnsavedSources.has(nodeId)) {
         this.notedUnsavedSources.add(nodeId)
         console.info(
@@ -993,6 +1025,7 @@ export class HeadlessNodeFactory {
     if (!prior) return null
     const board = prior.board
     const assignment = board?.assignments.find(a => a.nodeId === nodeId)
+    if (!project.kanban && board?.columns.length) project.kanban = { columns: structuredClone(board.columns), assignments: [] }
     const hasCurrentPlacement = !!project.kanban?.manualAssignments?.[nodeId] ||
       !!project.kanban?.assignments.some(a => a.nodeId === nodeId)
     if (assignment && !hasCurrentPlacement && project.kanban?.columns.filter(c => c.id === assignment.columnId).length !== 1) return null
@@ -1030,7 +1063,7 @@ export class HeadlessNodeFactory {
       }
     }
     project.nodes.push(node)
-    this.handLaunchedNodes.add(nodeId)
+    if (agentId) this.handLaunchedNodes.add(nodeId)
     await this.deps.workspaceStore.save(workspace)
     this.publish(project, [node])
     if (!this.warnedRecoveredSources.has(nodeId)) {
@@ -2788,6 +2821,8 @@ export class HeadlessNodeFactory {
    */
   stop(): void {
     this.stopped = true
+    if (this.clientRecoveryTimer !== undefined) (this.deps.clearSchedule ?? clearTimeout)(this.clientRecoveryTimer)
+    this.clientRecoveryTimer = undefined
     for (const id of this.launchesInFlight) this.cancelledLaunches.add(id)
     for (const timer of this.retryTimers.values()) (this.deps.clearSchedule ?? clearTimeout)(timer)
     this.retryTimers.clear()

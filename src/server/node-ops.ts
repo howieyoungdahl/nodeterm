@@ -145,6 +145,7 @@ export interface ServerNodeOpsDeps {
   sessionPresence(nodeId: string): Promise<Exclude<OpsPaneState, 'none'>>
   destroySession(nodeId: string): Promise<void>
   statusOf(nodeId: string): { state?: AgentState; updatedAt: number } | undefined
+  sessionIdOf?(nodeId: string): string | undefined
   ownerOf(nodeId: string): { sourceNodeId: string; projectId?: string; assistantCreationId?: string } | undefined
   /** Stamp the durable ownership ledger for a node `create()` just persisted. Absent = ownership is
    *  never recorded and the node reads back as not operator-created (fails closed). */
@@ -519,6 +520,7 @@ export class ServerNodeOps {
   /** Automatic cleanup cannot infer human permission from a dead backend. Unknown creators
    * remain human work; only positively attested assistant-created cards may be reaped. */
   private protectedFromAutomaticSweep(project: Project, node: CanvasNodeState): boolean {
+    if (node.agentSessionId?.trim() || this.deps.sessionIdOf?.(node.id)?.trim()) return true
     const owner = this.deps.ownerOf(node.id)
     if (!owner || owner.sourceNodeId === OPS_OPERATOR_SOURCE_ID && !owner.assistantCreationId) return true
     const columnTitle = inventoryColumnTitle(project, node.id)
@@ -536,13 +538,18 @@ export class ServerNodeOps {
       try { generation = await this.deps.backendGeneration?.() ?? null } catch { /* unknown */ }
       const previousDead = generation && generation === this.previousGeneration ? this.previousDead : new Set<string>()
       const deadByProject = new Map<Project, string[]>()
+      const retainedDead: string[] = []
       let scanned = 0
       const protectedCleanupIds = new Set([...(await this.deps.protectedCleanupNodeIds?.() ?? []), ...(this.deps.liveProtectedCleanupNodeIds?.(workspace) ?? [])])
       for (const project of workspace.projects) {
         if (project.ssh) continue
         for (const node of project.nodes) {
-          if (!force && this.protectedFromAutomaticSweep(project, node)) continue
           if (node.kind !== 'terminal' || node.cleanupArchiveId || node.text?.trim() || node.pendingLaunch || ['working', 'blocked'].includes(this.deps.statusOf(node.id)?.state ?? '') || protectedCleanupIds.has(node.id)) continue
+          if (!force && this.protectedFromAutomaticSweep(project, node)) {
+            if (node.kind === 'terminal' && (await this.paneState(project, node)) === 'dead' &&
+                (await this.paneState(project, node)) === 'dead') retainedDead.push(node.id)
+            continue
+          }
           scanned += 1
           // Two definitive misses per pass, plus a separate pass and an apply-boundary recheck. Any read failure
           // becomes `unknown`, never absence, and therefore cannot enter the deletion set.
@@ -554,6 +561,9 @@ export class ServerNodeOps {
         }
       }
       const candidates = [...deadByProject.values()].flat()
+      // Keep the card visible and let attach-only return the existing exited-session state.
+      // This probes again inside PtyManager and never creates or destroys a backend.
+      if (!dryRun && retainedDead.length) await this.deps.protectAdopted?.(retainedDead)
       const mass = deadCardMassRefusal(candidates.length, scanned, this.massLimit)
       // A healthy host must still have a definitely live backend. A whole-server loss is
       // never converted into a deletion list, even if the same failure lasts several ticks.
@@ -614,7 +624,9 @@ export class ServerNodeOps {
       // Hooks can run while the final backend-generation probe awaits. Re-read synchronous
       // activity/loop protection after that last await and before changing any card.
       const liveProtected = new Set(this.deps.liveProtectedCleanupNodeIds?.(workspace) ?? [])
-      if (affectedIds.some(id => liveProtected.has(id) ||
+      const newlyProtected = !force && [...deadByProject].some(([project, ids]) =>
+        ids.some(id => this.protectedFromAutomaticSweep(project, project.nodes.find(n => n.id === id)!)))
+      if (newlyProtected || affectedIds.some(id => liveProtected.has(id) ||
         ['working', 'blocked'].includes(this.deps.statusOf(id)?.state ?? ''))) {
         for (const id of affectedIds) this.previousDead.delete(id)
         return { dryRun, affectedIds: [], scanned, pendingConfirmation: true, remaining: candidates.length }

@@ -414,6 +414,37 @@ describe('HeadlessNodeFactory', () => {
     info.mockRestore()
   })
 
+  it('persists original presentation within ten seconds even while its browser stays attached', async () => {
+    const nodeId = 'term-attached-unsaved'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    pty.attachedClients.add(nodeId)
+    const timers: Array<{ cb: () => void; ms: number }> = []
+    factory.stop()
+    factory = new TaskFixtureFactory({ ...factoryDeps, schedule: (cb, ms) => {
+      timers.push({ cb, ms })
+      return 123 as unknown as ReturnType<typeof setTimeout>
+    }, clearSchedule: () => {} })
+    const snapshot = await store.load({ sideline: false })
+    const card = { ...terminal(nodeId, 'Original operator title'), titleAuto: false }
+    delete card.agentId // A quiet browser shell has no verified agent identity.
+    snapshot.projects[0].nodes.push(card)
+    snapshot.projects[0].kanban = { columns: [{ id: 'directors', title: 'Directors', color: '#888' }],
+      assignments: [{ nodeId, columnId: 'directors' }], manualAssignments: { [nodeId]: true } }
+    factory.observeClientWorkspace(snapshot, { senderId: 12, accepted: false })
+    factory.observeClientWorkspace(snapshot, { senderId: 12, accepted: false })
+    expect(timers).toHaveLength(1)
+    expect(timers[0].ms).toBe(10_000)
+    timers[0].cb()
+    await expect.poll(async () => (await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)).toMatchObject(card)
+    const reloaded = (await store.load({ sideline: false })).projects[0]
+    expect(reloaded.kanban?.assignments).toEqual(snapshot.projects[0].kanban!.assignments)
+    expect(reloaded.kanban?.manualAssignments?.[nodeId]).toBe(true)
+    expect(ownership.ownerOf(nodeId)).toBeUndefined()
+    expect(pty.destroys).toEqual([])
+    expect(pty.attachedClients.has(nodeId)).toBe(true)
+  })
+
   it('recovers browser presentation from a rejected save after its client detaches', async () => {
     const nodeId = 'term-browser-unsaved'
     pty.live.add(nodeId)

@@ -506,6 +506,7 @@ export async function startServer(
         : undefined
     },
     ownerOf: (nodeId) => nodeOwnership.ownerOf(nodeId),
+    sessionIdOf: (nodeId) => mirrorEntry(nodeId)?.sessionId,
     recordOwnership: (nodeId, owner) => nodeOwnership.record(nodeId, owner),
     flushOwnership: () => nodeOwnership.flush(),
     creationReceipts: assistantCreationReceipts,

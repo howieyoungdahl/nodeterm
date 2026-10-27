@@ -1,3 +1,4 @@
+import type { ProjectKanban } from '@shared/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useProjects } from '../state/projects'
 import { canAutoSyncSessionTitle, syncSessionTitle } from './sessionTitleSync'
@@ -64,6 +65,19 @@ describe('automatic session title publication', () => {
     useProjects.setState({ projects: useProjects.getState().projects.map((p) => ({ ...p, kanban: undefined, loadedKanban: undefined })) })
     expect(allowed()).toBe(false)
     useProjects.getState().setProjectKanban('p', { columns: [], assignments: [{ nodeId: 'n', columnId: 'missing' }] })
+    expect(allowed()).toBe(false)
+  })
+  it.each([
+    { columns: [{ id: 'same', title: 'Work' }, { id: 'same', title: 'Directors' }], assignments: [{ nodeId: 'n', columnId: 'same' }] },
+    { columns: [{ id: 'w', title: 'Work' }], assignments: [null] },
+    { columns: [null], assignments: [] },
+    { columns: [{ id: '', title: 'Work' }], assignments: [] },
+    { columns: [{ id: 'w', title: null }], assignments: [] },
+    { columns: [{ id: 'w', title: 'Work' }], assignments: [{ nodeId: 'other', columnId: 'missing' }] },
+    { columns: [{ id: 'w', title: 'Work' }], assignments: [{ nodeId: 'n', columnId: 'w' }, { nodeId: 'n', columnId: 'w' }] },
+    { columns: [{ id: 'w', title: 'Work' }], assignments: [{ nodeId: '', columnId: 'w' }] }
+  ])('fails closed for malformed or ambiguous board %#', (board) => {
+    useProjects.getState().setProjectKanban('p', board as unknown as ProjectKanban)
     expect(allowed()).toBe(false)
   })
   it('allows a loaded absent board and protects explicit manual titles', () => {

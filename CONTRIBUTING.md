@@ -580,7 +580,8 @@ contention into a conflict warning that suspends all future saves.
 Server missing-card recovery remembers presentation from authenticated browser save attempts,
 including rejected ones, only for a pane with current-run project provenance. That cache grants no
 ownership or execution settings. Retained deletions still win; manual titles and geometry survive
-client detachment, and a known session title takes precedence over a generic recovery label.
+client detachment. Recovery preserves the original snapshot title and per-card board intent;
+a mirror session name must not replace them, even when the title previously tracked automatically.
 Only a completed save may switch the presentation's reporting client; a rejected stale peer
 cannot replace another tab's remembered title or position.
 
@@ -615,4 +616,8 @@ Preserve the original title and per-card board assignment, manual intent and met
 a renamed Ungrouped replacement when those originals are unavailable. Boot reports such orphan panes
 as `original-presentation-unavailable` and leaves them running. Explicit authenticated operator adoption
 remains a deliberate generic recovery action. Automatic dead-card sweeps preserve unknown creators,
-human operator cards and cards assigned to Directors, even when the backend is definitively absent.
+human operator cards, Directors cards and cards with a saved or hook-known resumable session.
+Confirmed exited backends use the existing attach-only dead-card state while the card stays visible.
+Observed browser presentation is persisted through the mutation queue after ten seconds even when
+the tab stays attached or no agent hook arrives. Rejected saves never reset that deadline; retained
+deletions, current placement and current-run live pane/project proof still win.

@@ -48,7 +48,7 @@ export class ServerDeadCardReaper {
       if (result.affectedIds.length) {
         const info = this.deps.info ?? console.info
         info(
-          `[nodeterm-server] reaped ${result.affectedIds.length} dead terminal card(s)`
+          `[nodeterm-server] reaped ${result.affectedIds.length} dead terminal card(s): ${result.affectedIds.join(',')} (actor=dead-card-sweep reason=confirmed-absent-backend)`
         )
       }
     } catch (error) {
