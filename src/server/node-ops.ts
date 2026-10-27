@@ -1,3 +1,4 @@
+import { deriveLifecycle, type Lifecycle, type LifecycleInput } from '../core/lifecycle'
 import { operatorArchiveRemoval, type ArchiveRemovalOptions } from '../core/cleanup-raw-preservation'
 import { completeCreationPlanning, creationAdmission, type AssistantCreation } from '../shared/assistant-creation'
 import { parseTaskPlanning, planningAtCreation, type TaskPlanning } from '../shared/task-planning'
@@ -125,6 +126,9 @@ export interface OpsNodeInventoryItem {
   createdAt: number | null
   paneState: OpsPaneState
   agentStatus: OpsAgentStatus
+  lifecycle: Lifecycle
+  provider: string | null
+  sessionId: string | null
   lastActivityAt: number | null
   /** The creator card that owns this spawn for the current server run, when one exists. */
   ownerSession: string | null
@@ -143,6 +147,7 @@ export interface ServerNodeOpsDeps {
   sessionPresence(nodeId: string): Promise<Exclude<OpsPaneState, 'none'>>
   destroySession(nodeId: string): Promise<void>
   statusOf(nodeId: string): { state?: AgentState; updatedAt: number } | undefined
+  lifecycleOf?(nodeId: string, input: LifecycleInput): Promise<Lifecycle>
   ownerOf(nodeId: string): { sourceNodeId: string; projectId?: string; assistantCreationId?: string } | undefined
   /** Stamp the durable ownership ledger for a node `create()` just persisted. Absent = ownership is
    *  never recorded and the node reads back as not operator-created (fails closed). */
@@ -179,7 +184,7 @@ export interface ServerNodeOpsDeps {
   /** Session name → pane cwd (`PtyManager.listNodetermPaneCwds`). */
   listPaneCwds?(): Promise<Map<string, string>>
   /** The agent-status mirror entry for a node id, for the recovered card's title/agent. */
-  mirrorOf?(nodeId: string): OrphanMirrorEntry | undefined
+  mirrorOf?(nodeId: string): (OrphanMirrorEntry & { sessionId?: string }) | undefined
   /**
    * Put the just-adopted ids through the SAME boot classification a persisted card gets
    * (`PtyManager.protectPersistedSessionsAtBoot`). An adopted id was not created during this Server
@@ -474,6 +479,14 @@ export class ServerNodeOps {
           const status = this.deps.statusOf(node.id)
           const owner = this.deps.ownerOf(node.id)
           const origin = owner?.assistantCreationId ? origins.get(owner.assistantCreationId) : undefined
+          const paneState = await this.paneState(project, node)
+          const mirror = this.deps.mirrorOf?.(node.id)
+          const provider = mirror?.agentId ?? node.agentId ?? null
+          const sessionId = mirror?.sessionId ?? node.agentSessionId ?? null
+          const lifecycleInput: LifecycleInput = {
+            paneState, provider, sessionId, isAgent: !!provider, createdAt: createdAtFromNodeId(node.id, this.now())
+          }
+          const lifecycle = this.deps.lifecycleOf ? await this.deps.lifecycleOf(node.id, lifecycleInput) : deriveLifecycle(lifecycleInput, this.now())
           return {
             id: node.id,
             kind: node.kind,
@@ -481,7 +494,10 @@ export class ServerNodeOps {
             projectId: project.id,
             groupId: node.parentId ?? null,
             createdAt: createdAtFromNodeId(node.id, this.now()),
-            paneState: await this.paneState(project, node),
+            paneState,
+            lifecycle,
+            provider: lifecycle.provider,
+            sessionId: lifecycle.sessionId,
             agentStatus: normalizedAgentStatus(status),
             lastActivityAt: status?.updatedAt ?? null,
             ownerSession: this.deps.ownerOf(node.id)?.sourceNodeId ?? null,

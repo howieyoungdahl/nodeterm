@@ -1,3 +1,4 @@
+import type { LifecycleConfig } from '../core/lifecycle'
 import os from 'os'
 import path from 'path'
 import { parseTrustedNets, DEFAULT_TRUSTED_NETS_SPEC, type TrustProxyConfig } from './proxy-trust'
@@ -8,6 +9,8 @@ import { DEFAULT_TMUX_SOCKET, TMUX_SOCKET, resolveTmuxSocketName } from '../core
  * process environment + CLI argv, then consumed by `startServer` (src/server/index.ts).
  */
 export type ServerConfig = {
+  /** Optional native lifecycle TTL/grace override. Environment supplies defaults when absent. */
+  lifecycle?: LifecycleConfig
   port: number
   host: string
   dataDir: string

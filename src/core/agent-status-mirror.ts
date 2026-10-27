@@ -1,3 +1,4 @@
+import { lifecycleEvidence, type LifecycleEvidence } from './lifecycle'
 import fs from 'fs'
 import path from 'path'
 import { writeFileAtomic } from './fs-atomic'
@@ -50,7 +51,7 @@ export interface CodexStatusMetadata {
   context?: { usedTokens: number; windowTokens: number | null; model?: string; updatedAt: number }
 }
 
-export interface MirrorEntry extends CodexStatusMetadata {
+export interface MirrorEntry extends CodexStatusMetadata, LifecycleEvidence {
   /** working/waiting/blocked/done; undefined = idle/unknown (e.g. after a session reset). */
   state?: AgentState
   agentId?: AgentId
@@ -175,7 +176,7 @@ export interface MirrorFile {
   updatedAt: number
   nodes: Record<
     string,
-    {
+    LifecycleEvidence & {
       codexHome?: string
       codexAccountId?: string | null
       lastActivityAt?: number
@@ -415,7 +416,19 @@ export function reduceEntry(
    * caller that means something different has to say so out loud.
    */
   const commitState = (state: AgentState | undefined, proof: boolean): void => {
+    if (next.state !== state) next.stateSince = now
     next.state = state
+    if (state === 'blocked' || state === 'waiting') {
+      const kind = ev.blockedKind ?? (next.awaitingInput ? 'question' : state === 'blocked' ? 'permission' : 'input')
+      if (next.blockedKind !== kind) delete next.blockedDetail
+      if (next.blockedKind !== kind || next.blockedSince === undefined) next.blockedSince = now
+      next.blockedKind = kind
+      if (ev.lastMessage !== undefined) next.blockedDetail = ev.lastMessage.slice(0, 240)
+    } else {
+      delete next.blockedKind
+      delete next.blockedSince
+      delete next.blockedDetail
+    }
     next.updatedAt = now
     next.stateVerified = proof
     if (ev.agentId === 'codex') {
@@ -439,12 +452,24 @@ export function reduceEntry(
   // Identity is captured off ANY event (mirrors the renderer's per-event setSessionId +
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
   if (ev.agentId !== prev?.agentId || (ev.sessionId && ev.sessionId !== prev?.sessionId)) {
+    for (const key of Object.keys(lifecycleEvidence(next)) as (keyof LifecycleEvidence)[]) delete next[key]
     delete next.account
     delete next.codexHome
     delete next.codexAccountId
     delete next.context
     delete next.lastActivityAt
   }
+  next.lastEventAt = now
+  if (ev.newTurn) { next.lastPromptAt = now; delete next.sessionEndedAt }
+  if (ev.sessionPhase === 'start') {
+    next.sessionStartedAt = now
+    delete next.sessionEndedAt
+    delete next.lastDoneAt
+    delete next.lastDoneClean
+    delete next.lastPromptAt
+    delete next.transcriptPath
+  }
+  if (ev.sessionPhase === 'end') next.sessionEndedAt = now
   if (ev.agentId) next.agentId = ev.agentId
   if (ev.agentId === 'codex' && !ev.codexHome) {
     delete next.codexHome
@@ -502,7 +527,13 @@ export function reduceEntry(
     // working did not change the state whose proof this describes. `clientRevision` is ASSIGNED
     // rather than merged — an event with no stamp is a report that this node is running a script
     // that cannot send one, which is exactly what a stale entry would hide.
-    if (!heldOff) commitState(ev.state, ev.verified === true)
+    if (!heldOff) {
+      commitState(ev.state, ev.verified === true)
+      if (ev.state === 'done') {
+        next.lastDoneClean = ev.cleanTurnEnd === true && !ev.idle && !ev.interrupted
+        if (next.lastDoneClean) next.lastDoneAt = now
+      }
+    }
   } else if (ev.kind === 'session') {
     // SessionStart / SessionEnd both reset the node to idle (renderer: setState(id, undefined)).
     // The proof goes with the state it was about, and `false` is passed EXPLICITLY rather than
@@ -573,6 +604,7 @@ export function buildFile(
         context: e.context, stateVerified: e.stateVerified,
         restored: e.restored, idleInferred: e.idleInferred, clientRevision: e.clientRevision
       } : {}),
+      ...lifecycleEvidence(e),
       state: e.state,
       agentId: e.agentId,
       sessionId: e.sessionId,
@@ -1206,6 +1238,9 @@ function loadPersisted(file: string): void {
         const updatedAt = typeof e.updatedAt === 'number' ? e.updatedAt : 0
         if (now - updatedAt > EXPIRE_MS) continue
         state.set(id, {
+          ...lifecycleEvidence(e),
+          codexHome: e.codexHome,
+          codexAccountId: e.codexAccountId,
           state: e.state,
           agentId: e.agentId,
           sessionId: e.sessionId,
@@ -1312,7 +1347,9 @@ export function recordAgentEvent(ev: NormalizedAgentEvent): NormalizedAgentEvent
   const now = Date.now()
   const prev = state.get(nodeId)
   const prevState = prev?.state
-  const next = reduceEntry(prev, ev, now)
+  const question = (ev.state === 'blocked' || ev.state === 'waiting') ? freshStash(nodeId, now) : undefined
+  const next = reduceEntry(prev, question?.options
+    ? { ...ev, blockedKind: 'question', lastMessage: question.question ?? ev.lastMessage } : ev, now)
   state.set(nodeId, next)
   // reduceEntry held an unanswered `request_user_input` through its turn-end `done` — rewrite
   // the broadcast to what the reducer decided, so every consumer (canvas store, notch, phone)
@@ -1326,7 +1363,9 @@ export function recordAgentEvent(ev: NormalizedAgentEvent): NormalizedAgentEvent
   if (!classification) return out
   // Enrich the broadcast event from the SAME classification the inbox used. A question drops
   // pendingId (approve/deny is wrong UX for a picker); an approval keeps ev.pendingId as-is.
-  if (classification.kind === 'question') return { ...out, askKind: 'question', pendingId: undefined }
+  if (classification.kind === 'question') {
+    return { ...out, askKind: 'question', pendingId: undefined }
+  }
   return { ...out, askKind: 'approval' }
 }
 
@@ -1864,7 +1903,7 @@ export function sweepStaleWorking(
   const swept: string[] = []
   for (const [nodeId, e] of state) {
     if (!isStaleWorking(e.state, e.updatedAt, now, staleMs)) continue
-    state.set(nodeId, { ...e, state: 'done', ...(e.agentId === 'codex' ? { stateSource: 'stale', stateVerified: false } : {}) })
+    state.set(nodeId, { ...e, state: 'done', lastDoneClean: false, ...(e.agentId === 'codex' ? { stateSource: 'stale', stateVerified: false } : {}) })
     clearActivity(nodeId, now)
     swept.push(nodeId)
     fireNodeStateChange({
@@ -1980,4 +2019,12 @@ export function _snapshot(): Record<string, MirrorEntry> {
 /** Snapshot the in-memory inbox. Test-only. */
 export function _inboxSnapshot(): MirrorInbox {
   return { events: inboxEvents.map((e) => ({ ...e })), nodes: Object.fromEntries(inboxNodes) }
+}
+
+/** The shell supplies only a verified, jailed path for the exact current session. */
+export function recordLifecycleTranscript(nodeId: string, sessionId: string, transcriptPath: string): void {
+  const entry = state.get(nodeId)
+  if (!entry || entry.sessionId !== sessionId) return
+  entry.transcriptPath = transcriptPath
+  scheduleWrite()
 }

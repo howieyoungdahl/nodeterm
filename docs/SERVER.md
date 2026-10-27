@@ -320,6 +320,74 @@ The v1 contract is deliberately narrow:
   list. Health does not enter the handler queue or await the external launches it observes, so a
   wedged node creation cannot wedge its diagnosis too.
 
+Every inventory row also includes `provider`, `sessionId` (strings or `null`) and
+`lifecycle`. These fields are additive. `agentStatus` and `lastActivityAt` keep their
+existing meanings. Lifecycle is observation, never authorization to message, close,
+archive or resume a session. Archive eligibility retains its separate generation,
+activity and recovery checks.
+
+```json
+{"state":"idle-cold","since":1792011900000,"provider":"codex","sessionId":"thread-id","lastPromptAt":1792011500000,"lastDoneAt":1792011600000,"lastDoneClean":true,"blockedOn":null,"ttlMs":300000,"coldAt":1792011900000}
+```
+
+All times are epoch milliseconds. `since` is the start of the known state, or `null`
+when no transition timestamp is provable. `coldAt = lastDoneAt + ttlMs`; `idle-cold`
+begins at that exact boundary. `lastDoneAt` records clean Claude/Codex Stop events.
+StopFailure, interrupted Stop, idle-prompt rescue, subagent events and tool activity
+do not advance it. `lastPromptAt` records a genuine UserPromptSubmit. A previous
+clean timestamp survives a later failed turn, while `lastDoneClean: false` prevents
+calling that failed turn warm. The mirror persists these clocks and blocked evidence.
+
+| State | Evidence |
+| --- | --- |
+| `starting` | Alive agent card with no SessionStart or first prompt, within the creation grace period. |
+| `blocked` | Live hook blocked/waiting evidence, or a detected prompt in a silent pane. |
+| `working` | Live mirror working, subject to the existing 20 minute stale rescue. |
+| `idle-warm` | Completed turn within its provider TTL. |
+| `idle-cold` | Completed turn at or beyond its provider TTL. |
+| `exited` | Foreground shell or a live SessionEnd event. |
+| `dead` | Pane proven dead or no terminal backend (`paneState: none`). |
+| `unknown` | Evidence cannot establish another state, including unreachable panes or a failed turn. |
+
+`blockedOn` is `null` or `{kind,since,detail}`. Hook kinds are `permission`,
+`question`, `elicitation`, and `input`; detail is bounded to 240 characters. The
+version 1 pane signatures detect `codex-hooks-review`, `codex-dir-trust`,
+`claude-folder-trust`, and `claude-resume-menu` using a modal heading plus numbered
+choices. Detection reads only the current styled pane through the Server's tmux
+access. It never sends keys. Only alive agent cards with undefined hook state or
+working state silent for more than 60 seconds are captured, at most once per node
+per 30 seconds, including concurrent requests. A cached detection can lag pane
+changes by up to 30 seconds; a fresh hook supersedes it immediately. Other prompts
+remain unknown until a hook or a future signature identifies them.
+
+After Server restart, restored mirror state is not live evidence. The newer of a
+persisted clean `lastDoneAt` and a bounded 1 MiB transcript tail supplies the completion
+clock. Claude fallback accepts an assistant without tool-use blocks and requires
+`end_turn` when a stop reason is present (`lastDoneClean: false`); Codex accepts
+`task_complete` (`lastDoneClean: true`). A newer user prompt/task start or incomplete
+Claude assistant prevents transcript completion evidence. Missing, unreadable or
+unresolved transcripts yield `unknown` unless a persisted clean end is available. Paths remain jailed
+to configured provider roots; the old mirror's six hour expiry still applies.
+Fallback never restores verified messaging authority or changes `agentStatus`.
+
+Cards with no mirror entry also use this fallback. Their provider comes from the
+pane's kernel foreground argv through the shared agent predicate, never its title.
+Codex session identity requires one unambiguous HMAC-verified thread binding for
+that node; its signed account scope selects the rollout home. Missing, invalid or
+ambiguous bindings remain `unknown`, without borrowing neighboring rollouts.
+Claude uses the card's saved `agentSessionId`. Silent-pane prompt detection also
+runs for these cards, even before a binding exists. Binding and transcript lookup
+are bounded and cached for at most 30 seconds. This is read-only observation.
+
+Defaults are Claude 45 minutes, Codex and other providers 5 minutes, starting grace
+3 minutes. Configure positive integer milliseconds with
+`NODETERM_LIFECYCLE_CLAUDE_TTL_MS`, `NODETERM_LIFECYCLE_CODEX_TTL_MS`,
+`NODETERM_LIFECYCLE_DEFAULT_TTL_MS`, and `NODETERM_LIFECYCLE_STARTING_GRACE_MS`.
+Invalid values use defaults. Embedded servers can pass
+`ServerConfig.lifecycle = {startingGraceMs, ttlMs:{claude,codex,default}}`.
+Only the Server operator API exposes derived lifecycle in this change. Desktop
+shares the mirror clocks; mobile has no new control contract.
+
 Existing management also supports operator node creation (`POST /opsapi/nodes`) and rename/resize
 (`PATCH /opsapi/nodes/<id>`); these do not grant conversation reads or messaging. A separate,
 operator conversation principal has its own `/opsapi/v1/*` routes for capabilities,
