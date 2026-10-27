@@ -8,6 +8,7 @@ on:
     branches: [main, 'integration/**', 'feat/oct4-operational-release']
   push:
     branches: [main, 'integration/**']
+  workflow_dispatch:
 
 permissions:
   contents: read

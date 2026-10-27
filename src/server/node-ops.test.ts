@@ -6,6 +6,7 @@ import { OrganizationJournal } from './organization-journal'
 import { AssistantCreationReceipts } from './assistant-creation-receipts'
 
 import { afterEach, describe, expect, it } from 'vitest'
+import { WorkspaceMutationQueue } from './workspace-mutation-queue'
 
 import type { AgentState } from '../shared/agents/normalize'
 import type { CanvasNodeState, Project, Workspace } from '../shared/types'
@@ -58,6 +59,8 @@ function harness(opts: {
   }) => Promise<{ sessionId: string; fresh: boolean }>
   sendText?: (nodeId: string, text: string) => Promise<boolean>
   noCreateSession?: boolean
+  mutationQueue?: WorkspaceMutationQueue
+  sessionPresence?: (id: string) => Promise<'alive' | 'dead' | 'unknown'>
 } = {}) {
   let workspace: Workspace = {
     version: 2,
@@ -87,6 +90,8 @@ function harness(opts: {
   const sessionsCreated: string[] = []
   const createSessionCwds: Array<string | undefined> = []
   const sentText: Array<[string, string]> = []
+  const published: string[] = []
+  const removedMutations: Array<[string, string]> = []
   const store: NodeOpsWorkspace = {
     load: async () => structuredClone(workspace),
     save: async (next) => {
@@ -101,16 +106,17 @@ function harness(opts: {
     creationReceipts: new AssistantCreationReceipts(path.join(evidenceDir, 'creations')),
     flushOwnership: async () => {},
     workspaceStore: store,
+    mutationQueue: opts.mutationQueue,
     backendGeneration: opts.generation ?? (async () => "fixture-generation"),
     protectedCleanupNodeIds: opts.protectedIds,
     liveProtectedCleanupNodeIds: opts.liveProtectedIds,
     listSessions: opts.listSessions ?? (async () => Object.entries(opts.pane ?? {}).filter(([, alive]) => alive === true).map(([id]) => `nt-${id}`)),
-    sessionPresence: async (id) => {
+    sessionPresence: opts.sessionPresence ?? (async (id) => {
       probes.push(id)
       const answer = opts.pane?.[id]
       if (answer instanceof Error) throw answer
       return answer ? 'alive' : 'dead'
-    },
+    }),
     destroySession: async (id) => {
       destroyed.push(id)
       if (opts.destroyError) throw opts.destroyError
@@ -136,6 +142,8 @@ function harness(opts: {
         return true
       }),
     onRemoved: (ids) => removed.push(...ids),
+    publishProject: project => published.push(project.id),
+    publishRemoval: (projectId, nodeId) => removedMutations.push([projectId, nodeId]),
     now: () => 1_800_000_000_000,
     ...(opts.massLimit ? { massLimit: opts.massLimit } : {}),
     warn: (message) => warnings.push(message)
@@ -156,7 +164,9 @@ function harness(opts: {
     warnings,
     sessionsCreated,
     createSessionCwds,
-    sentText
+    sentText,
+    published,
+    removedMutations
   }
 }
 
@@ -222,7 +232,9 @@ describe('ServerNodeOps', () => {
     expect(await h.service.sweep(false)).toMatchObject({ affectedIds: [], dryRun: false })
     expect(await h.service.sweep(false)).toMatchObject({ affectedIds: ['dead'], dryRun: false })
     expect(h.workspace().projects[0].nodes.map((n) => n.id)).toEqual(['live', 'unknown', 'note'])
-    expect(h.removed).toEqual(['dead'])
+    expect(h.removed).toEqual(['dead']) // The server wires this to clearNode + forgetNodes.
+    expect(h.published).toEqual(['p1'])
+    expect(h.removedMutations).toEqual([['p1', 'dead']])
     expect(h.probes.filter((id) => id === 'dead')).toHaveLength(7)
   })
 
@@ -900,4 +912,127 @@ describe('ServerNodeOps.adoptOrphans', () => {
     expect(result.adopted).toHaveLength(1)
     expect(result.live).toBe(false)
   })
+})
+
+
+describe('strict dead-only operator removal', () => {
+  it('refuses a live operator-created terminal instead of implicitly forcing it', async () => {
+    const h = harness({ nodes: [node('owned')], pane: { owned: true } })
+    h.ownership.record('owned', { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' })
+    expect(await h.service.removeDead('owned')).toMatchObject({ ok: false, status: 409, error: 'pane_alive' })
+    expect(h.destroyed).toEqual([])
+    expect(h.saves()).toBe(0)
+    expect(h.workspace().projects[0].nodes.map(n => n.id)).toEqual(['owned'])
+  })
+
+  it('removes exactly the confirmed dead card with a non-forced receipt and no backend kill', async () => {
+    const h = harness({ nodes: [node('dead'), node('unrelated')] })
+    h.ownership.record('dead', { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' })
+    expect(await h.service.removeDead('dead')).toEqual({ ok: true, removedIds: ['dead'], forced: false })
+    expect(h.destroyed).toEqual([])
+    expect(h.probes).toEqual(['dead', 'dead'])
+    expect(h.removed).toEqual(['dead'])
+    expect(h.workspace().projects[0].nodes.map(n => n.id)).toEqual(['unrelated'])
+  })
+
+  it('refuses unknown backend or pane evidence without persisting removal', async () => {
+    for (const opts of [
+      { pane: { target: new Error('unreadable') } },
+      { generation: async () => null },
+      { generation: async () => { throw new Error('backend failed') } }
+    ]) {
+      const h = harness({ nodes: [node('target')], ...opts })
+      expect(await h.service.removeDead('target')).toMatchObject({ ok: false, status: 503 })
+      expect(h.destroyed).toEqual([])
+      expect(h.saves()).toBe(0)
+    }
+  })
+
+  it('refuses SSH projects, nonterminals, drafts and protected cards', async () => {
+    for (const opts of [
+      { remote: true }, { nodes: [node('target', 'sticky')] },
+      { nodes: [node('target', 'terminal', { text: 'unsent draft' })] },
+      { protectedIds: async () => ['target'] }
+    ]) {
+      const h = harness({ nodes: [node('target')], ...opts })
+      expect(await h.service.removeDead('target')).toMatchObject({ ok: false, status: 409 })
+      expect(h.destroyed).toEqual([])
+      expect(h.saves()).toBe(0)
+    }
+  })
+
+  it('rechecks a queued deletion after the terminal revives', async () => {
+    const queue = new WorkspaceMutationQueue()
+    let release!: () => void
+    let entered!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const blocker = queue.run(async () => { entered(); await gate })
+    await started
+    const pane = { target: false }
+    const h = harness({ nodes: [node('target')], pane, mutationQueue: queue })
+    h.ownership.record('target', { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' })
+    const removal = h.service.removeDead('target')
+    pane.target = true
+    release()
+    await blocker
+    expect(await removal).toMatchObject({ ok: false, error: 'pane_alive' })
+    expect(h.destroyed).toEqual([])
+    expect(h.saves()).toBe(0)
+  })
+
+  it('refuses revival between its two fresh pane checks', async () => {
+    let calls = 0
+    const h = harness({ nodes: [node('target')], sessionPresence: async () => ++calls === 1 ? 'dead' : 'alive' })
+    expect(await h.service.removeDead('target')).toMatchObject({ ok: false, error: 'pane_alive' })
+    expect(h.destroyed).toEqual([])
+    expect(h.saves()).toBe(0)
+  })
+
+  it('refuses a backend generation change between probes', async () => {
+    let calls = 0
+    const h = harness({ nodes: [node('target')], generation: async () => ++calls === 1 ? 'before' : 'after' })
+    expect(await h.service.removeDead('target')).toMatchObject({ ok: false, error: 'backend_state_changed' })
+    expect(h.destroyed).toEqual([])
+    expect(h.saves()).toBe(0)
+  })
+})
+
+
+describe('strict removal apply-boundary guards', () => {
+  for (const changed of ['generation', 'unknown-generation', 'working', 'blocked', 'loop', 'reservation'] as const) {
+    it(`retains the card when ${changed} changes during the final pane probe`, async () => {
+      let probes = 0
+      let generation: string | null = 'original'
+      const status: Record<string, { state?: AgentState; updatedAt: number }> = {}
+      const loops: string[] = []
+      const reservations: string[] = []
+      const h = harness({
+        nodes: [node('target')], status,
+        generation: async () => generation,
+        liveProtectedIds: () => loops,
+        protectedIds: async () => reservations,
+        sessionPresence: async () => {
+          if (++probes === 2) {
+            if (changed === 'generation') generation = 'replacement'
+            if (changed === 'unknown-generation') generation = null
+            if (changed === 'working' || changed === 'blocked')
+              status.target = { state: changed, updatedAt: 1 }
+            if (changed === 'loop') loops.push('target')
+            if (changed === 'reservation') reservations.push('target')
+          }
+          return 'dead'
+        }
+      })
+      const result = await h.service.removeDead('target')
+      expect(result).toMatchObject({ ok: false,
+        error: changed.includes('generation') ? 'backend_state_changed' : 'node_protected' })
+      expect(h.saves()).toBe(0)
+      expect(h.destroyed).toEqual([])
+      expect(h.removed).toEqual([])
+      expect(h.published).toEqual([])
+      expect(h.removedMutations).toEqual([])
+      expect(h.workspace().projects[0].nodes.map(n => n.id)).toEqual(['target'])
+    })
+  }
 })
