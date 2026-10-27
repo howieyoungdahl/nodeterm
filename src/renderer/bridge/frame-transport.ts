@@ -46,6 +46,8 @@ export class WebSocketFrameTransport implements FrameTransport {
     this.ws.send(json)
   }
 
+  close(): void { this.ws.close() }
+
   onMessage(cb: (data: string | Uint8Array) => void): void {
     this.ws.addEventListener('message', (ev: MessageEvent) => {
       const d = ev.data

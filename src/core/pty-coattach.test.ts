@@ -122,6 +122,18 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
   const resize = (clientId: number, sessionId: string, cols: number | null, rows: number | null) =>
     fake.senderListeners[IPC.ptyResize](clientId, sessionId, cols, rows)
 
+  it('reconnect joins only its exact existing generation and never spawns an absent card', async () => {
+    await manager()
+    const original = await create(ALICE)
+    const joined = await fake.handlers[IPC.ptyCreate](BOB, { cols: 80, rows: 24, persistKey: 'node-1', reconnectSessionId: original.sessionId })
+    expect(joined).toMatchObject({ sessionId: original.sessionId })
+    const wrong = await fake.handlers[IPC.ptyCreate](CAROL, { cols: 80, rows: 24, persistKey: 'node-1', reconnectSessionId: 'old-generation' })
+    expect(wrong).toMatchObject({ sessionId: '', fresh: false, deadCard: true })
+    const absent = await fake.handlers[IPC.ptyCreate](CAROL, { cols: 80, rows: 24, persistKey: 'unsaved-before-restart', reconnectSessionId: 'gone' })
+    expect(absent).toMatchObject({ sessionId: '', fresh: false, deadCard: true })
+    expect(spawned).toHaveLength(1)
+  })
+
   it('a second client on the same persistKey subscribes instead of spawning', async () => {
     await manager()
     const a = await create(ALICE)

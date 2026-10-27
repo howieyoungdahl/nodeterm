@@ -85,6 +85,8 @@ export type LaunchIntentExecutionResult =
   | { ok: false; reason: LaunchIntentFailureReason; message: string }
 
 export interface PtyCreateOptions {
+  /** Reconnect only: join this exact existing generation or refuse. Never starts a backend. */
+  reconnectSessionId?: string
   shell?: string
   /** Arguments for `shell` when it is run as the session program (e.g. ssh args). */
   shellArgs?: string[]

@@ -137,3 +137,52 @@ it.each([false, true])('keeps actual WS publication ordering behind the ACK barr
     if (staleSave) expect(snapshots[1]).toMatchObject({ revision: b, projects: [{ name: 'Server edit', color: '#000' }] })
   } finally { unsubscribe() }
 })
+
+it('reconnect to same build does not reload', async () => {
+  wss.on('connection', sock => sock.on('message', data => {
+    const req = JSON.parse(data.toString())
+    sock.send(JSON.stringify({ t: 'res', id: req.id, ok: true, result: 'same build' }))
+    sock.send(JSON.stringify({ t: 'ev', channel: 'workspace:server-change', args: ['updated'] }))
+  }))
+  const client = new RpcClient(`ws://127.0.0.1:${port}/`)
+  await client.ready()
+  const seen: unknown[] = []
+  client.subscribe('workspace:server-change', value => seen.push(value))
+  const closed = new Promise<void>(resolve => client.onClose(resolve))
+  for (const sock of wss.clients) sock.close()
+  await closed
+  await (client as RpcClient & { reconnect(url: string): Promise<void> }).reconnect(`ws://127.0.0.1:${port}/`)
+  expect(await client.request('workspace:load')).toBe('same build')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(seen).toEqual(['updated'])
+})
+it('restores PTY viewers with current dimensions and flow, but never restores destroyed cards', async () => {
+  const requests: Array<{ method: string; args: unknown[] }> = []
+  wss.on('connection', sock => sock.on('message', data => {
+    const req = JSON.parse(data.toString())
+    requests.push(req)
+    if (req.t === 'req') sock.send(JSON.stringify({ t: 'res', id: req.id, ok: true,
+      result: { sessionId: req.args[0].persistKey, fresh: false, screen: 'restored screen' } }))
+  }))
+  const client = new RpcClient(`ws://127.0.0.1:${port}/`)
+  await client.ready()
+  const { buildRealApi } = await import('./ws-bridge')
+  const api = buildRealApi(client)
+  await api.pty.create({ persistKey: 'keep', cols: 80, rows: 24 })
+  await api.pty.create({ persistKey: 'destroy', cols: 80, rows: 24 })
+  api.pty.resize('keep', 100, 40)
+  api.pty.setFlow('keep', false)
+  api.pty.destroy('destroy')
+  const closed = new Promise<void>(resolve => client.onClose(resolve))
+  for (const sock of wss.clients) sock.close()
+  await closed
+  requests.length = 0
+  const screens: unknown[] = []
+  api.pty.onResync('keep', screen => screens.push(screen))
+  await client.reconnect(`ws://127.0.0.1:${port}/`)
+  await client.restorePtyViews()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(requests.filter(r => r.method === 'pty:create').map(r => r.args[0])).toEqual([{ persistKey: 'keep', cols: 100, rows: 40, reconnectSessionId: 'keep' }])
+  expect(requests.some(r => r.method === 'pty:flow' && r.args[1] === false)).toBe(true)
+  expect(screens).toEqual(['restored screen'])
+})

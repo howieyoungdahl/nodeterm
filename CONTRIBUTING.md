@@ -430,6 +430,17 @@ closed projects, protects its session. Both runtime compositions use raw workspa
 
 ## Testing
 
+Missing workspace publications, outside file notifications and same-build browser reconnects
+request a full workspace read and merge it against the last adopted durable content. Keep that
+baseline separate from locally committed canvas edits. A read raced by a save or publication
+must be repeated before adoption. Only overlapping fields require the conflict choice; read
+failures preserve edits and report synchronization failure. Browser reconnect keeps the API and
+subscriptions, restores PTY viewers only into their exact existing backend generation, and
+requests workspace resync. Missing generations require a deliberate reload and never spawn
+through reconnect. A changed renderer asset
+build leaves the workspace visible behind a deliberate reload notice rather than reloading it.
+
+
 Project recovery retention never expires deletion tombstones or unfinished operations. Keep its
 background work separate from publication, and preserve the renderer's loading/error state until
 workspace hydration succeeds. See `docs/recovery-retention.md` for limits and the disposable

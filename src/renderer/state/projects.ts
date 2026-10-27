@@ -20,6 +20,8 @@ import { markWorkspaceDirty } from './workspaceDirty'
 import type { WorkspaceSaveAck } from '@shared/types'
 
 interface ProjectsState {
+  /** Last content proven durable, separate from locally committed edits. */
+  adoptedProjects?: Project[]
   revision?: string
   acknowledgeSave(ack: WorkspaceSaveAck, saved?: Workspace): void
   acknowledgeOrganizationChange(project: Project): void
@@ -279,13 +281,13 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   reloadNonce: 0,
 
   hydrate(ws) {
-    set({ projects: withUniqueIds(ws.projects).map((p) => ({ ...p, loadedKanban: p.kanban ?? null })), activeProjectId: ws.activeProjectId, revision: ws.revision })
+    set({ adoptedProjects: structuredClone(ws.projects), projects: withUniqueIds(ws.projects).map((p) => ({ ...p, loadedKanban: p.kanban ?? null })), activeProjectId: ws.activeProjectId, revision: ws.revision })
   },
 
   acknowledgeSave(ack, saved) {
     // A delayed ACK may only advance the snapshot it saved, never newer adopted evidence.
     if (saved && get().revision !== saved.revision) return
-    set((s) => ({ revision: ack.revision, projects: s.projects.map((p) =>
+    set((s) => ({ adoptedProjects: saved ? structuredClone(saved.projects).map(p => ({ ...p, revision: ack.projectRevisions[p.id] ?? p.revision })) : s.adoptedProjects, revision: ack.revision, projects: s.projects.map((p) =>
       ack.projectRevisions[p.id] ? { ...p, revision: ack.projectRevisions[p.id],
         ...(saved ? { loadedKanban: saved.projects.find((held) => held.id === p.id)?.kanban ?? null } : {}) } : p) }))
   },

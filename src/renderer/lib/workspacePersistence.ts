@@ -173,3 +173,18 @@ export function resolveWorkspaceConflict(local: Workspace, incoming: Workspace, 
         reloadKeepingOpenNodes(current, project).project : project
     }), ...local.projects.filter((p) => !incomingIds.has(p.id))] }
 }
+
+/** A read raced by installed revision evidence cannot be used as a new durable base. */
+export async function loadWorkspaceForResync(api: WorkspaceApi, alive: () => boolean = () => true): Promise<{ incoming: Workspace; baseRevision: string | undefined } | undefined> {
+  while (alive()) {
+    const revision = useProjects.getState().revision
+    const incoming = await api.load()
+    if (!alive()) return
+    if (useProjects.getState().revision === revision) return { incoming, baseRevision: revision }
+  }
+}
+
+/** Recheck at the synchronous installation boundary after the caller's await continuation. */
+export function isWorkspaceResyncCurrent(read: { baseRevision: string | undefined }): boolean {
+  return useProjects.getState().revision === read.baseRevision
+}

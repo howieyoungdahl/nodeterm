@@ -1,3 +1,4 @@
+import { loadWorkspaceForResync, isWorkspaceResyncCurrent } from '../lib/workspacePersistence'
 import { planWorkspaceFlowPublication, applyWorkspaceFlowPublication } from '../lib/workspaceFlowPublication'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
@@ -144,14 +145,8 @@ import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
 import { useAutosave, useCreateFlush, useSavePersistence } from '../lib/useSavePersistence'
-import { mergeOrganizationProject, resolveWorkspaceConflict, saveWorkspace, subscribeWorkspacePublications } from '../lib/workspacePersistence'
+import { resolveWorkspaceConflict, saveWorkspace, subscribeWorkspacePublications } from '../lib/workspacePersistence'
 import { SaveFailureBar } from '../components/SaveFailureBar'
-import {
-  adoptedNodesNotice,
-  decideExternalChange,
-  mergeIncomingNodes,
-  reloadKeepingOpenNodes
-} from '../lib/externalChange'
 import { planServerChange } from '../lib/serverChange'
 import {
   CONTENT_ADD_ITEMS,
@@ -2399,6 +2394,7 @@ export function Canvas() {
       const incoming = await api.workspace.load()
       const next = resolveWorkspaceConflict(useProjects.getState().toWorkspace(), incoming, keep)
       useProjects.getState().hydrate(next)
+      useProjects.setState({ adoptedProjects: structuredClone(incoming.projects) })
       preserveViewportRef.current = true
       useProjects.getState().requestReload()
       retrySave()
@@ -2411,151 +2407,33 @@ export function Canvas() {
     }
   }, [commitActiveToStore, api.workspace, retrySave, bumpDirty, writeDisk])
 
-  // Mirror `dirty` into a ref so the external-change listener (mounted once) reads the
-  // live value without re-subscribing on every edit.
-  const dirtyRef = useRef(false)
+  // Merge saved publications immediately; catch up missing chains and outside-file changes
+  // through a full read against the separate durable base. Only content overlap needs a choice.
   useEffect(() => {
-    dirtyRef.current = dirty
-  }, [dirty])
-
-  /** Re-runs the active-project load effect by bumping the store's `reloadNonce`.
-   *
-   *  This used to flip the active id to '' and back on a microtask. React coalesces both writes
-   *  into ONE render, so the effect's dependency never actually changed and the reload silently
-   *  never happened — the store held disk's version while React Flow still showed the old nodes,
-   *  and the next debounced persist wrote those old nodes straight back over disk (field bug
-   *  2026-08-10). A monotonic nonce always changes, so the reload always runs.
-   *
-   *  An in-place reload PRESERVES the current camera (preserveViewportRef): the incoming
-   *  file's viewport is wherever ANOTHER machine/surface last left it, and SSH projects
-   *  reconcile on connect + on a periodic poll — restoring the saved viewport here yanked
-   *  the camera away mid-work, most visibly right after a cross-project focus (the sidebar
-   *  click centered the node, then the connect-time reconcile teleported the view). */
-  const reloadActiveProject = useCallback(() => {
-    preserveViewportRef.current = true
-    useProjects.getState().requestReload()
-  }, [])
-
-  const reloadDiskProject = useCallback((incoming: Project) => {
-    const store = useProjects.getState()
-    const active = store.activeProjectId === incoming.id
-    // Read React Flow NOW, not the snapshot from when the conflict banner first appeared.
-    // Autosave may have been paused for hours, with new cards and groups created in that time.
-    commitActiveToStore()
-    const current = useProjects.getState().getProject(incoming.id)
-    const result = current
-      ? reloadKeepingOpenNodes(current, incoming)
-      : { project: incoming, retained: 0 }
-    useProjects.getState().replaceProject(result.project)
-    if (active) setConflict(null)
-    if (active || result.retained) {
-      bumpDirty()
-      // Save the merged STORE immediately. persist() would reserialize the old Flow array before
-      // the reload effect has landed and overwrite the disk edits the user just chose.
-      // A background reload must wait for normal autosave: another project's conflict may still
-      // be unresolved, and a whole-workspace write would silently choose "Keep mine" for it.
-      if (active) void writeDisk()
-      if (active && result.retained) setNotice({
-        kind: 'info',
-        text: `Saved layout loaded; kept ${result.retained} open card${result.retained === 1 ? '' : 's'}.`
-      })
+    let alive = true
+    let syncing: Promise<void> | undefined
+    let resyncAgain = false
+    const resync = () => {
+      if (syncing) { resyncAgain = true; return }
+      syncing = (async () => {
+        do {
+          resyncAgain = false
+          const read = await loadWorkspaceForResync(api.workspace, () => alive)
+          if (!alive || !read) return
+          if (!isWorkspaceResyncCurrent(read)) { resyncAgain = true; continue }
+          const incoming = read.incoming
+          const store = useProjects.getState()
+          if (!incoming.revision || !store.adoptedProjects) throw new Error('Workspace baseline unavailable')
+          const project = incoming.projects.find(p => p.id === store.activeProjectId) ?? incoming.projects[0]
+          if (!project) return
+          deliver(project, { base: store.adoptedProjects, incoming: incoming.projects, revision: incoming.revision })
+        } while (resyncAgain && alive)
+      })().catch(error => {
+        console.warn('[canvas] workspace resync failed', error)
+        if (alive) setNotice({ kind: 'info', text: 'Could not synchronize the workspace. Your edits are preserved.' })
+      }).finally(() => { syncing = undefined })
     }
-    if (active) reloadActiveProject()
-  }, [commitActiveToStore, bumpDirty, writeDisk, reloadActiveProject])
-
-  /** Land incoming nodes on the live canvas, and say nothing about it. Returns whether anything
-   *  actually landed (so the caller can decide about dirty).
-   *
-   *  Split out of `adoptIncomingNodes` because the server-change path below adopts by exactly these
-   *  rules and must NOT show its notice: the node it is landing was opened by an agent in this
-   *  browser's own canvas, seconds ago, at the user's request — "registered from another device"
-   *  would be a lie. Two copies of the merge would drift apart; one merge with the sentence bolted
-   *  on top of it cannot. */
-  const adoptNodesSilently = useCallback(
-    (added: CanvasNodeState[]): boolean => {
-      if (!added.length) return false
-      const next = mergeIncomingNodes(nodesRef.current, nodeStatesToFlow(added))
-      if (next === nodesRef.current) return false
-      nodesRef.current = next
-      setNodes(next)
-      return true
-    },
-    [setNodes]
-  )
-
-  /** Put nodes that arrived from ANOTHER device onto the live canvas immediately, and say so.
-   *
-   *  Called for every external change while dirty — bar or no bar. An incoming node id nothing here
-   *  holds cannot collide with a local edit, and unlike a git pull nobody re-emits it: the phone
-   *  appends the session it started straight into project.json (`appendProjectNode`) and then
-   *  forgets about it. Leaving it parked behind the conflict bar meant "Keep my version" — or just
-   *  switching tabs, which drops the bar and lets the next whole-workspace save write our canvas
-   *  over disk — deleted a node whose tmux session is still running, headless and unreachable. */
-  const adoptIncomingNodes = useCallback(
-    (added: CanvasNodeState[]) => {
-      if (!adoptNodesSilently(added)) return
-      // The adopted nodes only exist on disk in the version we did NOT take: count them as an edit
-      // so the next save writes them back out under our canvas too.
-      bumpDirty()
-      setNotice({ kind: 'info', text: adoptedNodesNotice(added.length) })
-    },
-    [adoptNodesSilently, bumpDirty]
-  )
-
-  // Outside edits to a project's .nodeterm file (git pull / sync / teammate / another machine /
-  // the phone registering a session it started). Writes THIS core made on an agent's behalf are
-  // not in here any more: Server Edition canvas control broadcasts them on `onServerChange`
-  // (below), because they are ours and there is nothing for the user to choose between.
-  useEffect(() => {
-    return api.workspace.onExternalChange((project) => {
-      const { activeProjectId: current } = useProjects.getState()
-      if (project.id !== current) {
-        // Background project: adopt silently — it reloads into React Flow on next switch.
-        reloadDiskProject(project)
-        return
-      }
-      // `base` is our last-known DISK state (the store copy is written by a load or a commit+save);
-      // React Flow holds the live, possibly dirty canvas. Both are needed to tell "the file only
-      // grew a node" from "the file and I disagree about the same nodes".
-      const decision = decideExternalChange({
-        dirty: dirtyRef.current,
-        base: useProjects.getState().getProject(project.id),
-        incoming: project,
-        liveNodeIds: nodesRef.current.map((n) => n.id)
-      })
-      if (decision.kind === 'reload') {
-        // Active but no unsaved local edits: reload in place (the incoming file already carries any
-        // added nodes, so nothing extra to adopt).
-        reloadDiskProject(project)
-        return
-      }
-      // Dirty. Whatever happens to the overlapping half, the sessions registered elsewhere are ours
-      // to keep — they are the only part of this payload nobody can produce a second time.
-      adoptIncomingNodes(decision.added)
-      if (decision.kind === 'conflict') {
-        // Something we also hold changed on disk: let the user pick a side for THAT half. The bar
-        // keeps its documented meaning (the discarded disk side is re-fetchable — a git pull, a
-        // teammate's commit), and it now names what already landed on the canvas behind it.
-        setConflict({ project, added: decision.added.length })
-        return
-      }
-      if (decision.kind === 'merge') {
-        // Purely additive: the store's baseline can safely move to the disk version (it differs
-        // from our last save only by the nodes we just adopted). No bar — there is nothing to
-        // choose between.
-        const local = useProjects.getState().getProject(project.id)
-        useProjects.getState().replaceProject(local ? mergeOrganizationProject(local, project) : project)
-        if (project.organizationChange) useProjects.getState().acknowledgeOrganizationChange(project)
-      }
-      // 'ignore': a self-write echo / a change we already hold. Nothing to do, and above all no bar.
-    })
-  }, [reloadDiskProject, adoptIncomingNodes])
-
-  // Saved core changes carry complete content and contiguous revision evidence. Merge
-  // disjoint local edits before advancing the revision; preserve a conflict warning when
-  // content overlaps or a publication was missed. Never repair a broken chain with an upsert.
-  useEffect(() => {
-    return subscribeWorkspacePublications(api.workspace, (project) => {
+    const deliver = (project: Project, resyncSnapshot?: { base: Project[]; incoming: Project[]; revision: string }): import('../lib/workspacePersistence').PublicationDelivery => {
       const store = useProjects.getState()
       const active = store.getProject(store.activeProjectId)
       const localProjects = store.projects.map(p => p.id === active?.id ? {
@@ -2564,9 +2442,13 @@ export function Canvas() {
         bridges: linkEdgesRef.current.map(e => ({ id: e.id, source: e.source, target: e.target }))
       } : p)
       const result = planWorkspaceFlowPublication({ revision: store.revision, projects: localProjects,
-        activeProjectId: store.activeProjectId, nodes: nodesRef.current, change: project.workspaceChange })
+        activeProjectId: store.activeProjectId, nodes: nodesRef.current, change: project.workspaceChange, resync: resyncSnapshot, adoptedProjects: store.adoptedProjects })
       if (result.kind === 'duplicate') return { kind: 'duplicate', revision: store.revision! }
-      if (result.kind === 'conflict') { setConflict({ project, added: 0 }); return { kind: 'conflict' } }
+      if (result.kind === 'conflict') {
+        if (!resyncSnapshot) resync()
+        else setConflict({ project, added: 0 })
+        return { kind: 'conflict' }
+      }
       applyWorkspaceFlowPublication(result, {
         content: (plan) => {
           for (const id of plan.removed) useWebviewKeepAlive.getState().drop(id)
@@ -2585,21 +2467,34 @@ export function Canvas() {
           linkEdgesRef.current = nextLinks
           setLinkEdges(nextLinks)
         },
-        acknowledge: (projects, revision) => useProjects.setState({ projects, revision }),
+        acknowledge: (projects, revision) => {
+          const adoptedProjects = result.adoptedProjects ?? (store.adoptedProjects ?? store.projects).map(p =>
+            project.workspaceChange?.changes.find(c => c.after.id === p.id)?.after ?? p)
+          useProjects.setState({ projects, revision, adoptedProjects: structuredClone(adoptedProjects) })
+        },
         // New server cards keep their published placement. Organization requires a command.
         created: () => {},
         defer: callback => queueMicrotask(callback),
         persistLocalEdits: bumpDirty
       })
-      return { kind: 'adopt', before: project.workspaceChange!.before, after: result.revision }
-    }, (project) => {
+      if (resyncSnapshot) { setConflict(null); retrySave() }
+      return result.duplicateEvidence ? { kind: 'duplicate', revision: result.revision } : { kind: 'adopt', before: store.revision!, after: result.revision }
+    }
+    const unsubscribe = subscribeWorkspacePublications(api.workspace, project => deliver(project), (project) => {
       if (project.workspaceChange) {
         const seen = serverPublicationRevisionsRef.current
         if (seen.size >= 64) seen.delete(seen.values().next().value!)
         seen.add(project.workspaceChange.after)
       }
     })
-  }, [setNodes, setControlEdges, setLinkEdges, bumpDirty])
+    const external = api.workspace.onExternalChange(() => resync())
+    window.addEventListener('nodeterm:workspace-resync', resync)
+    return () => { alive = false; unsubscribe(); external(); window.removeEventListener('nodeterm:workspace-resync', resync) }
+  }, [setNodes, setControlEdges, setLinkEdges, bumpDirty, retrySave])
+
+  useEffect(() => {
+    if (revisionConflict) window.dispatchEvent(new Event('nodeterm:workspace-resync'))
+  }, [revisionConflict])
 
   // One-shot note after an on-disk migration (dismissible, non-blocking strip). Both kinds change
   // where the user's data lives, so neither may happen silently.
@@ -2902,8 +2797,7 @@ export function Canvas() {
         // Saved core deltas follow the complete publication. Reapplying an upsert would erase
         // the local fields the three-way merge just preserved, including on a refused overlap.
         if (!serverPublicationRevisionsRef.current.has(mutation.workspaceRevision)) {
-          const project = useProjects.getState().getProject(projectId)
-          if (project) setConflict({ project, added: 0 })
+          window.dispatchEvent(new Event('nodeterm:workspace-resync'))
         }
         return
       }
@@ -12022,14 +11916,7 @@ export function Canvas() {
             }}
           />
         )}
-        {revisionConflict && (
-          <ConflictBar
-            message="The saved workspace changed. Your edits are unsaved. Reload or keep your edits while preserving server organization and manual board choices."
-            onReload={() => void resolveSaveConflict(false)}
-            onKeepMine={() => void resolveSaveConflict(true)}
-          />
-        )}
-        {conflict && !revisionConflict && (
+        {conflict && (
           <ConflictBar
             addedCount={conflict.added}
             onReload={() => void resolveSaveConflict(false)}
