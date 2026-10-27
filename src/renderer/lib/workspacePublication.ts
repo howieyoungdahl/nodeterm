@@ -38,8 +38,8 @@ function merge(base: unknown, local: unknown, incoming: unknown, path: string[] 
   }
   // Only the canonical project board metadata rows have nodeId entity semantics.
   // Arbitrary nested/opaque meta arrays, card labels and assignees remain atomic.
-  const cardMeta = path.length === 2 && path[0] === 'kanban' && path[1] === 'meta'
-  if ((['nodes', 'ropes', 'bridges', 'columns', 'assignments'].includes(key) || cardMeta) &&
+  const cardMeta = (path.length === 2 || path.length === 4 && path[0] === 'projects') && path.at(-2) === 'kanban' && path.at(-1) === 'meta'
+  if ((['projects', 'nodes', 'ropes', 'bridges', 'columns', 'assignments'].includes(key) || cardMeta) &&
     (Array.isArray(base) || cardMeta && base === undefined) &&
     (Array.isArray(local) || cardMeta && local === undefined) &&
     (Array.isArray(incoming) || cardMeta && incoming === undefined)) {
@@ -85,5 +85,17 @@ export function mergeWorkspacePublication(revision: string | undefined, projects
       if (!equal(clean(result[i]), clean(delta.after))) localEditsRemain = true
     }
     return { kind: 'adopt', projects: result, revision: change.after, localEditsRemain }
+  } catch (error) { return { kind: 'conflict', reason: (error as Error).message } }
+}
+
+/** A full read repairs a missing chain using the last durable base, never the dirty store. */
+export function mergeWorkspaceSnapshot(base: Project[], local: Project[], incoming: Project[], revision: string): ReturnType<typeof mergeWorkspacePublication> {
+  if (!/^[a-f0-9]{64}$/.test(revision)) return { kind: 'conflict', reason: 'revision-acknowledgment-missing' }
+  try {
+    const projects = merge(base.map(clean), local.map(clean), incoming.map(clean), ['projects']) as Project[]
+    const durable = new Map(incoming.map(p => [p.id, p]))
+    return { kind: 'adopt', revision, localEditsRemain: !equal(projects, incoming.map(clean)),
+      projects: projects.map(p => ({ ...p, revision: durable.get(p.id)?.revision,
+        deletedEntities: durable.get(p.id)?.deletedEntities, loadedKanban: durable.get(p.id)?.kanban ?? null })) }
   } catch (error) { return { kind: 'conflict', reason: (error as Error).message } }
 }

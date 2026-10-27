@@ -206,3 +206,67 @@ it('an index-only publication while viewing a different project does not request
   applyWorkspaceFlowPublication(plan, { content: vi.fn(), acknowledge: vi.fn(), created: vi.fn(), defer: work => work(), persistLocalEdits: persist })
   expect(persist).not.toHaveBeenCalled()
 })
+
+it('missed publication resyncs without conflict', () => {
+  const f = fixture()
+  f.live[0].data.text = 'local draft'
+  f.incoming.nodes[0].title = 'remote rename'
+  const plan = planWorkspaceFlowPublication({ revision, projects: [f.base], activeProjectId: 'p', nodes: f.live,
+    change: undefined, resync: { base: [f.base], incoming: [f.incoming], revision: after } } as Parameters<typeof planWorkspaceFlowPublication>[0])
+  expect(plan.kind).toBe('adopt')
+  if (plan.kind !== 'adopt') throw new Error('resync failed')
+  expect(plan.nodes[0].data.text).toBe('local draft')
+  expect(plan.nodes[0].data.title).toBe('remote rename')
+})
+it('agent-created card in a project appears in an open tab without reload', () => {
+  const f = fixture()
+  f.incoming.nodes.push(node('agent-created'))
+  const plan = planWorkspaceFlowPublication({ revision, projects: [f.base], activeProjectId: 'p', nodes: f.live,
+    change: undefined, resync: { base: [f.base], incoming: [f.incoming], revision: after } } as Parameters<typeof planWorkspaceFlowPublication>[0])
+  expect(plan.kind).toBe('adopt')
+  if (plan.kind !== 'adopt') throw new Error('card did not land')
+  expect(plan.nodes.map(n => n.id)).toContain('agent-created')
+})
+it('full resync preserves independent board metadata edits and new projects', () => {
+  const f = fixture()
+  f.base.kanban!.meta = [{ nodeId: 'same', labels: ['base'] }, { nodeId: 'local', labels: ['base'] }]
+  f.incoming.kanban = structuredClone(f.base.kanban)
+  f.incoming.kanban!.meta![0].labels = ['remote']
+  const local = structuredClone(f.base)
+  local.kanban!.meta![1].labels = ['local']
+  const added = { ...project([]), id: 'new-project' }
+  const plan = planWorkspaceFlowPublication({ revision, projects: [local], activeProjectId: 'p', nodes: f.live,
+    change: undefined, resync: { base: [f.base], incoming: [f.incoming, added], revision: after } })
+  expect(plan.kind).toBe('adopt')
+  if (plan.kind !== 'adopt') throw new Error('resync failed')
+  expect(plan.projects.map(p => p.id)).toEqual(['p', 'new-project'])
+  expect(plan.projects[0].kanban!.meta!.map(m => m.labels)).toEqual([['remote'], ['local']])
+})
+it('full resync refuses a real field overlap and preserves the live draft', () => {
+  const f = fixture()
+  f.live[0].data.text = 'local draft'
+  f.incoming.nodes[0].text = 'remote draft'
+  expect(planWorkspaceFlowPublication({ revision, projects: [f.base], activeProjectId: 'p', nodes: f.live,
+    change: undefined, resync: { base: [f.base], incoming: [f.incoming], revision: after } })).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+  expect(f.live[0].data.text).toBe('local draft')
+})
+it('current save-ACK duplicate installs rescued host content and retains post-save edits', () => {
+  const f = fixture()
+  const saved = structuredClone(f.base)
+  saved.nodes[0].title = 'saved title'
+  f.incoming.nodes[0].title = 'normalized title'
+  f.incoming.nodes.push(node('rescued'))
+  const live = nodeStatesToFlow(saved.nodes)
+  live[0].data.text = 'typed after save'
+  const plan = planWorkspaceFlowPublication({ revision: after, projects: [saved], adoptedProjects: [saved], activeProjectId: 'p', nodes: live, change: f.change })
+  expect(plan.kind).toBe('adopt')
+  if (plan.kind !== 'adopt') throw new Error('ACK content did not land')
+  expect(plan.duplicateEvidence).toBe(true)
+  expect(plan.nodes[0].data.title).toBe('normalized title')
+  expect(plan.nodes[0].data.text).toBe('typed after save')
+  expect(plan.nodes.map(n => n.id)).toContain('rescued')
+  expect(plan.adoptedProjects).toEqual([f.incoming])
+  const older = planWorkspaceFlowPublication({ revision: 'c'.repeat(64), projects: plan.projects,
+    adoptedProjects: plan.adoptedProjects, activeProjectId: 'p', nodes: plan.nodes, change: f.change })
+  expect(older).toEqual({ kind: 'conflict', reason: 'revision-chain-broken' })
+})

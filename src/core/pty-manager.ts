@@ -1955,6 +1955,13 @@ export class PtyManager {
 
   private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
     const key = options.persistKey
+    if (options.reconnectSessionId !== undefined) {
+      // A reconnect is never a request to resurrect an absent card or execute its shell again.
+      if (!key || typeof options.reconnectSessionId !== 'string') return { sessionId: '', fresh: false, deadCard: true }
+      await this.inflight.get(key)?.catch(() => undefined)
+      if (this.byPersistKey.get(key) !== options.reconnectSessionId) return { sessionId: '', fresh: false, deadCard: true }
+      return this.join(clientId, options, key) ?? { sessionId: '', fresh: false, deadCard: true }
+    }
     if (!key) return this.spawnNew(clientId, options)
     // SECURITY — the choke point for the node id. Every session spawn (local tmux, plain shell,
     // SSH remote) goes through here, `pty:create` validates its payload nowhere, and node ids come

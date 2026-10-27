@@ -84,17 +84,64 @@ export class RpcClient {
   // `await ready()`) would otherwise miss it. Buffered here (capped) and flushed on subscribe.
   private early: Array<{ channel: string; args: unknown[] }> = []
   private closeCbs = new Set<() => void>()
+  private ptyViews = new Map<string, { options: PtyCreateOptions; sessionId: string; flow?: boolean; parked?: boolean }>()
+
+  async createPtyView(options: PtyCreateOptions): Promise<import('@shared/types').PtyCreateResult> {
+    const result = await this.request(IPC.ptyCreate, options) as import('@shared/types').PtyCreateResult
+    if (result.sessionId && options.persistKey) this.ptyViews.set(`${options.persistKey}:${options.viewerId ?? ''}`, { options, sessionId: result.sessionId })
+    return result
+  }
+
+  forgetPtyView(sessionId: string, viewerId?: string): void {
+    for (const [key, view] of this.ptyViews) if (view.sessionId === sessionId && view.options.viewerId === viewerId) this.ptyViews.delete(key)
+  }
+
+  forgetPtyNode(persistKey: string): void {
+    for (const [key, view] of this.ptyViews) if (view.options.persistKey === persistKey) this.ptyViews.delete(key)
+  }
+
+  updatePtyView(sessionId: string, viewerId: string | undefined, cols: number | null, rows: number | null): void {
+    for (const view of this.ptyViews.values()) if (view.sessionId === sessionId && view.options.viewerId === viewerId) {
+      view.parked = cols === null || rows === null
+      if (!view.parked) view.options = { ...view.options, cols: cols!, rows: rows! }
+    }
+  }
+
+  async restorePtyViews(): Promise<void> {
+    for (const view of [...this.ptyViews.values()]) {
+      const result = await this.request(IPC.ptyCreate, { ...view.options, reconnectSessionId: view.sessionId }) as import('@shared/types').PtyCreateResult
+      if (result.sessionId !== view.sessionId) throw new Error('Terminal identity changed; reload required')
+      if (result.screen) this.fanOut(IPC.ptyResync(view.sessionId), [result.screen])
+      if (view.parked) this.cast(IPC.ptyResize, view.sessionId, null, null, view.options.viewerId)
+      if (view.flow !== undefined) this.cast(IPC.ptyFlow, view.sessionId, view.flow, view.options.viewerId)
+    }
+  }
 
   constructor(transport: FrameTransport | string) {
     this.transport =
       typeof transport === 'string' ? new WebSocketFrameTransport(transport) : transport
-    this.transport.onMessage((data) => this.onMessage(data))
-    this.transport.onClose(() => {
+    this.bindTransport(this.transport)
+  }
+
+  private bindTransport(transport: FrameTransport): void {
+    transport.onMessage((data) => { if (this.transport === transport) this.onMessage(data) })
+    transport.onClose(() => {
+      if (this.transport !== transport) return
       // Fail the in-flight requests BEFORE the overlay hooks: a response can only arrive over the
       // carrier that carried the request, so once it is gone they are unanswerable.
       this.failPending()
       this.closeCbs.forEach((cb) => cb())
     })
+  }
+
+  /** Replace only the carrier: API references and channel subscribers remain live. */
+  async reconnect(url: string): Promise<void> {
+    const transport = new WebSocketFrameTransport(url)
+    const previous = this.transport
+    this.transport = transport
+    if (previous instanceof WebSocketFrameTransport) previous.close()
+    this.bindTransport(transport)
+    try { await transport.ready() } catch (error) { transport.close(); throw error }
   }
 
   /**
@@ -171,12 +218,15 @@ export class RpcClient {
       this.pending.set(id, { resolve, reject })
       // encodeArgs: an OMITTED optional argument must reach the handler as `undefined` (so its
       // default fires) while a MEANINGFUL `null` (pty.resize park, presence clears) stays `null`.
-      this.transport.send(JSON.stringify({ t: 'req', id, method, ...encodeArgs(args) }))
+      try { this.transport.send(JSON.stringify({ t: 'req', id, method, ...encodeArgs(args) })) }
+      catch (error) { this.pending.delete(id); reject(error) }
     })
   }
 
   /** Send a fire-and-forget cast (no response expected). */
   cast(method: string, ...args: unknown[]): void {
+    if (method === IPC.ptyFlow) for (const view of this.ptyViews.values())
+      if (view.sessionId === args[0] && view.options.viewerId === args[2]) view.flow = args[1] as boolean
     this.transport.send(JSON.stringify({ t: 'cast', method, ...encodeArgs(args) }))
   }
 
@@ -226,16 +276,23 @@ export function buildRealApi(
 > {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
-      client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
+      client.createPtyView(options),
     write: (sessionId, data) => client.cast(IPC.ptyWrite, sessionId, data),
-    resize: (sessionId, cols, rows, viewerId) =>
-      client.cast(IPC.ptyResize, sessionId, cols, rows, viewerId),
+    resize: (sessionId, cols, rows, viewerId) => {
+      client.updatePtyView(sessionId, viewerId, cols, rows)
+      client.cast(IPC.ptyResize, sessionId, cols, rows, viewerId)
+    },
     setFlow: (sessionId, resume, viewerId) => client.cast(IPC.ptyFlow, sessionId, resume, viewerId),
-    kill: (sessionId, viewerId) => client.cast(IPC.ptyKill, sessionId, viewerId),
+    kill: (sessionId, viewerId) => {
+      client.forgetPtyView(sessionId, viewerId)
+      client.cast(IPC.ptyKill, sessionId, viewerId)
+    },
     // The trailing flag rides as a plain boolean; the core handler re-checks `=== true`.
-    destroy: (persistKey, opts) =>
-      client.cast(IPC.ptyDestroy, persistKey, opts?.everySocket === true),
-    recycle: (persistKey) => client.cast(IPC.ptyRecycle, persistKey),
+    destroy: (persistKey, opts) => {
+      client.forgetPtyNode(persistKey)
+      client.cast(IPC.ptyDestroy, persistKey, opts?.everySocket === true)
+    },
+    recycle: (persistKey) => { client.forgetPtyNode(persistKey); client.cast(IPC.ptyRecycle, persistKey) },
     // No server handler — degrade gracefully (never reject the boot path).
     generateName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
     generateGroupName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
@@ -922,6 +979,7 @@ function wsUrl(): string {
 
 // ── Reconnect overlay (kept out of RpcClient's unit-tested core) ────────────────────────────
 const OVERLAY_ID = 'nt-reconnect-overlay'
+const reconnecting = new WeakSet<RpcClient>()
 
 /** Is the reconnect overlay currently mounted? Exported for the unit test. */
 export function isOverlayMounted(): boolean {
@@ -943,57 +1001,43 @@ export function showReconnectOverlay(): void {
   document.body.appendChild(el)
 }
 
-/** Retry the WS with backoff (1s→2s→4s→…→10s cap). On the first successful reopen, reload the
- *  page (the reloaded app re-runs `pty.create` per node with the same persistKey → tmux warm
- *  reattach). After 3 consecutive failed retries, bounce to `/login` (assume auth expired). */
-function startReconnect(): void {
+/** Reopen the same API without discarding browser state. Changed assets need a deliberate reload. */
+function startReconnect(client?: RpcClient): void {
+  if (client && reconnecting.has(client)) return
+  if (client) reconnecting.add(client)
   showReconnectOverlay()
   let attempt = 0
-  let failures = 0
-
-  const tryOnce = (): void => {
-    let probe: WebSocket
+  const loadedScripts = typeof document === 'undefined' ? [] :
+    [...document.querySelectorAll<HTMLScriptElement>('script[type="module"][src]')].map(s => new URL(s.src, location.href).pathname)
+  const tryOnce = async (): Promise<void> => {
     try {
-      probe = new WebSocket(wsUrl())
-    } catch {
-      scheduleRetry()
-      return
-    }
-    probe.binaryType = 'arraybuffer'
-    const cleanup = (): void => {
-      probe.onopen = null
-      probe.onerror = null
-      probe.onclose = null
-    }
-    probe.onopen = () => {
-      cleanup()
-      try {
-        probe.close()
-      } catch {
-        /* ignore */
+      if (!client) { await new RpcClient(wsUrl()).ready(); location.reload(); return }
+      const response = await fetch(location.href, { cache: 'no-store' })
+      if (!response.ok || response.redirected) throw new Error('Server unavailable')
+      const html = await response.text()
+      if (loadedScripts.length && !loadedScripts.every(src => html.includes(src))) {
+        const overlay = document.getElementById(OVERLAY_ID)
+        if (overlay) overlay.textContent = 'The server was updated. Your open workspace is preserved. Reload when you are ready.'
+        return
       }
-      location.reload()
-    }
-    probe.onerror = () => {
-      // Let onclose drive the retry/failure counting (fires after error).
-    }
-    probe.onclose = () => {
-      cleanup()
-      failures++
-      if (failures >= 3) {
-        location.href = '/login'
+      await client.reconnect(wsUrl())
+      await client.restorePtyViews()
+      reconnecting.delete(client)
+      document.getElementById(OVERLAY_ID)?.remove()
+      window.dispatchEvent(new Event('nodeterm:workspace-resync'))
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Terminal identity changed')) {
+        const overlay = document.getElementById(OVERLAY_ID)
+        if (overlay) overlay.textContent = 'The server session changed. Your workspace and edits are preserved. Reload when you are ready to reattach terminals.'
         return
       }
       scheduleRetry()
     }
   }
-
   const scheduleRetry = (): void => {
-    const delay = Math.min(1000 * 2 ** attempt, 10000)
-    attempt++
-    setTimeout(tryOnce, delay)
+    const delay = Math.min(1000 * 2 ** attempt++, 10000)
+    setTimeout(() => { void tryOnce() }, delay)
   }
-
   scheduleRetry()
 }
 
@@ -1017,7 +1061,7 @@ export async function installWsBridge(): Promise<boolean> {
     startReconnect()
     return false
   }
-  client.onClose(() => startReconnect())
+  client.onClose(() => startReconnect(client))
   const stubApi = buildStubApi()
   const api: NodeTerminalApi = {
     ...stubApi,

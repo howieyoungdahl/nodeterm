@@ -157,3 +157,33 @@ it('reports retry failure and never makes a third save attempt', async () => {
   expect(useProjects.getState().projects[0]).toMatchObject({ name: 'Published', color: '#local' })
   f.unsubscribe()
 })
+it('re-reads a full resync when a publication or save wins during workspace load', async () => {
+  let calls = 0
+  const api = { load: async () => {
+    calls++
+    if (calls === 1) {
+      useProjects.setState({ revision: b })
+      return { version: 2, activeProjectId: 'p', revision: a, projects: [project()] }
+    }
+    return { version: 2, activeProjectId: 'p', revision: c, projects: [{ ...project(), name: 'latest' }] }
+  } } as WorkspaceApi
+  const incoming = await persistence.loadWorkspaceForResync(api)
+  expect(calls).toBe(2)
+  expect(incoming?.incoming.revision).toBe(c)
+  expect(incoming?.incoming.projects[0].name).toBe('latest')
+})
+it('cancelled resync never delivers the in-flight snapshot', async () => {
+  let alive = true
+  const api = { load: async () => { alive = false; return { version: 2, activeProjectId: 'p', revision: b, projects: [project()] } } } as WorkspaceApi
+  expect(await persistence.loadWorkspaceForResync(api, () => alive)).toBeUndefined()
+})
+
+it('rejects a read when revision advances in a microtask before the caller installs it', async () => {
+  const api = { load: async () => ({ version: 2, activeProjectId: 'p', revision: a, projects: [project()] }) } as WorkspaceApi
+  const promise = persistence.loadWorkspaceForResync(api)
+  void promise.then(() => useProjects.setState({ revision: b }))
+  const read = await promise
+  expect(read).toBeDefined()
+  expect(persistence.isWorkspaceResyncCurrent(read!)).toBe(false)
+  expect(useProjects.getState().revision).toBe(b)
+})

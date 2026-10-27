@@ -179,6 +179,17 @@ adding terminal-session features, extend the interface — do not reach around i
 
 ## State & persistence model
 
+Missing workspace publications, outside file notifications and same-build browser reconnects
+request a full workspace read and merge it against the last adopted durable content. Keep that
+baseline separate from locally committed canvas edits. A read raced by a save or publication
+must be repeated before adoption. Only overlapping fields require the conflict choice; read
+failures preserve edits and report synchronization failure. Browser reconnect keeps the API and
+subscriptions, restores PTY viewers only into their exact existing backend generation, and
+requests workspace resync. Missing generations require a deliberate reload and never spawn
+through reconnect. A changed renderer asset
+build leaves the workspace visible behind a deliberate reload notice rather than reloading it.
+
+
 Recovery history maintenance is asynchronous and bounded. Versions keep a seven-day window, a
 200-version floor and the current published revision; only older completed operations expire.
 Tombstones, interrupted operations and unconfirmed evidence remain permanent. Never reintroduce

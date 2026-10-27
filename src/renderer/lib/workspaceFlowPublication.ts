@@ -1,7 +1,7 @@
 import type { Project, WorkspacePublication } from '@shared/types'
 import { flowToNodeStates, nodeStatesToFlow, type CanvasNode } from '../state/workspace'
 import { isKeepAliveKind } from './webviewKeepAlive'
-import { mergeWorkspacePublication } from './workspacePublication'
+import { mergeWorkspacePublication, mergeWorkspaceSnapshot } from './workspacePublication'
 
 /** The Canvas adoption seam. Persisted fields come only from the reconciled projection; runtime
  * data/callbacks and selection survive. Do not spread old Flow geometry: omitted parentId/extent
@@ -9,13 +9,31 @@ import { mergeWorkspacePublication } from './workspacePublication'
 export function planWorkspaceFlowPublication(input: {
   revision: string | undefined; projects: Project[]; activeProjectId: string
   nodes: CanvasNode[]; change: WorkspacePublication | undefined
+  adoptedProjects?: Project[]
+  resync?: { base: Project[]; incoming: Project[]; revision: string }
 }) {
   const projects = input.projects.map(p => p.id === input.activeProjectId
     ? { ...p, nodes: flowToNodeStates(input.nodes) } : p)
-  const result = mergeWorkspacePublication(input.revision, projects, input.change)
+  let resync = input.resync
+  let result = resync ? mergeWorkspaceSnapshot(resync.base, projects, resync.incoming, resync.revision)
+    : mergeWorkspacePublication(input.revision, projects, input.change)
+  const duplicateEvidence = result.kind === 'duplicate'
+  // A save ACK confirms revision before its publication can deliver normalized/rescued content.
+  // Exact-current duplicates may still carry that content. Older publications never enter here.
+  if (duplicateEvidence && input.adoptedProjects && input.change) {
+    const ids = new Set<string>()
+    for (const delta of input.change.changes) {
+      if (!delta.before || !delta.after || delta.before.id !== delta.after.id || ids.has(delta.after.id) ||
+        !input.adoptedProjects.some(p => p.id === delta.after.id)) return { kind: 'conflict' as const, reason: 'invalid-publication' }
+      ids.add(delta.after.id)
+    }
+    resync = { base: input.adoptedProjects, revision: input.change.after,
+      incoming: input.adoptedProjects.map(p => input.change!.changes.find(c => c.after.id === p.id)?.after ?? p) }
+    result = mergeWorkspaceSnapshot(resync.base, projects, resync.incoming, resync.revision)
+  }
   if (result.kind !== 'adopt') return result
   const active = result.projects.find(p => p.id === input.activeProjectId)
-  const changed = !!active && !!input.change?.changes.some(c => c.after.id === active.id)
+  const changed = !!active && (!!resync || !!input.change?.changes.some(c => c.after.id === active.id))
   const held = new Map(input.nodes.map(n => [n.id, n]))
   const nodes = changed ? nodeStatesToFlow(active.nodes).map(incoming => {
     const old = held.get(incoming.id)
@@ -31,8 +49,8 @@ export function planWorkspaceFlowPublication(input: {
   let webIndex = 0
   const stableNodes = changed ? nodes.map(n => isKeepAliveKind(n) ? stable[webIndex++] : n) : nodes
   const created = changed ? active.nodes.filter(n => !held.has(n.id)).map(n => n.id) : []
-  const removed = (input.change?.changes ?? []).flatMap(c => c.before.nodes.filter(n => !c.after.nodes.some(a => a.id === n.id)).map(n => n.id))
-  return { ...result, nodes: stableNodes, active: changed ? active : undefined, created, removed }
+  const removed = resync ? resync.base.flatMap(p => p.nodes.filter(n => !resync!.incoming.some(r => r.id === p.id && r.nodes.some(a => a.id === n.id))).map(n => n.id)) : (input.change?.changes ?? []).flatMap(c => c.before.nodes.filter(n => !c.after.nodes.some(a => a.id === n.id)).map(n => n.id))
+  return { ...result, duplicateEvidence, adoptedProjects: resync?.incoming, nodes: stableNodes, active: changed ? active : undefined, created, removed }
 }
 
 /** Keep transaction ordering testable: every content installation completes before evidence
