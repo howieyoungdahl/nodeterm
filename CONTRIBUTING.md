@@ -609,3 +609,10 @@ save generation. Use the merge's canonical persisted equality to detect retained
 request persistence only for those, and never clear already dirty generations. Canonical
 Project.kanban.meta merges by nodeId so separate-card priorities coexist. Assignees/labels and
 arbitrary nested meta arrays remain atomic; competing same-card priority choices still conflict.
+
+Automatic missing-card recovery requires original card presentation plus current-run live pane/project proof.
+Preserve the original title and per-card board assignment, manual intent and metadata; never synthesize
+a renamed Ungrouped replacement when those originals are unavailable. Boot reports such orphan panes
+as `original-presentation-unavailable` and leaves them running. Explicit authenticated operator adoption
+remains a deliberate generic recovery action. Automatic dead-card sweeps preserve unknown creators,
+human operator cards and cards assigned to Directors, even when the backend is definitively absent.

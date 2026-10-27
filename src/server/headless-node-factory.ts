@@ -764,9 +764,9 @@ export class HeadlessNodeFactory {
   /** Plain/missing terminal records promoted by a verified hand launch. */
   private handLaunchedNodes = new Set<string>()
   /** Current-run terminal snapshots used only to reconstruct a live pane lost by a stale save. */
-  private runtimeNodes = new Map<string, { projectId: string; node: CanvasNodeState }>()
+  private runtimeNodes = new Map<string, { projectId: string; node: CanvasNodeState; board?: Project['kanban'] }>()
   /** Bounded browser presentation cache. Never supplies creator or pane/project authority. */
-  private clientNodes = new Map<string, { projectId: string; senderId: number; node: CanvasNodeState; absolutePosition: { x: number; y: number } }>()
+  private clientNodes = new Map<string, { projectId: string; senderId: number; node: CanvasNodeState; absolutePosition: { x: number; y: number }; board?: Project['kanban'] }>()
   /** Keep the missing-card recovery warning to one line once per source. */
   private warnedRecoveredSources = new Set<string>()
   /** Nodes already noted as "open in an attached client, not yet saved" — its own set, so a later
@@ -860,9 +860,18 @@ export class HeadlessNodeFactory {
   private runtimeAgentId = (nodeId: string): string | undefined =>
     this.runtimeAgents.get(nodeId) ?? this.deps.agentIdOf?.(nodeId)
 
-  private rememberRuntimeNode(projectId: string, node: CanvasNodeState): void {
+  private recoveryBoard(project: Project, nodeId: string): Project['kanban'] {
+    const board = project.kanban
+    if (!board) return undefined
+    return structuredClone({ columns: [], assignments: Array.isArray(board.assignments) ? board.assignments.filter(a => a.nodeId === nodeId) : [],
+      meta: Array.isArray(board.meta) ? board.meta.filter(m => m.nodeId === nodeId) : undefined,
+      manualAssignments: board.manualAssignments?.[nodeId] ? { [nodeId]: true as const } : undefined,
+      manualAssignmentVersions: board.manualAssignmentVersions?.[nodeId] ? { [nodeId]: board.manualAssignmentVersions[nodeId] } : undefined })
+  }
+
+  private rememberRuntimeNode(project: Project, node: CanvasNodeState): void {
     if (node.kind !== 'terminal') return
-    this.runtimeNodes.set(node.id, { projectId, node: structuredClone(node) })
+    this.runtimeNodes.set(node.id, { projectId: project.id, node: structuredClone(node), board: this.recoveryBoard(project, node.id) })
   }
 
   /** A refused whole-workspace save still tells us how the user placed/named a fresh card.
@@ -904,7 +913,7 @@ export class HeadlessNodeFactory {
         }
         this.clientNodes.delete(node.id)
         if (this.clientNodes.size >= 1024) this.clientNodes.delete(this.clientNodes.keys().next().value!)
-        this.clientNodes.set(node.id, { projectId: project.id, senderId: source.senderId, node: presentation, absolutePosition })
+        this.clientNodes.set(node.id, { projectId: project.id, senderId: source.senderId, node: presentation, absolutePosition, board: this.recoveryBoard(project, node.id) })
       }
     }
   }
@@ -977,28 +986,19 @@ export class HeadlessNodeFactory {
     const remembered = this.runtimeNodes.get(nodeId)
     const client = this.clientNodes.get(nodeId)
     const presentation = client?.projectId === project.id ? client : undefined
-    const sessionTitle = oneLine(this.deps.sessionTitleOf?.(nodeId) ?? '').slice(0, 4096)
-    const normalSize = terminalSize(this.deps.settings())
-    const right = project.nodes.reduce(
-      (edge, node) => Math.max(edge, node.position.x + (node.size?.width ?? normalSize.width)),
-      0
-    )
-    const node: CanvasNodeState =
-      remembered?.projectId === project.id && remembered.node.kind === 'terminal'
-        ? { ...structuredClone(remembered.node), agentId }
-        : {
-            id: nodeId,
-            kind: 'terminal',
-            position: { x: right + H_GAP, y: 120 },
-            size: normalSize,
-            title: sessionTitle || `${agentId} (recovered)`,
-            titleAuto: true,
-            color: '#d97757',
-            group: null,
-            tags: [],
-            ...(project.cwd ? { cwd: project.cwd } : {}),
-            agentId
-          }
+    // Pane identity proves which process survived, not how the operator named or filed its card.
+    // With no presentation evidence, leave recovery pending instead of fabricating an ungrouped
+    // replacement that background filing could treat as new work.
+    const prior = presentation ?? (remembered?.projectId === project.id ? remembered : undefined)
+    if (!prior) return null
+    const board = prior.board
+    const assignment = board?.assignments.find(a => a.nodeId === nodeId)
+    const hasCurrentPlacement = !!project.kanban?.manualAssignments?.[nodeId] ||
+      !!project.kanban?.assignments.some(a => a.nodeId === nodeId)
+    if (assignment && !hasCurrentPlacement && project.kanban?.columns.filter(c => c.id === assignment.columnId).length !== 1) return null
+    const node: CanvasNodeState = remembered?.projectId === project.id
+      ? { ...structuredClone(remembered.node), agentId }
+      : { ...structuredClone(prior.node), ...(project.cwd ? { cwd: project.cwd } : {}), agentId }
     if (presentation) {
       // Omission in the latest browser presentation clears an old parent or override too.
       for (const key of ['parentId', 'titleAuto', 'pinned', 'manualPlacement', 'collapsed'] as const) delete node[key]
@@ -1009,7 +1009,26 @@ export class HeadlessNodeFactory {
         node.position = { ...presentation.absolutePosition }
       }
     }
-    if (sessionTitle && node.titleAuto !== false) node.title = sessionTitle
+    // Restore only this card's board content. Other cards and current columns remain authoritative.
+    // Existing manual intent is newer than a missing-card snapshot and must never be replaced.
+    if (project.kanban && !project.kanban.manualAssignments?.[nodeId] &&
+        !project.kanban.assignments.some(a => a.nodeId === nodeId)) {
+      if (assignment) project.kanban.assignments.push(structuredClone(assignment))
+      if (board?.manualAssignments?.[nodeId]) {
+        project.kanban.manualAssignments ??= {}
+        project.kanban.manualAssignments[nodeId] = true
+      }
+      const manualVersion = board?.manualAssignmentVersions?.[nodeId]
+      if (manualVersion) {
+        project.kanban.manualAssignmentVersions ??= {}
+        project.kanban.manualAssignmentVersions[nodeId] = manualVersion
+      }
+      const meta = board?.meta?.find(m => m.nodeId === nodeId)
+      if (meta && !project.kanban.meta?.some(m => m.nodeId === nodeId)) {
+        project.kanban.meta ??= []
+        project.kanban.meta.push(structuredClone(meta))
+      }
+    }
     project.nodes.push(node)
     this.handLaunchedNodes.add(nodeId)
     await this.deps.workspaceStore.save(workspace)
@@ -1087,7 +1106,7 @@ export class HeadlessNodeFactory {
       const source = matches[0]
       if (source.node.kind !== 'terminal') return
       this.runtimeAgents.set(nodeId, runtimeAgent)
-      this.rememberRuntimeNode(source.project.id, source.node)
+      this.rememberRuntimeNode(source.project, source.node)
       if (source.node.agentId) return
       source.node.agentId = runtimeAgent
       this.handLaunchedNodes.add(nodeId)
@@ -1134,7 +1153,7 @@ export class HeadlessNodeFactory {
       publishCanvasMutation(projectId, { op: 'remove', id: nodeId }, project.workspaceChange?.after)
     })
     for (const node of nodes) {
-      this.rememberRuntimeNode(project.id, node)
+      this.rememberRuntimeNode(project, node)
       publishNode(project.id, node)
     }
     for (const nodeId of removedIds) {

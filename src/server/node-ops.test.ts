@@ -84,6 +84,8 @@ function harness(opts: {
   const probes: string[] = []
   const warnings: string[] = []
   const ownership = createHeadlessNodeOwnership()
+  // Existing cleanup fixtures represent delegated workers; human/unknown cases clear this proof.
+  for (const n of opts.nodes ?? []) if (n.kind === 'terminal') ownership.record(n.id, { sourceNodeId: 'fixture-director', projectId: 'p1' })
   const sessionsCreated: string[] = []
   const createSessionCwds: Array<string | undefined> = []
   const sentText: Array<[string, string]> = []
@@ -208,6 +210,37 @@ describe('ServerNodeOps', () => {
     ])
     }
   )
+
+  it('inventory distinguishes exact Directors, proved Ungrouped and unavailable board evidence', async () => {
+    const h = harness({ nodes: [node('director'), node('ungrouped'), node('dangling')] })
+    expect((await h.service.list()).every(row => !Object.hasOwn(row, 'columnTitle'))).toBe(true)
+    h.workspace().projects[0].kanban = { columns: [{ id: 'directors', title: 'Directors', color: '#888' }],
+      assignments: [{ nodeId: 'director', columnId: 'directors' }, { nodeId: 'dangling', columnId: 'deleted' }] }
+    const rows = await h.service.list()
+    expect(rows.find(row => row.id === 'director')).toMatchObject({ columnId: 'directors', columnTitle: 'Directors' })
+    expect(rows.find(row => row.id === 'ungrouped')).toMatchObject({ columnId: null, columnTitle: null })
+    expect(Object.hasOwn(rows.find(row => row.id === 'dangling')!, 'columnTitle')).toBe(false)
+    h.workspace().projects[0].kanban!.columns.push({ id: 'directors', title: 'Duplicate', color: '#888' })
+    expect((await h.service.list()).every(row => !Object.hasOwn(row, 'columnTitle'))).toBe(true)
+    h.workspace().projects[0].kanban!.assignments = undefined as unknown as NonNullable<Project['kanban']>['assignments']
+    expect((await h.service.list()).every(row => !Object.hasOwn(row, 'columnTitle'))).toBe(true)
+  })
+
+  it('automatic sweeps preserve human, unknown-creator and Directors cards while reaping a delegated worker', async () => {
+    const h = harness({ nodes: [node('human'), node('unknown'), node('director'), node('worker'), node('live')],
+      pane: { human: false, unknown: false, director: false, worker: false, live: true } })
+    h.ownership.record('human', { sourceNodeId: OPS_OPERATOR_SOURCE_ID, projectId: 'p1' })
+    h.ownership.forget('unknown')
+    h.workspace().projects[0].kanban = { columns: [{ id: 'directors', title: 'Directors', color: '#888' }],
+      assignments: [{ nodeId: 'director', columnId: 'directors' }] }
+    await h.service.sweep(false)
+    expect((await h.service.sweep(false)).affectedIds).toEqual(['worker'])
+    expect(h.workspace().projects[0].nodes.map(n => n.id)).toEqual(['human', 'unknown', 'director', 'live'])
+    expect(h.probes).not.toContain('human')
+    expect(h.probes).not.toContain('unknown')
+    expect(h.probes).not.toContain('director')
+    expect(h.destroyed).toEqual([])
+  })
 
   it('sweeps only terminals proven dead twice and dry-run changes nothing', async () => {
     const h = harness({
@@ -840,6 +873,15 @@ function adoptHarness(opts: {
 }
 
 describe('ServerNodeOps.adoptOrphans', () => {
+  it('boot leaves orphaned operator work untouched when original presentation is unavailable', async () => {
+    const h = adoptHarness({ sessions: ['nt-term-a'] })
+    expect(await h.service.adoptOrphans(true)).toMatchObject({ adopted: [], skipped: [{
+      id: 'term-a', reason: 'original-presentation-unavailable' }] })
+    expect(h.workspace().projects[0].nodes).toEqual([])
+    expect(h.order).toEqual([])
+    expect((await h.service.adoptOrphans()).adopted.map(n => n.id)).toEqual(['term-a'])
+  })
+
   it('cards a live session with no node, publishes it live, and keeps it attach-only', async () => {
     const h = adoptHarness({ sessions: ['nt-term-a'] })
     const result = await h.service.adoptOrphans()
