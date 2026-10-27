@@ -1037,7 +1037,19 @@ export class WorkspaceStore {
           const deleted = new Set(workspace.deletedNodeIds?.[project.id] ?? [])
           const rescued = previous?.nodes.filter(n => !present.has(n.id) && !deleted.has(n.id)) ?? []
           if (!rescued.length) return project
-          const nodes = [...project.nodes, ...rescued]
+          // Keep the incoming order, inserting each retained card before its first
+          // surviving disk successor. Reverse traversal also keeps retained parents
+          // ahead of their retained children and preserves consecutive omissions.
+          const nodes = [...project.nodes]
+          const rescuedIds = new Set(rescued.map(n => n.id))
+          const previousNodes = previous!.nodes
+          for (let i = previousNodes.length - 1; i >= 0; i--) {
+            const node = previousNodes[i]
+            if (!rescuedIds.has(node.id)) continue
+            const successors = new Set(previousNodes.slice(i + 1).map(n => n.id))
+            const index = nodes.findIndex(n => successors.has(n.id) || n.parentId === node.id)
+            nodes.splice(index < 0 ? nodes.length : index, 0, node)
+          }
           const ids = new Set(nodes.map(n => n.id))
           const rooted = nodes.map(n => {
             if (!n.parentId || ids.has(n.parentId)) return n

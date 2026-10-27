@@ -74,6 +74,15 @@ afterEach(async () => {
 })
 
 describe('local save rescue', () => {
+  it('keeps omitted UI cards in their saved order before surviving children', async () => {
+    const store = new WorkspaceStore()
+    const original = [node('group', { kind: 'group' }), node('child', { parentId: 'group' }), node('last')]
+    await store.save(ws([project({ cwd: projRoot, nodes: original })]))
+    const ack = await store.save(ws([project({ cwd: projRoot, nodes: [node('child', { parentId: 'group' }), node('last'), node('new')] })]), { client: 'ui:7' })
+    expect(await readNodes(projRoot)).toEqual(['group', 'child', 'last', 'new'])
+    expect(ack.rescuedNodes?.p1.map(n => n.id)).toEqual(['group'])
+  })
+
   it('rejects a failed project write, preserves the old cards, and saves the latest snapshot on retry', async () => {
     const fake = fakePlatform({ userDataDir: userData })
     initPlatform(fake)

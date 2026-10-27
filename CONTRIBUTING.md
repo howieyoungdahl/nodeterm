@@ -433,7 +433,8 @@ A UI workspace save must include `deletedNodeIds` for explicit card deletions. M
 exited backends and loaded tombstones do not authorize deletion. Record intent in the operator
 remove path, never by comparing snapshots. Retained cards return in `WorkspaceSaveAck.rescuedNodes`
 and are added to the saving tab without replacing live edits. Omitting a populated project
-without delete intent rejects the save.
+without delete intent rejects the save. Reinsert retained cards in their saved order ahead
+of surviving successors, including group children, so legacy saves preserve canvas order.
 
 ## Testing
 
