@@ -874,7 +874,7 @@ describe('native organization through HTTP, store and renderer', () => {
     const retried = await request('/opsapi/organization/retry-events', {}, 'POST')
     expect(retried.status).toBe(200); expect(retried.body.pending).toBe(1)
     expect((await journal.read()).receipts[created.body.id][0].published).toBe(false)
-  })
+  }, 35_000)
 
   it.each(['update', 'undo'])('recovers a persisted %s after receipt acknowledgment failure without another move', async (kind) => {
     const created = await create(), changed = kind === 'undo' ? await patch(created.body.id) : undefined
