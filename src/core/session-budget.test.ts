@@ -1,3 +1,7 @@
+import { promises as fs } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { cleanupReaperGuards } from './session-cleanup-protection'
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -402,6 +406,20 @@ const row = (name: string, clients: number, silentSince: number | string): strin
   `${name}|${clients}|${NOW - 60}|${silentSince}`
 
 describe('createSessionReaper (service)', () => {
+  it('sweep never kills a session whose node is a saved card', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nt-card-budget-'))
+    try {
+      await fs.writeFile(path.join(dir, 'workspace.json'), JSON.stringify({ version: 2,
+        projects: [{ nodes: [{ id: 'saved-card' }] }] }))
+      const w = fakeWorld({ [TMUX_SOCKET]: [row('nt-saved-card', 0, OLD), row('nt-orphan', 0, OLD)] })
+      const reaper = createSessionReaper({ ...base, ...cleanupReaperGuards(dir),
+        tmuxBin: () => 'tmux', sockets: [TMUX_SOCKET], exec: w.exec,
+        env: { NODETERM_SESSION_GRACE_HOURS: '0', NODETERM_SESSION_MAX_DETACHED: '0' } })
+      expect(await reaper.sweep({ pressure: 'pty' })).toBe(1)
+      expect(w.calls.filter(c => c.args.includes('kill-session')).map(c => c.args.at(-1))).toEqual(['=nt-orphan'])
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   const base = {
     readMem: () => ({ availableMb: 100, totalMb: 64_000 }),
     env: {} as NodeJS.ProcessEnv,

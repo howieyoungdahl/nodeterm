@@ -18,7 +18,7 @@ it('Desktop composition protects archived shared projects under pressure and cap
     exec:async(_bin,args)=> {calls.push(args);return args.includes('list-windows') ? 'nt-archived|0|1|1\n' : ''}})
   await reaper.sweep({pressure:'pty'}); await reaper.sweep()
   expect(calls.some(c=>c.includes('kill-session'))).toBe(false)
-  await fs.writeFile(path.join(dir,'workspace.json'),JSON.stringify({version:2,projects:[{nodes:[{id:'archived'}]}]}))
+  await fs.writeFile(path.join(dir,'workspace.json'),JSON.stringify({version:2,projects:[{nodes:[]}]}))
   await reaper.sweep({pressure:'pty'})
   expect(calls.some(c=>c.includes('kill-session'))).toBe(true) // prove the fixture can exercise the kill path
 })
@@ -58,4 +58,20 @@ it('does not steal old or corrupt leases and refuses unsafe directories',async()
   expect(await new FileCleanupReservations(root).reserve(['nt-a'],'one')).toBeNull()
   expect(await fs.readFile(file,'utf8')).toBe('bad owner')
   if(process.getuid){await fs.chmod(root,0o777);await expect(a.reserve(['nt-b'],'one')).rejects.toThrow('unsafe-cleanup-lease-directory')}
+})
+
+it('budget protection includes every folder, inline, closed and SSH-cache card', async () => {
+  const folder = path.join(dir, 'folder', '.nodeterm')
+  await fs.mkdir(folder, { recursive: true })
+  await fs.writeFile(path.join(folder, 'project.json'), JSON.stringify({ nodes: [{ id: 'folder-card' }] }))
+  const file = path.join(dir, 'workspace.json')
+  await fs.writeFile(file, JSON.stringify({ version: 3, entries: [
+    { cwd: path.dirname(folder), closed: true },
+    { project: { nodes: [{ id: 'inline-card' }] } },
+    { ssh: { host: 'fixture' }, cache: { nodes: [{ id: 'cached-card' }] } }
+  ] }))
+  expect((await cleanupReaperGuards(dir).protectedSessions()).sort()).toEqual(
+    ['nt-cached-card', 'nt-folder-card', 'nt-inline-card'])
+  await fs.rm(path.join(folder, 'project.json'))
+  await expect(cleanupReaperGuards(dir).protectedSessions()).rejects.toThrow()
 })
