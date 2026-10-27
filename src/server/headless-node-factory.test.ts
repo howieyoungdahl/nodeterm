@@ -30,6 +30,7 @@ import {
 import { createPersistentHeadlessNodeOwnership } from './node-ownership-store'
 import { SpawnHandlerState } from './spawn-handler-state'
 import { OPS_OPERATOR_SOURCE_ID } from '../shared/ops-operator-identity'
+import { IPC } from '../shared/ipc'
 
 class FakePty implements HeadlessPty {
   readonly creates: PtyCreateOptions[] = []
@@ -411,6 +412,110 @@ describe('HeadlessNodeFactory', () => {
     expect(lines).toHaveLength(1)
     expect(String(lines[0][0])).toContain('attached client')
     info.mockRestore()
+  })
+
+  it('recovers browser presentation from a rejected save after its client detaches', async () => {
+    const nodeId = 'term-browser-unsaved'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    pty.attachedClients.add(nodeId)
+    const snapshot = await store.load({ sideline: false })
+    const browserCard = { ...terminal(nodeId, 'User named this', 'claude', 345),
+      titleAuto: false, pinned: true, manualPlacement: true, position: { x: 345, y: 678 } }
+    snapshot.projects[0].nodes.push({ ...browserCard, shell: 'must-not-recover', cwd: '/must-not-recover',
+      assistantCreation: { version: 1, taskId: 'forged-task', creationId: 'forged-create', declaredOwner: 'forged' } })
+    factoryDeps.sessionTitleOf = () => 'An automatic session name'
+    factory.stop()
+    factory = new TaskFixtureFactory(factoryDeps)
+    // Observe before admission, including a request that ultimately fails its revision check.
+    store.onClientSaveSnapshot = (workspace, source) => factory.observeClientWorkspace(workspace, source)
+    store.registerIpc()
+    const internal = await store.load({ sideline: false })
+    internal.projects[0].nodes[0].title = 'Internal update'
+    await store.save(internal)
+    const shell = platform() as ReturnType<typeof fakePlatform>
+    await expect(shell.handlers[IPC.workspaceSave](12, snapshot)).rejects.toThrow('workspace_conflict')
+    const malformed = structuredClone(snapshot)
+    malformed.projects[0].nodes.find(n => n.id === nodeId)!.position.x = Infinity
+    factory.observeClientWorkspace(malformed, { senderId: 12, accepted: false })
+    const stalePeer = structuredClone(snapshot)
+    stalePeer.projects[0].nodes.find(n => n.id === nodeId)!.title = 'Stale tab title'
+    stalePeer.projects[0].nodes.find(n => n.id === nodeId)!.position = { x: 9000, y: 9000 }
+    await expect(shell.handlers[IPC.workspaceSave](34, stalePeer)).rejects.toThrow('workspace_conflict')
+    await factory.onHookRegistration('claude', nodeId, true)
+    expect((await store.load({ sideline: false })).projects[0].nodes.some(n => n.id === nodeId)).toBe(false)
+    pty.attachedClients.delete(nodeId)
+    await factory.onHookRegistration('claude', nodeId, true)
+    const recovered = (await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)!
+    expect(recovered).toMatchObject(browserCard)
+    expect(recovered.shell).toBeUndefined()
+    expect(recovered.cwd).not.toBe('/must-not-recover')
+    expect(recovered.assistantCreation).toBeUndefined()
+    expect(ownership.ownerOf(nodeId)).toBeUndefined()
+
+    // Even retained browser presentation cannot resurrect an explicitly deleted card.
+    const deleted = await store.load({ sideline: false })
+    deleted.projects[0].nodes = deleted.projects[0].nodes.filter(n => n.id !== nodeId)
+    await store.save(deleted)
+    await factory.onHookRegistration('claude', nodeId, true)
+    expect((await store.load({ sideline: false })).projects[0].nodes.some(n => n.id === nodeId)).toBe(false)
+  })
+
+  it('does not accept foreign-project browser presentation as pane provenance', async () => {
+    const nodeId = 'term-foreign-snapshot'
+    pty.live.add(nodeId)
+    const snapshot = await store.load({ sideline: false })
+    snapshot.projects[0].nodes.push(terminal(nodeId, 'Forged location'))
+    factory.observeClientWorkspace(snapshot)
+    await factory.onHookRegistration('claude', nodeId, true)
+    expect((await store.load({ sideline: false })).projects[0].nodes.some(n => n.id === nodeId)).toBe(false)
+    pty.paneProjects.set(nodeId, 'project-1')
+    await factory.onHookRegistration('claude', nodeId, true)
+    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)?.title).toBe('claude (recovered)')
+  })
+
+  it('lets a completed save switch presentation reporters, but refuses stale reports from the old tab', async () => {
+    const nodeId = 'term-two-reporters'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    const first = await store.load({ sideline: false })
+    first.projects[0].nodes.push({ ...terminal(nodeId, 'First report'), titleAuto: false })
+    factory.observeClientWorkspace(first, { senderId: 1, accepted: false })
+    const accepted = structuredClone(first)
+    const second = accepted.projects[0].nodes.find(n => n.id === nodeId)!
+    second.title = 'Saved by second tab'
+    second.position = { x: 444, y: 555 }
+    factory.observeClientWorkspace(accepted, { senderId: 2, accepted: true })
+    factory.observeClientWorkspace(first, { senderId: 1, accepted: false })
+    await factory.onHookRegistration('claude', nodeId, true)
+    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)).toMatchObject(second)
+  })
+
+  it('uses a known session title for recovery when no browser snapshot was available', async () => {
+    const nodeId = 'term-known-session'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    factoryDeps.sessionTitleOf = () => 'Real session title'
+    factory.stop()
+    factory = new TaskFixtureFactory(factoryDeps)
+    await factory.onHookRegistration('claude', nodeId, true)
+    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)?.title).toBe('Real session title')
+  })
+
+  it('releases remembered geometry from an unavailable group at its original canvas position', async () => {
+    const nodeId = 'term-unsaved-grouped'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    const snapshot = await store.load({ sideline: false })
+    snapshot.projects[0].nodes.push(
+      { ...terminal('unsaved-frame', 'Frame'), kind: 'group', position: { x: 500, y: 700 } },
+      { ...terminal(nodeId, 'Grouped'), parentId: 'unsaved-frame', position: { x: 30, y: 40 } }
+    )
+    factory.observeClientWorkspace(snapshot)
+    await factory.onHookRegistration('claude', nodeId, true)
+    const recovered = (await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)!
+    expect(recovered.position).toEqual({ x: 530, y: 740 })
+    expect(recovered.parentId).toBeUndefined()
   })
 
   it('names an unsaved open-tab source instead of blaming its project', async () => {

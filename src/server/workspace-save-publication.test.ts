@@ -18,6 +18,8 @@ it('delivers a normal save complete stamp to both Server peers before ACK, rejec
   const frames: unknown[][] = [[], []]
   const clients = frames.map(frame => shell.attach({ sendText: raw => frame.push(JSON.parse(raw)), sendBinary: () => {} }))
   const store = new WorkspaceStore(), queue = new WorkspaceMutationQueue()
+  const snapshots: Array<{ senderId: number; accepted: boolean }> = []
+  store.onClientSaveSnapshot = (_workspace, source) => { snapshots.push(source) }
   store.clientMutationRunner = work => queue.run(work)
   const workspace: Workspace = { version: 2, activeProjectId: 'p', projects: [{ id: 'p', name: 'Synthetic', color: '#fff', viewport: { x: 0, y: 0, zoom: 1 }, nodes: [], kanban: { columns: [], assignments: [] } }] }
   await store.save(workspace)
@@ -35,4 +37,8 @@ it('delivers a normal save complete stamp to both Server peers before ACK, rejec
   const rejected = await shell.dispatch(clients[1], { t: 'req', id: 2, method: IPC.workspaceSave, args: [stale] })
   expect(rejected).toMatchObject({ ok: false, error: { message: expect.stringContaining('workspace_conflict') } })
   expect(frames.map(peer => peer.length)).toEqual([1, 1])
+  expect(snapshots).toEqual([
+    { senderId: clients[0], accepted: false }, { senderId: clients[0], accepted: true },
+    { senderId: clients[1], accepted: false }
+  ])
 })

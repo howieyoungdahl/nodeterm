@@ -229,6 +229,19 @@ to the installed revision. At least one adoption is required; duplicates alone a
 changes supply no grant. Snapshot again after adoption and require the ordinary host ACK. Genuine
 overlap, missed chain, overflow, malformed ACK, failed content installation and retry failure retain
 the original failure/conflict paths. No UI warning is cleared by publication arrival itself.
+When the immediate retry also loses to safely installed contiguous publications, the coordinator
+returns `WorkspaceSaveSupersededError` to the existing bounded delivery backoff. It never spins or
+silently acknowledges an unsaved card. Missing evidence or real overlap still raises the conflict
+warning. This prevents internal save bursts from suspending persistence for the rest of the tab.
+Server recovery retains a bounded presentation-only cache from authenticated UI save attempts before
+FIFO admission, even if revision fencing rejects the request. Only a proven current-run pane/project
+pair enters it. Recovery still requires a verified hook, an alive pane, no attached subscriber and no
+retained deletion. The cache cannot restore execution fields or creator receipts. It preserves manual
+titles and geometry; automatic titles can use the mirror's known session name. This cache is per-run,
+so an unreported card still has no recoverable original geometry after a server restart.
+Cache entries retain the reporting client ID. Only a successful save can transfer that reporter;
+rejected saves from another tab cannot overwrite its presentation. This is a conservative source
+choice for display data, separate from the private creator ledger and never proof of user focus.
 
 Explicit retained deletions are the exception to open-card preservation. `fileToProject` projects
 the loaded `_reconciliation.deleted` records into runtime `deletedEntities`. Both conflict choices

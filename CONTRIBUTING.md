@@ -574,6 +574,15 @@ successful content installation along a contiguous chain from the rejected snaps
 revision. Take a fresh merged snapshot and require its normal save ACK. Global revision drift alone,
 a conflict, missing chain, overflow, malformed ACK, failed installation or failed retry never grants
 recovery. Keep failure reporting behind this save promise instead of clearing UI warnings directly.
+If the immediate retry is also overtaken and its entire publication chain installs safely,
+report a retryable delivery failure to the existing bounded backoff. Do not turn proven disjoint
+contention into a conflict warning that suspends all future saves.
+Server missing-card recovery remembers presentation from authenticated browser save attempts,
+including rejected ones, only for a pane with current-run project provenance. That cache grants no
+ownership or execution settings. Retained deletions still win; manual titles and geometry survive
+client detachment, and a known session title takes precedence over a generic recovery label.
+Only a completed save may switch the presentation's reporting client; a rejected stale peer
+cannot replace another tab's remembered title or position.
 
 Kanban's Manual order / Priority selector is a personal per-project localStorage preference.
 Priority ordering is derived after the existing visibility filters, only for session cards.

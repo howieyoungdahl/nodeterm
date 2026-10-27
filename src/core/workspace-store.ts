@@ -202,6 +202,8 @@ export class WorkspaceStore {
   onPersist?: () => void
   /** Server browser writes share the same admission FIFO as operator/agent transactions. */
   clientMutationRunner?: <T>(work: () => Promise<T>) => Promise<T>
+  /** Presentation evidence only. A successful save may transfer its reporting client. */
+  onClientSaveSnapshot?: (workspace: Workspace, source: { senderId: number; accepted: boolean }) => void
 
   constructor(
     private remoteIO?: RemoteWorkspaceIO,
@@ -262,7 +264,12 @@ export class WorkspaceStore {
     // the truncated node list. With N browser tabs on one Server there is otherwise no way to tell
     // a stale tab from the one the user is looking at, and that was the whole diagnosis problem.
     platform().handleWithSender(IPC.workspaceSave, (senderId: number, workspace: Workspace) => {
-      const work = () => this.save(workspace, { client: `ui:${senderId}`, requireRevision: true, publish: true })
+      this.onClientSaveSnapshot?.(workspace, { senderId, accepted: false })
+      const work = async () => {
+        const ack = await this.save(workspace, { client: `ui:${senderId}`, requireRevision: true, publish: true })
+        this.onClientSaveSnapshot?.(workspace, { senderId, accepted: true })
+        return ack
+      }
       return this.clientMutationRunner ? this.clientMutationRunner(work) : work()
     })
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
