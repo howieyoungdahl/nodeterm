@@ -609,3 +609,9 @@ save generation. Use the merge's canonical persisted equality to detect retained
 request persistence only for those, and never clear already dirty generations. Canonical
 Project.kanban.meta merges by nodeId so separate-card priorities coexist. Assignees/labels and
 arbitrary nested meta arrays remain atomic; competing same-card priority choices still conflict.
+
+Workspace serialization preserves explicit Flow width/height before DOM measurements. React Flow
+measures integer offset dimensions, while saved and hand-resized geometry may be fractional.
+Treating those measurements as edits raises false operator-delete conflicts and redundant saves.
+Hand resize dimension changes set explicit attributes; measured sizes remain a fallback for nodes
+without explicit geometry. Keep genuine local resize and draft conflicts in the three-way merge.
