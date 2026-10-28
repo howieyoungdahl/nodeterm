@@ -115,6 +115,8 @@ export interface OpsNodeInventoryItem {
   organization?: NodeOrganization
   assistantCreated?: boolean
   columnId?: string | null
+  /** Omitted = unknown board evidence; null = proved Ungrouped; string = exact column title. */
+  columnTitle?: string | null
   revision?: string
   id: string
   kind: CanvasNodeState['kind']
@@ -143,6 +145,7 @@ export interface ServerNodeOpsDeps {
   sessionPresence(nodeId: string): Promise<Exclude<OpsPaneState, 'none'>>
   destroySession(nodeId: string): Promise<void>
   statusOf(nodeId: string): { state?: AgentState; updatedAt: number } | undefined
+  sessionIdOf?(nodeId: string): string | undefined
   ownerOf(nodeId: string): { sourceNodeId: string; projectId?: string; assistantCreationId?: string } | undefined
   /** Stamp the durable ownership ledger for a node `create()` just persisted. Absent = ownership is
    *  never recorded and the node reads back as not operator-created (fails closed). */
@@ -282,7 +285,7 @@ export interface OpsSkippedOrphan {
   id: string
   sessionName: string
   cwd: string | null
-  reason: OrphanSkipReason
+  reason: OrphanSkipReason | 'original-presentation-unavailable'
 }
 
 export interface OpsAdoptResult {
@@ -433,6 +436,20 @@ export function removeNodeCard(project: Project, nodeId: string): boolean {
   return true
 }
 
+/** A failed/ambiguous board read is not Ungrouped. This evidence comes from the same project
+ * snapshot as the card, never from whichever project a CLI caller happens to have open. */
+function inventoryColumnTitle(project: Project, nodeId: string): string | null | undefined {
+  const board = project.kanban
+  if (!board || !Array.isArray(board.columns) || !Array.isArray(board.assignments)) return undefined
+  if (board.columns.some(c => !c || typeof c.id !== 'string' || !c.id || typeof c.title !== 'string' || !c.title.trim()) ||
+      new Set(board.columns.map(c => c.id)).size !== board.columns.length ||
+      board.assignments.some(a => !a || typeof a.nodeId !== 'string' || !a.nodeId || typeof a.columnId !== 'string' || !a.columnId)) return undefined
+  const assignments = board.assignments.filter(a => a.nodeId === nodeId)
+  if (!assignments.length) return null
+  if (assignments.length !== 1) return undefined
+  return board.columns.find(c => c.id === assignments[0].columnId)?.title
+}
+
 /** One mutation engine shared by the REST sweep, single delete, and the periodic reaper. */
 export class ServerNodeOps {
   private readonly now: () => number
@@ -473,6 +490,7 @@ export class ServerNodeOps {
         pending.push((async () => {
           const status = this.deps.statusOf(node.id)
           const owner = this.deps.ownerOf(node.id)
+          const columnTitle = inventoryColumnTitle(project, node.id)
           const origin = owner?.assistantCreationId ? origins.get(owner.assistantCreationId) : undefined
           return {
             id: node.id,
@@ -489,13 +507,24 @@ export class ServerNodeOps {
             organization: node.organization,
             assistantCreated: owner?.sourceNodeId === OPS_OPERATOR_SOURCE_ID && owner.projectId === project.id &&
               origin?.nodeId === node.id && origin.projectId === project.id,
-            columnId: nodePlacement(project.kanban, node.id).columnId,
+            columnId: columnTitle !== undefined ? nodePlacement(project.kanban, node.id).columnId : null,
+            ...(columnTitle !== undefined ? { columnTitle } : {}),
             revision: project.revision
           }
         })())
       }
     }
     return Promise.all(pending)
+  }
+
+  /** Automatic cleanup cannot infer human permission from a dead backend. Unknown creators
+   * remain human work; only positively attested assistant-created cards may be reaped. */
+  private protectedFromAutomaticSweep(project: Project, node: CanvasNodeState): boolean {
+    if (node.agentSessionId?.trim() || this.deps.sessionIdOf?.(node.id)?.trim()) return true
+    const owner = this.deps.ownerOf(node.id)
+    if (!owner || owner.sourceNodeId === OPS_OPERATOR_SOURCE_ID && !owner.assistantCreationId) return true
+    const columnTitle = inventoryColumnTitle(project, node.id)
+    return project.kanban !== undefined && (columnTitle === undefined || columnTitle?.trim().toLowerCase() === 'directors')
   }
 
   /**
@@ -509,12 +538,18 @@ export class ServerNodeOps {
       try { generation = await this.deps.backendGeneration?.() ?? null } catch { /* unknown */ }
       const previousDead = generation && generation === this.previousGeneration ? this.previousDead : new Set<string>()
       const deadByProject = new Map<Project, string[]>()
+      const retainedDead: string[] = []
       let scanned = 0
       const protectedCleanupIds = new Set([...(await this.deps.protectedCleanupNodeIds?.() ?? []), ...(this.deps.liveProtectedCleanupNodeIds?.(workspace) ?? [])])
       for (const project of workspace.projects) {
         if (project.ssh) continue
         for (const node of project.nodes) {
           if (node.kind !== 'terminal' || node.cleanupArchiveId || node.text?.trim() || node.pendingLaunch || ['working', 'blocked'].includes(this.deps.statusOf(node.id)?.state ?? '') || protectedCleanupIds.has(node.id)) continue
+          if (!force && this.protectedFromAutomaticSweep(project, node)) {
+            if (node.kind === 'terminal' && (await this.paneState(project, node)) === 'dead' &&
+                (await this.paneState(project, node)) === 'dead') retainedDead.push(node.id)
+            continue
+          }
           scanned += 1
           // Two definitive misses per pass, plus a separate pass and an apply-boundary recheck. Any read failure
           // becomes `unknown`, never absence, and therefore cannot enter the deletion set.
@@ -526,6 +561,9 @@ export class ServerNodeOps {
         }
       }
       const candidates = [...deadByProject.values()].flat()
+      // Keep the card visible and let attach-only return the existing exited-session state.
+      // This probes again inside PtyManager and never creates or destroys a backend.
+      if (!dryRun && retainedDead.length) await this.deps.protectAdopted?.(retainedDead)
       const mass = deadCardMassRefusal(candidates.length, scanned, this.massLimit)
       // A healthy host must still have a definitely live backend. A whole-server loss is
       // never converted into a deletion list, even if the same failure lasts several ticks.
@@ -568,7 +606,7 @@ export class ServerNodeOps {
 
       for (const [project, ids] of deadByProject) for (const id of ids) {
         const node = project.nodes.find(n => n.id === id)!
-        if (!force && ((await this.paneState(project, node)) !== 'dead' ||
+        if (!force && (this.protectedFromAutomaticSweep(project, node) || (await this.paneState(project, node)) !== 'dead' ||
           ['working', 'blocked'].includes(this.deps.statusOf(id)?.state ?? ''))) {
           this.previousDead.delete(id)
           return { dryRun, affectedIds: [], scanned, pendingConfirmation: true, remaining: candidates.length }
@@ -586,7 +624,9 @@ export class ServerNodeOps {
       // Hooks can run while the final backend-generation probe awaits. Re-read synchronous
       // activity/loop protection after that last await and before changing any card.
       const liveProtected = new Set(this.deps.liveProtectedCleanupNodeIds?.(workspace) ?? [])
-      if (affectedIds.some(id => liveProtected.has(id) ||
+      const newlyProtected = !force && [...deadByProject].some(([project, ids]) =>
+        ids.some(id => this.protectedFromAutomaticSweep(project, project.nodes.find(n => n.id === id)!)))
+      if (newlyProtected || affectedIds.some(id => liveProtected.has(id) ||
         ['working', 'blocked'].includes(this.deps.statusOf(id)?.state ?? ''))) {
         for (const id of affectedIds) this.previousDead.delete(id)
         return { dryRun, affectedIds: [], scanned, pendingConfirmation: true, remaining: candidates.length }
@@ -620,7 +660,7 @@ export class ServerNodeOps {
    * A shell that wires no session listing adopts nothing, which is what makes this inert on the
    * desktop and in every test that does not ask for it.
    */
-  adoptOrphans(): Promise<OpsAdoptResult> {
+  adoptOrphans(automatic = false): Promise<OpsAdoptResult> {
     return this.runExclusive(async () => {
       const live = !!this.deps.publishNode
       if (!this.deps.listSessions || !this.deps.listPaneCwds) {
@@ -643,6 +683,14 @@ export class ServerNodeOps {
         cwd: entry.cwd,
         reason: entry.reason
       }))
+      // Boot knows that these panes exist, but cwd and a live session name cannot recover the
+      // operator's original title, Directors placement or manual metadata. Keep the backend
+      // untouched and report the gap. The separately authenticated operator route is deliberate
+      // generic adoption and remains available for an explicit recovery decision.
+      if (automatic) return { adopted: [], skipped: [...skipped, ...plan.adopt.map(entry => ({
+        id: entry.node.id, sessionName: entry.sessionName, cwd: paneCwdBySession.get(entry.sessionName) ?? null,
+        reason: 'original-presentation-unavailable' as const
+      }))], live }
       if (!plan.adopt.length) return { adopted: [], skipped, live }
 
       const touched = new Map<string, Project>()

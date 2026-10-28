@@ -151,6 +151,7 @@ import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useProjects } from '../state/projects'
+import { canAutoSyncSessionTitle, syncSessionTitle } from '../lib/sessionTitleSync'
 import { isKanbanOpen, useViewMode, viewFor } from '../state/viewMode'
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
@@ -4365,7 +4366,8 @@ export function TerminalNode({
   // update the OSC terminal title, so reading the agent's own session store is the only way the name
   // shows up after a resume. Resolved strictly by THIS node's sessionId — we do NOT sync until it's
   // known, otherwise same-folder nodes would adopt whichever session wrote last. Polls only while
-  // the title still auto-tracks the session (titleAuto) and stops once the user renames by hand.
+  // the title still auto-tracks the session (titleAuto). Manual titles and current Directors
+  // assignments are protected, including board changes while the read is in flight.
   // Gated on canReadTitleNode (TITLE_READ_CAPABLE), NOT on canRenameNode: reading a session's name
   // and being able to set one are different capabilities, and gemini has only the first. `agentId`
   // rides along so main picks the right reader: claude's transcript .jsonl vs grok's summary.json vs
@@ -4386,19 +4388,22 @@ export function TerminalNode({
     // transcript tail read in main, so N agent nodes each shave 3/4 of that steady load.
     let delayMs = 4000
     let timer: ReturnType<typeof setTimeout> | undefined
+    const projectId = owningProjectId()
+    const canUpdate = () =>
+      !cancelled &&
+      !editingTitleRef.current &&
+      !!getNode(id) &&
+      getNode(id)?.data.titleAuto !== false &&
+      canAutoSyncSessionTitle(projectId, id, titleAutoRef.current)
     const sync = async () => {
-      if (!titleAutoRef.current || editingTitleRef.current) return
-      const name = await api.pty.readSessionName(sid, accountForReadsRef.current, agentId)
-      if (cancelled) return
-      if (name) delayMs = 15000
-      if (
-        name &&
-        titleAutoRef.current &&
-        !editingTitleRef.current &&
-        name !== titleRef.current
-      ) {
-        updateNodeData(id, { title: name })
-      }
+      await syncSessionTitle(
+        canUpdate,
+        () => api.pty.readSessionName(sid, accountForReadsRef.current, agentId),
+        (name) => {
+          delayMs = 15000
+          if (name !== titleRef.current) updateNodeData(id, { title: name })
+        }
+      )
     }
     const tick = async () => {
       await sync()
@@ -4409,7 +4414,7 @@ export function TerminalNode({
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [id, canReadTitleNode, status?.sessionId, data.titleAuto, updateNodeData])
+  }, [id, canReadTitleNode, status?.sessionId, data.titleAuto, updateNodeData, getNode])
 
   // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).
   useEffect(() => {

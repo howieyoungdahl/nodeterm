@@ -414,6 +414,37 @@ describe('HeadlessNodeFactory', () => {
     info.mockRestore()
   })
 
+  it('persists original presentation within ten seconds even while its browser stays attached', async () => {
+    const nodeId = 'term-attached-unsaved'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    pty.attachedClients.add(nodeId)
+    const timers: Array<{ cb: () => void; ms: number }> = []
+    factory.stop()
+    factory = new TaskFixtureFactory({ ...factoryDeps, schedule: (cb, ms) => {
+      timers.push({ cb, ms })
+      return 123 as unknown as ReturnType<typeof setTimeout>
+    }, clearSchedule: () => {} })
+    const snapshot = await store.load({ sideline: false })
+    const card = { ...terminal(nodeId, 'Original operator title'), titleAuto: false }
+    delete card.agentId // A quiet browser shell has no verified agent identity.
+    snapshot.projects[0].nodes.push(card)
+    snapshot.projects[0].kanban = { columns: [{ id: 'directors', title: 'Directors', color: '#888' }],
+      assignments: [{ nodeId, columnId: 'directors' }], manualAssignments: { [nodeId]: true } }
+    factory.observeClientWorkspace(snapshot, { senderId: 12, accepted: false })
+    factory.observeClientWorkspace(snapshot, { senderId: 12, accepted: false })
+    expect(timers).toHaveLength(1)
+    expect(timers[0].ms).toBe(10_000)
+    timers[0].cb()
+    await expect.poll(async () => (await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)).toMatchObject(card)
+    const reloaded = (await store.load({ sideline: false })).projects[0]
+    expect(reloaded.kanban?.assignments).toEqual(snapshot.projects[0].kanban!.assignments)
+    expect(reloaded.kanban?.manualAssignments?.[nodeId]).toBe(true)
+    expect(ownership.ownerOf(nodeId)).toBeUndefined()
+    expect(pty.destroys).toEqual([])
+    expect(pty.attachedClients.has(nodeId)).toBe(true)
+  })
+
   it('recovers browser presentation from a rejected save after its client detaches', async () => {
     const nodeId = 'term-browser-unsaved'
     pty.live.add(nodeId)
@@ -461,6 +492,50 @@ describe('HeadlessNodeFactory', () => {
     expect((await store.load({ sideline: false })).projects[0].nodes.some(n => n.id === nodeId)).toBe(false)
   })
 
+  it('retains the original automatic title and Directors board evidence instead of a newer session name', async () => {
+    const nodeId = 'term-director-title'
+    pty.live.add(nodeId)
+    pty.paneProjects.set(nodeId, 'project-1')
+    factoryDeps.sessionTitleOf = () => 'Different inferred session name'
+    factory.stop(); factory = new TaskFixtureFactory(factoryDeps)
+    const snapshot = await store.load({ sideline: false })
+    snapshot.projects[0].nodes.push({ ...terminal(nodeId, 'Original director work'), titleAuto: true })
+    snapshot.projects[0].kanban = { columns: [{ id: 'directors', title: 'Directors', color: '#888' }],
+      assignments: [{ nodeId, columnId: 'directors' }], meta: [{ nodeId, priority: 'urgent' }] }
+    // The column exists on disk, but this new card and its placement have not been saved yet.
+    const disk = await store.load({ sideline: false })
+    disk.projects[0].kanban = { ...snapshot.projects[0].kanban, assignments: [], meta: [] }
+    await store.save(disk)
+    factory.observeClientWorkspace(snapshot)
+    await factory.onHookRegistration('claude', nodeId, true)
+    const recovered = (await store.load({ sideline: false })).projects[0]
+    expect(recovered.nodes.find(n => n.id === nodeId)?.title).toBe('Original director work')
+    expect(recovered.kanban?.assignments).toContainEqual({ nodeId, columnId: 'directors' })
+    expect(recovered.kanban?.meta).toContainEqual({ nodeId, priority: 'urgent' })
+  })
+
+  it('keeps trusted runtime execution metadata and a newer manual placement during presentation recovery', async () => {
+    const nodeId = 'term-source'
+    pty.live.add(nodeId); pty.paneProjects.set(nodeId, 'project-1')
+    const known = await store.load({ sideline: false })
+    Object.assign(known.projects[0].nodes.find(n => n.id === nodeId)!, { shell: 'trusted-shell', cwd: projectDir, accountId: 'trusted-account' })
+    known.projects[0].kanban = { columns: [{ id: 'old', title: 'Directors', color: '#888' }], assignments: [{ nodeId, columnId: 'old' }] }
+    await store.save(known)
+    await factory.onHookRegistration('claude', nodeId, true)
+    const browser = await store.load({ sideline: false })
+    Object.assign(browser.projects[0].nodes.find(n => n.id === nodeId)!, { title: 'User original', titleAuto: false, shell: 'forged-shell', accountId: 'forged-account' })
+    factory.observeClientWorkspace(browser)
+    const file = path.join(projectDir, '.nodeterm', 'project.json')
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    raw.nodes = raw.nodes.filter((n: CanvasNodeState) => n.id !== nodeId)
+    raw.kanban = { columns: [{ id: 'new', title: 'Directors', color: '#888' }], assignments: [{ nodeId, columnId: 'new' }], manualAssignments: { [nodeId]: true } }
+    fs.writeFileSync(file, JSON.stringify(raw))
+    await factory.onHookRegistration('claude', nodeId, true)
+    const recovered = (await store.load({ sideline: false })).projects[0]
+    expect(recovered.nodes.find(n => n.id === nodeId)).toMatchObject({ title: 'User original', shell: 'trusted-shell', cwd: projectDir, accountId: 'trusted-account' })
+    expect(recovered.kanban?.assignments).toEqual([{ nodeId, columnId: 'new' }])
+  })
+
   it('does not accept foreign-project browser presentation as pane provenance', async () => {
     const nodeId = 'term-foreign-snapshot'
     pty.live.add(nodeId)
@@ -471,7 +546,7 @@ describe('HeadlessNodeFactory', () => {
     expect((await store.load({ sideline: false })).projects[0].nodes.some(n => n.id === nodeId)).toBe(false)
     pty.paneProjects.set(nodeId, 'project-1')
     await factory.onHookRegistration('claude', nodeId, true)
-    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)?.title).toBe('claude (recovered)')
+    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)).toBeUndefined()
   })
 
   it('lets a completed save switch presentation reporters, but refuses stale reports from the old tab', async () => {
@@ -491,7 +566,7 @@ describe('HeadlessNodeFactory', () => {
     expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)).toMatchObject(second)
   })
 
-  it('uses a known session title for recovery when no browser snapshot was available', async () => {
+  it('does not substitute a session title for unavailable original card and board evidence', async () => {
     const nodeId = 'term-known-session'
     pty.live.add(nodeId)
     pty.paneProjects.set(nodeId, 'project-1')
@@ -499,7 +574,7 @@ describe('HeadlessNodeFactory', () => {
     factory.stop()
     factory = new TaskFixtureFactory(factoryDeps)
     await factory.onHookRegistration('claude', nodeId, true)
-    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)?.title).toBe('Real session title')
+    expect((await store.load({ sideline: false })).projects[0].nodes.find(n => n.id === nodeId)).toBeUndefined()
   })
 
   it('releases remembered geometry from an unavailable group at its original canvas position', async () => {

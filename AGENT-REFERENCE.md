@@ -248,7 +248,8 @@ Server recovery retains a bounded presentation-only cache from authenticated UI 
 FIFO admission, even if revision fencing rejects the request. Only a proven current-run pane/project
 pair enters it. Recovery still requires a verified hook, an alive pane, no attached subscriber and no
 retained deletion. The cache cannot restore execution fields or creator receipts. It preserves manual
-titles and geometry; automatic titles can use the mirror's known session name. This cache is per-run,
+titles, geometry and per-card board intent. Recovery keeps the original snapshot title, including
+automatic titles, rather than substituting a mirror name. This cache is per-run,
 so an unreported card still has no recoverable original geometry after a server restart.
 Cache entries retain the reporting client ID. Only a successful save can transfer that reporter;
 rejected saves from another tab cannot overwrite its presentation. This is a conservative source
@@ -3111,3 +3112,14 @@ save generation. Use the merge's canonical persisted equality to detect retained
 request persistence only for those, and never clear already dirty generations. Canonical
 Project.kanban.meta merges by nodeId so separate-card priorities coexist. Assignees/labels and
 arbitrary nested meta arrays remain atomic; competing same-card priority choices still conflict.
+
+Automatic missing-card recovery requires original card presentation plus current-run live pane/project proof.
+Preserve the original title and per-card board assignment, manual intent and metadata; never synthesize
+a renamed Ungrouped replacement when those originals are unavailable. Boot reports such orphan panes
+as `original-presentation-unavailable` and leaves them running. Explicit authenticated operator adoption
+remains a deliberate generic recovery action. Automatic dead-card sweeps preserve unknown creators,
+human operator cards, Directors cards and cards with a saved or hook-known resumable session.
+Confirmed exited backends use the existing attach-only dead-card state while the card stays visible.
+Observed browser presentation is persisted through the mutation queue after ten seconds even when
+the tab stays attached or no agent hook arrives. Rejected saves never reset that deadline; retained
+deletions, current placement and current-run live pane/project proof still win.

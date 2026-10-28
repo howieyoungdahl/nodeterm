@@ -107,6 +107,14 @@ const tmux = (...args: string[]): string =>
  * production, and the reader judging our bytes is a real terminal application rather than a stub.
  */
 function startPane(session: string, binName: string): void {
+  // A vitest retry re-runs the test body on the same private socket, so a session left by the
+  // failed attempt would make `new-session` die with "duplicate session" and the retry could never
+  // pass. Start every attempt from a clean slate (the socket holds only this file's sessions).
+  try {
+    tmux('kill-session', '-t', `=${session}`)
+  } catch {
+    // no such session: the first attempt
+  }
   tmux(
     'new-session',
     '-d',

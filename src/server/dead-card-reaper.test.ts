@@ -30,7 +30,7 @@ describe('ServerDeadCardReaper', () => {
     expect(unref).toHaveBeenCalledOnce()
     tick!()
     await vi.waitFor(() => expect(sweep).toHaveBeenCalledWith(false))
-    expect(info).toHaveBeenCalledWith('[nodeterm-server] reaped 1 dead terminal card(s)')
+    expect(info).toHaveBeenCalledWith('[nodeterm-server] reaped 1 dead terminal card(s): term-dead (actor=dead-card-sweep reason=confirmed-absent-backend)')
   })
 
   it('does not overlap a slow sweep and resumes after it settles', async () => {

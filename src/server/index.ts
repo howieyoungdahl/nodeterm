@@ -506,6 +506,7 @@ export async function startServer(
         : undefined
     },
     ownerOf: (nodeId) => nodeOwnership.ownerOf(nodeId),
+    sessionIdOf: (nodeId) => mirrorEntry(nodeId)?.sessionId,
     recordOwnership: (nodeId, owner) => nodeOwnership.record(nodeId, owner),
     flushOwnership: () => nodeOwnership.flush(),
     creationReceipts: assistantCreationReceipts,
@@ -814,14 +815,11 @@ export async function startServer(
         `[nodeterm-server] marked ${protectedSessions.dead.length} persisted terminal card(s) dead; no backend was respawned`
       )
     }
-    // …and the mirror image of that classification: a live `nt-<id>` session that NO project has a
-    // card for gets one back. This is the repair for cards already lost to a stale client's save
-    // (the rescue above only stops new losses), and it is consistent with the inert-boot rule
-    // rather than an exception to it: adoption adds a CARD for a backend it just proved exists, and
-    // creates/attaches/sends nothing — the browser attaches on mount through the attach-only path,
-    // because `protectAdopted` puts every adopted id through the same boot classification.
+    // Inspect surviving panes without inventing replacement operator cards. Original title and
+    // manual board placement cannot be reconstructed from cwd/mirror evidence after a restart;
+    // explicit authenticated adoption remains available, but boot reports missing presentation.
     try {
-      const adoption = await nodeOps.adoptOrphans()
+      const adoption = await nodeOps.adoptOrphans(true)
       for (const [projectName, entries] of groupByProject(adoption.adopted)) {
         console.info(
           `[nodeterm-server] adopted ${entries.length} orphaned live terminal(s) into ` +
