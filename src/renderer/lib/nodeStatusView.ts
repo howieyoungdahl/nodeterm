@@ -32,6 +32,7 @@ export function statusViewFor(
 ): NodeStatusView {
   return deriveNodeStatus({
     state: status?.state,
+    idleSince: status?.idleSince,
     updatedAt: status?.stateAt,
     pane: status?.pane,
     failure: status?.failure,

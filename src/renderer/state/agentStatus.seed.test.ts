@@ -3,7 +3,6 @@ import type { AgentStatusSnapshot, AgentStatusSnapshotEntry } from '@shared/type
 import {
   createAgentStatusSession,
   useAgentStatus,
-  SEED_MAX_AGE_MS,
   STALE_WORKING_MS
 } from './agentStatus'
 
@@ -87,15 +86,14 @@ describe('seedFromSnapshot — what it paints', () => {
 })
 
 describe('seedFromSnapshot — the freshness cut', () => {
-  it('applies the SHORTER working window and the longer one to every other state', () => {
+  it('applies the working window while keeping waiting state', () => {
     // One age, two verdicts — the fixture has to discriminate, or a single shared cut would pass
-    // it. 25 min is past the working sweep window (20) and inside the seed cut (30): a `working`
+    // it. 25 min is past the working sweep window (20) and well within the mirror retention: a `working`
     // that old would be swept back to idle by the next 60 s sweep anyway, so painting it only
     // flickers, while a `waiting` that old is still exactly what the user came back to.
     const store = session()
     const updatedAt = NOW - 25 * 60_000
     expect(updatedAt).toBeLessThan(NOW - STALE_WORKING_MS)
-    expect(updatedAt).toBeGreaterThan(NOW - SEED_MAX_AGE_MS)
     store.getState().seedFromSnapshot(
       snap({ w: { state: 'working', updatedAt }, q: { state: 'waiting', updatedAt } }),
       NOW
@@ -117,18 +115,7 @@ describe('seedFromSnapshot — the freshness cut', () => {
     expect(store.getState().byId.stale).toBeUndefined()
   })
 
-  it('drops a done/waiting older than the seed cut — hours ago is not a badge you are waiting on', () => {
-    const store = session()
-    store.getState().seedFromSnapshot(
-      snap({
-        old: { state: 'done', updatedAt: NOW - SEED_MAX_AGE_MS - 1000 },
-        recent: { state: 'done', updatedAt: NOW - SEED_MAX_AGE_MS + 1000 }
-      }),
-      NOW
-    )
-    expect(store.getState().byId.old).toBeUndefined()
-    expect(store.getState().byId.recent?.state).toBe('done')
-  })
+
 })
 
 describe('seedFromSnapshot — never clobbers a live state', () => {
@@ -245,12 +232,12 @@ describe('seedFromSnapshot — idempotence', () => {
     expect(store.getState().byId.n1).toBe(entry)
   })
 
-  it('returns the same table when every entry is stale', () => {
+  it('returns the same table when every working entry is stale', () => {
     const store = session()
     const before = store.getState().byId
     store
       .getState()
-      .seedFromSnapshot(snap({ n1: { state: 'done', updatedAt: NOW - 10 * 3600_000 } }), NOW)
+      .seedFromSnapshot(snap({ n1: { state: 'working', updatedAt: NOW - 10 * 3600_000 } }), NOW)
     expect(store.getState().byId).toBe(before)
   })
 })

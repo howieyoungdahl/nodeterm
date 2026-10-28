@@ -36,9 +36,9 @@ import { WORKING_STALE_MS, isStaleWorking } from '@shared/agents/stale'
 // late PostToolUse `working` POST can arrive after the `Stop` `done`. Hold `done` against any
 // non-newTurn `working` for this long.
 export const DONE_HOLDOFF_MS = 3000
-// Drop entries whose state hasn't been refreshed in this long, so the file can't accumulate
-// unbounded nodes or advertise a stale "working" from a crashed/abandoned session.
+// Inbox activity is short-lived; main node state is retained separately until explicitly cleared.
 export const EXPIRE_MS = 6 * 60 * 60_000
+export const NODE_RETENTION_MS = 7 * 24 * 60 * 60_000
 // Coalesce bursty hook POSTs (a single turn fires many tool events) into one disk write.
 export const WRITE_DEBOUNCE_MS = 300
 
@@ -53,6 +53,7 @@ export interface CodexStatusMetadata {
 export interface MirrorEntry extends CodexStatusMetadata {
   /** working/waiting/blocked/done; undefined = idle/unknown (e.g. after a session reset). */
   state?: AgentState
+  idleSince?: number
   agentId?: AgentId
   sessionId?: string
   /**
@@ -186,6 +187,7 @@ export interface MirrorFile {
       idleInferred?: true
       clientRevision?: number
       state?: AgentState
+      idleSince?: number
       agentId?: AgentId
       sessionId?: string
       /** Observed Claude account (see MirrorEntry.account). Additive — absent on old files and
@@ -416,6 +418,7 @@ export function reduceEntry(
    */
   const commitState = (state: AgentState | undefined, proof: boolean): void => {
     next.state = state
+    delete next.idleSince
     next.updatedAt = now
     next.stateVerified = proof
     if (ev.agentId === 'codex') {
@@ -504,12 +507,13 @@ export function reduceEntry(
     // that cannot send one, which is exactly what a stale entry would hide.
     if (!heldOff) commitState(ev.state, ev.verified === true)
   } else if (ev.kind === 'session') {
-    // SessionStart / SessionEnd both reset the node to idle (renderer: setState(id, undefined)).
+    // Session boundaries reset state; only start establishes a positive idle fact.
     // The proof goes with the state it was about, and `false` is passed EXPLICITLY rather than
     // `ev.verified`: this commits idle, and "the idle was verified" is not a claim worth making.
     // `verifiedAt` stays — "this node has proven itself at least once" survives a session boundary
     // and is what makes a refusal retryable.
     commitState(undefined, false)
+    if (ev.sessionPhase === 'start') next.idleSince = now
     next.awaitingInput = undefined
   }
   // subagent-start / subagent-end / recurring: identity captured above, main state untouched.
@@ -555,7 +559,7 @@ export function filterMirrorForNodes(doc: MirrorFile, nodeIds: ReadonlySet<strin
 export function buildFile(
   nodes: Record<string, MirrorEntry>,
   now: number,
-  expireMs = EXPIRE_MS,
+  expireMs = NODE_RETENTION_MS,
   settings?: MirrorSettings,
   usage?: MirrorUsage,
   inbox?: MirrorInbox,
@@ -574,6 +578,7 @@ export function buildFile(
         restored: e.restored, idleInferred: e.idleInferred, clientRevision: e.clientRevision
       } : {}),
       state: e.state,
+      ...(e.idleSince !== undefined ? { idleSince: e.idleSince } : {}),
       agentId: e.agentId,
       sessionId: e.sessionId,
       // Spread-when-present, like `name`/`hibernated`: a node that never posted a claude payload
@@ -1204,9 +1209,10 @@ function loadPersisted(file: string): void {
       for (const [id, e] of Object.entries(doc.nodes)) {
         if (!e || typeof e !== 'object') continue
         const updatedAt = typeof e.updatedAt === 'number' ? e.updatedAt : 0
-        if (now - updatedAt > EXPIRE_MS) continue
+        if (now - updatedAt > NODE_RETENTION_MS) continue
         state.set(id, {
           state: e.state,
+          ...(typeof e.idleSince === 'number' && Number.isFinite(e.idleSince) && !e.state ? { idleSince: e.idleSince } : {}),
           agentId: e.agentId,
           sessionId: e.sessionId,
           // Identity survives the restart like agentId/sessionId does — for a hand-launched
@@ -1772,16 +1778,16 @@ export function workingNodes(): { nodeId: string; agentId?: string; sessionId?: 
  *  - No freshness cut beyond the mirror's own expiry sweep. The renderer applies its own, because
  *    the cut is a display decision and it owns the clock the user is looking at.
  *
- * Entries with NO `state` are skipped: "idle/unknown" is exactly what a renderer with no seed
- * already shows, so sending them is bytes for no pixels.
+ * Stateless entries are sent only when a session start establishes an idle fact.
  */
 export function agentStatusSnapshot(now = Date.now()): AgentStatusSnapshot {
   const nodes: Record<string, AgentStatusSnapshotEntry> = {}
   for (const [nodeId, e] of state) {
-    if (!e.state) continue
-    if (now - e.updatedAt > EXPIRE_MS) continue
+    if (!e.state && e.idleSince === undefined) continue
+    if (now - e.updatedAt > NODE_RETENTION_MS) continue
     nodes[nodeId] = {
       state: e.state,
+      idleSince: e.idleSince,
       agentId: e.agentId,
       sessionId: e.sessionId,
       updatedAt: e.updatedAt,
@@ -1918,8 +1924,7 @@ export async function flush(): Promise<void> {
   //  - RESOLVED must not get a LONGER one. It is the phone's archive, but the phone keeps its own
   //    copy of what it has read; this file is a live side-channel, not the archive of record, and
   //    the cap already bounds history.
-  // 6 h is the horizon at which the module stops believing anything about a node at all, so an
-  // event outliving `state`/`inboxNodes` would be a card about a node the mirror has forgotten.
+  // Inbox activity expires sooner than main node state to bound the feed.
   // Well clear of QUESTION_DEDUP_WINDOW_MS (10 min), so the title-dedup is untouched.
   //
   // Pruned BEFORE the doc is built, unlike the two below: `buildFile` applies the expiry to `nodes`
@@ -1932,7 +1937,7 @@ export async function flush(): Promise<void> {
   const inbox: MirrorInbox = { events: inboxEvents, nodes: Object.fromEntries(inboxNodes) }
   const doc = buildFile(Object.fromEntries(state), now, undefined, safeSettings(), safeUsage(), inbox, safeServer())
   // Also drop expired entries from memory so the map itself can't grow without bound.
-  for (const [id, e] of state) if (now - e.updatedAt > EXPIRE_MS) state.delete(id)
+  for (const [id, e] of state) if (now - e.updatedAt > NODE_RETENTION_MS) state.delete(id)
   // Prune stale per-node activity the same way (events stay — they are capped feed history).
   for (const [id, n] of inboxNodes) if (now - n.updatedAt > EXPIRE_MS) inboxNodes.delete(id)
   for (const cb of flushListeners) {

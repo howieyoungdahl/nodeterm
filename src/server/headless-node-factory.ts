@@ -112,6 +112,7 @@ export interface HeadlessNodeFactoryDeps {
   codexSharedIdentity(): Promise<boolean>
   /** Hook-mirror lookups. A stored agentId wins; these cover a plain terminal running an agent. */
   stateOf(nodeId: string): AgentState | undefined
+  idleOf?(nodeId: string): boolean
   agentIdOf?(nodeId: string): string | undefined
   sessionTitleOf?(nodeId: string): string | undefined
   /** Current-run pane provenance recorded at the pane's genuine spawn. Never file-derived. */
@@ -1362,6 +1363,7 @@ export class HeadlessNodeFactory {
     if ('ok' in source) return source
     const entries = inventoryEntries(source.project, {
       stateOf: (nodeId) => this.deps.stateOf(nodeId),
+      idleOf: this.deps.idleOf,
       agentIdOf: this.runtimeAgentId,
       openedByCaller: (nodeId) => this.ownsSpawn(sourceNodeId, nodeId)
     })

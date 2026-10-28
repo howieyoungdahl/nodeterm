@@ -42,6 +42,7 @@ import {
   _inboxSnapshot,
   DONE_HOLDOFF_MS,
   EXPIRE_MS,
+  NODE_RETENTION_MS,
   STASH_MAX_AGE_MS,
   QUESTION_DEDUP_WINDOW_MS,
   INBOX_EVENTS_CAP,
@@ -142,11 +143,11 @@ describe('buildFile (shape + expiry)', () => {
   })
 
   it('drops entries older than the expiry window', () => {
-    const now = EXPIRE_MS + 100_000
+    const now = NODE_RETENTION_MS + 100_000
     const doc = buildFile(
       {
         fresh: { state: 'working', updatedAt: now - 1000 },
-        stale: { state: 'working', updatedAt: now - EXPIRE_MS - 1 }
+        stale: { state: 'working', updatedAt: now - NODE_RETENTION_MS - 1 }
       },
       now
     )
@@ -2280,8 +2281,8 @@ describe('MirrorEntry.account (observed Claude account)', () => {
   })
 
   it('expires with its entry, like every other field on it', () => {
-    const now = EXPIRE_MS + 100_000
-    const doc = buildFile({ stale: { state: 'working', account, updatedAt: now - EXPIRE_MS - 1 } }, now)
+    const now = 8 * 24 * 60 * 60_000
+    const doc = buildFile({ stale: { state: 'working', account, updatedAt: 1 } }, now)
     expect(Object.keys(doc.nodes)).toEqual([])
   })
 })
@@ -2348,8 +2349,8 @@ describe('agentStatusSnapshot (the restart display seed)', () => {
     const at = Date.now()
     restore({ n1: { state: 'working', updatedAt: at } })
     expect(Object.keys(agentStatusSnapshot(at).nodes)).toEqual(['n1'])
-    expect(Object.keys(agentStatusSnapshot(at + EXPIRE_MS).nodes)).toEqual(['n1'])
-    expect(Object.keys(agentStatusSnapshot(at + EXPIRE_MS + 1).nodes)).toEqual([])
+    expect(Object.keys(agentStatusSnapshot(at + NODE_RETENTION_MS).nodes)).toEqual(['n1'])
+    expect(Object.keys(agentStatusSnapshot(at + NODE_RETENTION_MS + 1).nodes)).toEqual([])
   })
 
   it('stamps takenAt from the caller clock and applies no other freshness cut', () => {
