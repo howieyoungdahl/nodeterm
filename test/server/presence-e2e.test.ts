@@ -76,7 +76,8 @@ describe('server e2e: presence with two clients', () => {
 
   afterAll(async () => {
     await close?.()
-    fs.rmSync(dataDir, { recursive: true, force: true })
+    // The server can still be flushing a file as it closes; retry the removal rather than fail the suite on ENOTEMPTY.
+    fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
 
   it('hello → own id + snapshot; cursor fans out to the other client; disconnect → leave', async () => {
