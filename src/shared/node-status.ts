@@ -263,7 +263,7 @@ export function deriveNodeStatus(input: NodeStatusInput): NodeStatusView {
 
 function resolveKind(input: NodeStatusInput, stale: boolean): NodeStatusKind {
   if (input.failure) return 'failed'
-  if (!input.state) return input.idleSince !== undefined ? 'idle' : 'unknown'
+  if (!input.state) return input.idleSince !== undefined && input.pane !== 'dead' ? 'idle' : 'unknown'
   if (input.state === 'done') return 'completed'
   if (input.pane === 'dead' && FAILABLE_STATES.has(input.state)) return 'failed'
   if (input.state === 'working') {
@@ -402,6 +402,7 @@ export function paneProbeCandidates(
   entries: ReadonlyArray<{
     id: string
     state?: AgentState
+    idleSince?: number
     updatedAt?: number
     /** When this node's pane was last probed (the store's `paneAt`). */
     paneAt?: number
@@ -414,7 +415,7 @@ export function paneProbeCandidates(
   const out: string[] = []
   for (const e of entries) {
     if (e.failed) continue
-    if (!e.state || !FAILABLE_STATES.has(e.state)) continue
+    if (e.state ? !FAILABLE_STATES.has(e.state) : e.idleSince === undefined) continue
     if (typeof e.updatedAt !== 'number') continue
     if (now - e.updatedAt <= staleMs) continue
     // Already asked recently. Without this a canvas of parked approvals would be re-probed on

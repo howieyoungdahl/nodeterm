@@ -4,6 +4,7 @@ import path from 'node:path'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
+import { agentStatusSnapshot } from '../../src/core/agent-status-mirror'
 import { startServer } from '../../src/server/index'
 import type { Workspace } from '../../src/shared/types'
 
@@ -13,8 +14,8 @@ import type { Workspace } from '../../src/shared/types'
  * Booting a real Server against a pre-written data dir is the restart an updater activation causes.
  * Before the fix, a node whose last state was asserted more than 6 h ago lost its mirror entry on
  * load, so every surface (badge seed, `/opsapi/nodes`, canvas inventory) answered "no status", and a
- * session-start idle fact did not survive at all. `/opsapi/nodes` is the observation point for
- * presence; the flushed `agent-status.json` is the one for what the next boot will load.
+ * session-start idle fact did not survive at all. The snapshot observes badge seeds, while
+ * `/opsapi/nodes` retains its six-hour horizon and the flushed file feeds the next boot.
  */
 describe('agent status survives a Server restart past six hours', () => {
   let dataDir = ''
@@ -94,7 +95,7 @@ describe('agent status survives a Server restart past six hours', () => {
     fs.rmSync(dataDir, { recursive: true, force: true })
   })
 
-  it('still reports status for nodes last heard from seven hours ago, and not for one past retention', async () => {
+  it('retains badge seeds while keeping the operator view within six hours', async () => {
     const response = await fetch(`${base}/opsapi/nodes`, {
       headers: { authorization: `Bearer ${token}` }
     })
@@ -103,10 +104,15 @@ describe('agent status survives a Server restart past six hours', () => {
       nodes: Array<{ id: string; agentStatus: string | null }>
     }
     const byId = new Map(nodes.map((n) => [n.id, n.agentStatus]))
-    expect(byId.get('n-done-7h')).toBe('idle')
-    expect(byId.get('n-blocked-7h')).toBe('blocked')
-    expect(byId.get('n-idle-7h')).toBe('idle')
+    expect(byId.get('n-done-7h')).toBeNull()
+    expect(byId.get('n-blocked-7h')).toBeNull()
+    expect(byId.get('n-idle-7h')).toBeNull()
     expect(byId.get('n-done-8d')).toBeNull()
+    const snapshot = agentStatusSnapshot()
+    expect(snapshot.nodes['n-done-7h']?.state).toBe('done')
+    expect(snapshot.nodes['n-blocked-7h']?.state).toBe('blocked')
+    expect(snapshot.nodes['n-idle-7h']?.idleSince).toBe(bootAt - 7 * HOUR)
+    expect(snapshot.nodes['n-done-8d']).toBeUndefined()
   })
 
   it('writes the retained states and the idle fact back for the next boot', async () => {

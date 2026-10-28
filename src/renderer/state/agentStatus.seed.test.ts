@@ -130,15 +130,11 @@ describe('seedFromSnapshot — never clobbers a live state', () => {
     expect(store.getState().byId.n1.state).toBe('working')
   })
 
-  it('reads lastEventAt too, not only stateAt', () => {
-    // A same-state event refreshes `stateAt` only; a transition stamps both. Either clock being
-    // at/after the snapshot means this run already heard something newer.
+  it('seeds a stateless node even after a hibernation wake', () => {
     const store = session()
-    store.setState({
-      byId: { n1: { unread: false, state: 'working', lastEventAt: NOW - 1000 } }
-    })
+    store.setState({ byId: { n1: { unread: false, stateAt: 0, lastEventAt: NOW - 1000 } } })
     store.getState().seedFromSnapshot(snap({ n1: { state: 'done', updatedAt: NOW - 60_000 } }), NOW)
-    expect(store.getState().byId.n1.state).toBe('working')
+    expect(store.getState().byId.n1.state).toBe('done')
   })
 
   it('DOES seed over a state older than the snapshot — the guard is a comparison, not a blanket skip', () => {

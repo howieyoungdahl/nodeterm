@@ -98,6 +98,7 @@ import {
   sessionNameSweepEntries,
   nodeSessionName,
   mirrorEntry,
+  EXPIRE_MS,
   nodeLastActivityAt,
   clearNode
 } from '../core/agent-status-mirror'
@@ -499,9 +500,10 @@ export async function startServer(
     destroySession: (nodeId) =>
       ptyManager.destroySession(null, nodeId, { everySocket: true }),
     statusOf: (nodeId) => {
-      const entry = mirrorEntry(nodeId)
+      const mirror = mirrorEntry(nodeId)
+      const entry = mirror && Date.now() - mirror.updatedAt <= EXPIRE_MS ? mirror : undefined
       const updatedAt = nodeLastActivityAt(nodeId)
-      return entry || updatedAt !== undefined
+      return entry || (updatedAt !== undefined && Date.now() - updatedAt <= EXPIRE_MS)
         ? { state: entry?.state, updatedAt: updatedAt ?? entry!.updatedAt }
         : undefined
     },

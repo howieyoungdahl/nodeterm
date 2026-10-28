@@ -2308,6 +2308,14 @@ describe('agentStatusSnapshot (the restart display seed)', () => {
     initAgentStatusMirror(file)
   }
 
+  it('clears the idle fact when the session ends', () => {
+    initAgentStatusMirror(file)
+    recordAgentEvent(ev({ nodeId: 'n1', kind: 'session', sessionPhase: 'start' }))
+    expect(agentStatusSnapshot().nodes.n1?.idleSince).toBeDefined()
+    recordAgentEvent(ev({ nodeId: 'n1', kind: 'session', sessionPhase: 'end' }))
+    expect(agentStatusSnapshot().nodes.n1).toBeUndefined()
+  })
+
   it('carries the restored flag rather than filtering restored entries out', () => {
     restore({ n1: { state: 'done', agentId: 'claude', sessionId: 's-1', updatedAt: Date.now() } })
     const snap = agentStatusSnapshot()

@@ -654,10 +654,11 @@ export function createAgentStatusSession(
           // mirror's copy is then strictly the older fact. `>=` (not `>`) is what makes a second
           // seed a no-op: an entry we just seeded carries exactly `updatedAt` on both clocks.
           if (
-            prev && Math.max(prev.stateAt ?? 0, prev.lastEventAt ?? 0) >= entry.updatedAt
+            prev && (prev.stateAt ?? 0) >= entry.updatedAt
           ) {
             continue
           }
+          // Old done seeds restore their prior Eco hibernation eligibility.
           // Both clocks get the mirror's stamp, not `now`: the sidebar age and the Eco idle clock
           // must read "quiet since the last real event", not "since the page reloaded" — the
           // latter would hide a long-idle session from the hibernation sweep for a full window.

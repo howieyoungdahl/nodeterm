@@ -10807,6 +10807,7 @@ export function Canvas() {
             Object.entries(useAgentStatus.getState().byId).map(([id, v]) => ({
               id,
               state: v.state,
+              idleSince: v.idleSince,
               updatedAt: v.stateAt,
               paneAt: v.paneAt,
               failed: !!v.failure
