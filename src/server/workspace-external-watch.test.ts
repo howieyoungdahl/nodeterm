@@ -54,18 +54,18 @@ describe('Server Edition external workspace watcher', () => {
     watcher = createServerWorkspaceWatcher(store, { debounceMs: 10, exclusive })
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
-    store.publicationPhase = async (phase, file) => { if (phase === 'published' && file.endsWith('project.json')) await gate }
+    // Drive the watcher's content check from INSIDE the publication gate: the new bytes are on
+    // disk but the store has not recorded them as its own write yet, which is exactly the delayed
+    // notification this guards. Relying on a real filesystem event raced it and flaked under load.
+    const check = (watcher as unknown as { check(p: string): Promise<void> }).check.bind(watcher)
+    store.publicationPhase = async (phase, file) => {
+      if (phase === 'published' && file.endsWith('project.json')) { await check(file); await gate }
+    }
     const changed = await store.load()
     changed.projects[0].nodes[0].title = 'normal server title update'
     const save = queue.run(() => store.save(changed))
     try {
-      // Two orders are both correct, and which one happens depends on filesystem-event latency:
-      // the notification reaches `exclusive` while the publication is gated (the queued-recheck
-      // path), or it is never routed at all (the watcher's own self-write check, or event
-      // coalescing, settles it first). The old hard wait for the first order failed on loaded hosts, base code included
-      // (3 of 4 runs at load 19). Give the first order a fair window, then assert the contract
-      // both orders share: no external-change broadcast, and the server's own title kept.
-      await vi.waitFor(() => expect(entered).toHaveBeenCalled(), { timeout: 3_000, interval: 20 }).catch(() => undefined)
+      await vi.waitFor(() => expect(entered).toHaveBeenCalled())
       release()
       await save
       await queue.run(async () => {})
