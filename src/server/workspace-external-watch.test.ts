@@ -54,7 +54,13 @@ describe('Server Edition external workspace watcher', () => {
     watcher = createServerWorkspaceWatcher(store, { debounceMs: 10, exclusive })
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
-    store.publicationPhase = async (phase, file) => { if (phase === 'published' && file.endsWith('project.json')) await gate }
+    // Drive the watcher's content check from INSIDE the publication gate: the new bytes are on
+    // disk but the store has not recorded them as its own write yet, which is exactly the delayed
+    // notification this guards. Relying on a real filesystem event raced it and flaked under load.
+    const check = (watcher as unknown as { check(p: string): Promise<void> }).check.bind(watcher)
+    store.publicationPhase = async (phase, file) => {
+      if (phase === 'published' && file.endsWith('project.json')) { await check(file); await gate }
+    }
     const changed = await store.load()
     changed.projects[0].nodes[0].title = 'normal server title update'
     const save = queue.run(() => store.save(changed))
