@@ -31,6 +31,12 @@ describe('the derivation table', () => {
     expect(v.detail).toContain('no status event')
   })
 
+  it('only keeps idle while the pane is not proven dead', () => {
+    expect(view({ idleSince: old, pane: 'dead' }).kind).toBe('unknown')
+    expect(view({ idleSince: old, pane: 'alive' }).kind).toBe('idle')
+    expect(view({ idleSince: old }).kind).toBe('idle')
+  })
+
   it('maps the four hook-fed states', () => {
     expect(view({ state: 'working' }).kind).toBe('working')
     expect(view({ state: 'waiting' }).kind).toBe('waiting')
@@ -308,6 +314,10 @@ describe('probe candidates', () => {
     expect(
       paneProbeCandidates([{ ...entry, paneAt: NOW - (PANE_RECHECK_MS + 1000) }], NOW)
     ).toEqual(['n'])
+  })
+
+  it('probes stale idle facts on the same interval', () => {
+    expect(paneProbeCandidates([{ id: 'old', idleSince: old, updatedAt: old }, { id: 'fresh', idleSince: fresh, updatedAt: fresh }, { id: 'recent', idleSince: old, updatedAt: old, paneAt: NOW - 1000 }], NOW)).toEqual(['old'])
   })
 
   it('does not re-probe a node whose failure is already latched', () => {

@@ -45,7 +45,7 @@ import {
 } from './delivery-queue'
 import { randomUUID } from 'crypto'
 import { nodeTokenFilePresent } from './node-token-files'
-import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../agent-status-mirror'
+import { EXPIRE_MS, mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../agent-status-mirror'
 import {
   projectCapabilityGrantedFor,
   type CapabilityAckMap
@@ -537,8 +537,9 @@ export async function runDelivery(
   // A plain terminal is not Claude by default. A hand-launched agent may still prove its runtime
   // identity through a hook event; absent either stored or runtime evidence, the binary predicate
   // receives an unknowable identity and refuses instead of guessing a provider.
+  const targetMirror = (deps.mirrorEntry ?? coreMirrorEntry)(req.targetNodeId)
   const targetAgentId = targetNode?.agentId ??
-    (deps.mirrorEntry ?? coreMirrorEntry)(req.targetNodeId)?.agentId ?? ''
+    (targetMirror && now() - targetMirror.updatedAt <= EXPIRE_MS ? targetMirror.agentId : undefined) ?? ''
 
   const delivery: DeliveryDeps = {
     ...(guard ? { beforeSend: guard.beforeSend } : {}),
@@ -613,8 +614,10 @@ export async function runOperatorDelivery(
 ): Promise<AgentMessageOutcome> {
   const project = deps.projects().find((p) => p.id === req.operator?.target.projectId)
   const node = project?.nodes.find((n) => n.id === req.targetNodeId)
-  const targetAgentId = node?.agentId ?? (deps.mirrorEntry ?? coreMirrorEntry)(req.targetNodeId)?.agentId ?? ''
   const now = deps.now ?? (() => Date.now())
+  const targetMirror = (deps.mirrorEntry ?? coreMirrorEntry)(req.targetNodeId)
+  const targetAgentId = node?.agentId ??
+    (targetMirror && now() - targetMirror.updatedAt <= EXPIRE_MS ? targetMirror.agentId : undefined) ?? ''
   return deliverAgentMessage({
     targetNodeId: req.targetNodeId,
     sourcePrincipal: 'operator',

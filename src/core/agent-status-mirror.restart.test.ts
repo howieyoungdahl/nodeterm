@@ -143,3 +143,35 @@ describe('agent-status mirror — restart survival of the done dedup', () => {
     expect(workingNodes().map((w) => w.nodeId)).toEqual(['n1'])
   })
 })
+
+describe('status retention and idle recovery', () => {
+  it('preserves an explicit session start through restart and clears it on state', async () => {
+    initAgentStatusMirror(file)
+    recordAgentEvent(ev({ kind: 'session', sessionPhase: 'start' }))
+    await restart()
+    expect(_snapshot().n1?.idleSince).toEqual(expect.any(Number))
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    expect(_snapshot().n1?.idleSince).toBeUndefined()
+  })
+  it('retains seven-hour nodes through load, snapshot and flush, but expires older nodes', async () => {
+    const now = Date.now()
+    fs.writeFileSync(file, JSON.stringify({ nodes: {
+      recent: { state: 'done', updatedAt: now - 7 * 60 * 60_000 },
+      old: { state: 'done', updatedAt: now - 8 * 24 * 60 * 60_000 }
+    } }))
+    initAgentStatusMirror(file)
+    const { agentStatusSnapshot } = await import('./agent-status-mirror')
+    expect(agentStatusSnapshot().nodes.recent?.state).toBe('done')
+    expect(agentStatusSnapshot().nodes.old).toBeUndefined()
+    await flush()
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    expect(saved.nodes.recent?.state).toBe('done')
+    expect(saved.nodes.old).toBeUndefined()
+  })
+})
+
+it('does not restore working older than six hours', () => {
+  fs.writeFileSync(file, JSON.stringify({ nodes: { n1: { state: 'working', agentId: 'claude', updatedAt: Date.now() - 7 * 3600_000 } } }))
+  initAgentStatusMirror(file)
+  expect(_snapshot().n1).toBeUndefined()
+})

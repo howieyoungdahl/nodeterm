@@ -8,6 +8,8 @@ import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
 import { IPC } from '../shared/ipc'
 import {
+  freshMirrorEntry,
+  mirrorEntry,
   reduceEntry,
   buildFile,
   filterMirrorForNodes,
@@ -42,6 +44,7 @@ import {
   _inboxSnapshot,
   DONE_HOLDOFF_MS,
   EXPIRE_MS,
+  NODE_RETENTION_MS,
   STASH_MAX_AGE_MS,
   QUESTION_DEDUP_WINDOW_MS,
   INBOX_EVENTS_CAP,
@@ -142,11 +145,11 @@ describe('buildFile (shape + expiry)', () => {
   })
 
   it('drops entries older than the expiry window', () => {
-    const now = EXPIRE_MS + 100_000
+    const now = NODE_RETENTION_MS + 100_000
     const doc = buildFile(
       {
         fresh: { state: 'working', updatedAt: now - 1000 },
-        stale: { state: 'working', updatedAt: now - EXPIRE_MS - 1 }
+        stale: { state: 'working', updatedAt: now - NODE_RETENTION_MS - 1 }
       },
       now
     )
@@ -2280,8 +2283,8 @@ describe('MirrorEntry.account (observed Claude account)', () => {
   })
 
   it('expires with its entry, like every other field on it', () => {
-    const now = EXPIRE_MS + 100_000
-    const doc = buildFile({ stale: { state: 'working', account, updatedAt: now - EXPIRE_MS - 1 } }, now)
+    const now = 8 * 24 * 60 * 60_000
+    const doc = buildFile({ stale: { state: 'working', account, updatedAt: 1 } }, now)
     expect(Object.keys(doc.nodes)).toEqual([])
   })
 })
@@ -2306,6 +2309,14 @@ describe('agentStatusSnapshot (the restart display seed)', () => {
     fs.writeFileSync(file, JSON.stringify({ v: 1, updatedAt: Date.now(), nodes }))
     initAgentStatusMirror(file)
   }
+
+  it('clears the idle fact when the session ends', () => {
+    initAgentStatusMirror(file)
+    recordAgentEvent(ev({ nodeId: 'n1', kind: 'session', sessionPhase: 'start' }))
+    expect(agentStatusSnapshot().nodes.n1?.idleSince).toBeDefined()
+    recordAgentEvent(ev({ nodeId: 'n1', kind: 'session', sessionPhase: 'end' }))
+    expect(agentStatusSnapshot().nodes.n1).toBeUndefined()
+  })
 
   it('carries the restored flag rather than filtering restored entries out', () => {
     restore({ n1: { state: 'done', agentId: 'claude', sessionId: 's-1', updatedAt: Date.now() } })
@@ -2348,8 +2359,8 @@ describe('agentStatusSnapshot (the restart display seed)', () => {
     const at = Date.now()
     restore({ n1: { state: 'working', updatedAt: at } })
     expect(Object.keys(agentStatusSnapshot(at).nodes)).toEqual(['n1'])
-    expect(Object.keys(agentStatusSnapshot(at + EXPIRE_MS).nodes)).toEqual(['n1'])
-    expect(Object.keys(agentStatusSnapshot(at + EXPIRE_MS + 1).nodes)).toEqual([])
+    expect(Object.keys(agentStatusSnapshot(at + NODE_RETENTION_MS).nodes)).toEqual(['n1'])
+    expect(Object.keys(agentStatusSnapshot(at + NODE_RETENTION_MS + 1).nodes)).toEqual([])
   })
 
   it('stamps takenAt from the caller clock and applies no other freshness cut', () => {
@@ -2400,5 +2411,30 @@ describe('registerAgentStatusSnapshotIpc', () => {
     expect(fake.listeners[IPC.agentStatusSnapshot]).toBeUndefined()
     expect(fake.senderListeners[IPC.agentStatusSnapshot]).toBeUndefined()
     expect(fake.sent).toEqual([])
+  })
+})
+
+
+describe('session badge boundaries', () => {
+  it('keeps working during compaction and does not mark idle', () => {
+    const next = reduceEntry({ state: 'working', updatedAt: 1000 }, ev({ kind: 'session', sessionPhase: 'start', sessionSource: 'compact' } as Partial<NormalizedAgentEvent>), 2000)
+    expect(next.state).toBe('working')
+    expect(next.idleSince).toBeUndefined()
+  })
+  it('does not mark opencode idle without an end event', () => {
+    expect(reduceEntry(undefined, ev({ agentId: 'opencode', kind: 'session', sessionPhase: 'start' }), 2000).idleSince).toBeUndefined()
+  })
+  it.each(['startup', 'resume', 'clear'])('marks Claude %s idle', (source) => {
+    expect(reduceEntry(undefined, ev({ kind: 'session', sessionPhase: 'start', sessionSource: source } as Partial<NormalizedAgentEvent>), 2000).idleSince).toBe(2000)
+  })
+})
+
+describe('freshMirrorEntry (server decisions keep the 6 h horizon)', () => {
+  it('returns the entry inside EXPIRE_MS and nothing past it, while mirrorEntry keeps it', () => {
+    recordAgentEvent({ nodeId: 'n-fresh-horizon', agentId: 'claude', kind: 'state', state: 'done' } as NormalizedAgentEvent)
+    const at = mirrorEntry('n-fresh-horizon')!.updatedAt
+    expect(freshMirrorEntry('n-fresh-horizon', at + 60 * 60_000)?.agentId).toBe('claude')
+    expect(freshMirrorEntry('n-fresh-horizon', at + 7 * 60 * 60_000)).toBeUndefined()
+    expect(mirrorEntry('n-fresh-horizon')?.agentId).toBe('claude')
   })
 })

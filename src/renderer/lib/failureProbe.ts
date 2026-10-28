@@ -28,6 +28,7 @@ import { NODE_STATUS_STALE_MS, paneProbeCandidates } from '@shared/node-status'
 export interface FailureProbeEntry {
   id: string
   state?: AgentState
+  idleSince?: number
   /** When the state was last asserted — the store's `stateAt`. */
   updatedAt?: number
   /** When this node's pane was last probed — the store's `paneAt`; drives the re-check interval. */

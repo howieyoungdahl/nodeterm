@@ -486,3 +486,7 @@ describe('normalizeCodex — subagents (spawn_agent)', () => {
     expect(e).toMatchObject({ kind: 'state', state: 'working' })
   })
 })
+
+it('preserves Claude compact session source', () => {
+  expect(normalizeClaude(env({ hook_event_name: 'SessionStart', source: 'compact' }))).toMatchObject({ sessionSource: 'compact' })
+})

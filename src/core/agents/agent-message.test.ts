@@ -631,3 +631,11 @@ describe('deliverAgentMessage — outcomes carry the receipt and the trace', () 
     expect(out).toMatchObject({ kind: 'delivered', traced: 'memory' })
   })
 })
+
+it('refuses old status but accepts recent status at the delivery gate', async () => {
+  const now = Date.now()
+  const old = recorder({ now: () => now, sendEnvelope: async () => false }, { ...idle, updatedAt: now - 7 * 3600_000 })
+  expect((await deliverAgentMessage(req(), old.deps)).kind).toBe('targetStatusStale')
+  const recent = recorder({ now: () => now, sendEnvelope: async () => false }, { ...idle, updatedAt: now - 3600_000 })
+  expect((await deliverAgentMessage(req(), recent.deps)).kind).not.toBe('targetNotIdleUnknown')
+})

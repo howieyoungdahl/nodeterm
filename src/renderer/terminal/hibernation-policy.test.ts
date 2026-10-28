@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { createAgentStatusSession } from '../state/agentStatus'
 import { planHibernation, HIBERNATE_BATCH_MAX } from './hibernation-policy'
 
 const base = (id: string, over: object = {}) => ({
@@ -20,6 +21,13 @@ const cfg = { enabled: true, idleMinutes: 30 }
 const NOW = 100 * 60_000
 
 describe('planHibernation', () => {
+  it('restores Eco eligibility for an old done seed', () => {
+    const store = createAgentStatusSession().store
+    store.getState().seedFromSnapshot({ takenAt: NOW, nodes: { a: { state: 'done', updatedAt: NOW - 60 * 60_000 } } }, NOW)
+    const status = store.getState().byId.a
+    expect(planHibernation([base('a', { state: status.state, lastEventAt: status.lastEventAt })], NOW, cfg)).toEqual(['a'])
+  })
+
   it('takes only done, offscreen, wired, long-idle nodes; oldest first; max 2', () => {
     const out = planHibernation(
       [

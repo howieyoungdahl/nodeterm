@@ -1295,9 +1295,10 @@ export type { PaneEvidence }
 
 export interface AgentStatusSnapshotEntry {
   state?: AgentState
+  idleSince?: number
   agentId?: AgentId
   sessionId?: string
-  /** When the mirror last asserted `state` (ms epoch). The renderer drops entries older than its cut. */
+  /** When the mirror last asserted the state or session boundary (ms epoch). */
   updatedAt: number
   /** `state` came off disk at boot and nothing has been heard since (mirror `restored`). */
   restored?: boolean

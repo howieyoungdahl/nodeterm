@@ -10733,8 +10733,8 @@ export function Canvas() {
           break
         case 'session':
           if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
-          if (e.sessionPhase === 'start') {
-            cs.setState(e.nodeId, undefined, e.agentId)
+          if (e.sessionPhase === 'start' && e.sessionSource !== 'compact') {
+            cs.setSessionPhase(e.nodeId, 'start', e.agentId)
             // A SessionStart is proof a CLI just LAUNCHED in that pane, so a hibernated flag on
             // this node is now false — our own `/exit` produces a SessionEnd, never a
             // SessionStart. This is the residual `setState`'s live-state self-heal cannot reach:
@@ -10746,7 +10746,7 @@ export function Canvas() {
             cs.setHibernated(e.nodeId, false)
           }
           if (e.sessionPhase === 'end') {
-            cs.setState(e.nodeId, undefined, e.agentId)
+            cs.setSessionPhase(e.nodeId, 'end', e.agentId)
             // In-session /loop dies with its session; cron (and scheduled cloud routines)
             // keep running after it — their cards stay until CronDelete / manual dismiss.
             const kind = cs.byId[e.nodeId]?.loop?.kind
@@ -10807,6 +10807,7 @@ export function Canvas() {
             Object.entries(useAgentStatus.getState().byId).map(([id, v]) => ({
               id,
               state: v.state,
+              idleSince: v.idleSince,
               updatedAt: v.stateAt,
               paneAt: v.paneAt,
               failed: !!v.failure

@@ -1701,6 +1701,7 @@ body,
 
 /* Unknown is deliberately visible rather than absent: a node nothing has reported for must say so,
    not read as idle. Grey, because it is not an alarm — it is an admission. */
+.nt-status--idle,
 .nt-status--unknown {
   color: var(--muted);
 }

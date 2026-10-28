@@ -46,6 +46,8 @@ export interface InventoryEntry {
 export interface InventoryLookups {
   /** Hook-mirror agent state for a node, or undefined when nothing has ever been observed. */
   stateOf(nodeId: string): AgentState | undefined
+  /** Positive idle fact (a session start with no turn yet); display only, no pane check. */
+  idleOf?(nodeId: string): boolean
   /** Runtime agent id for a plain terminal that turned out to be running an agent. */
   agentIdOf?(nodeId: string): string | undefined
   /** Creator proof: did `callerNodeId` spawn this node during the current server run? */
@@ -80,7 +82,7 @@ export function inventoryEntries(
       title: node.title,
       group: node.parentId ?? null,
       agentId,
-      status: agentId ? lookups.stateOf(node.id) ?? 'unknown' : null,
+      status: agentId ? lookups.stateOf(node.id) ?? (lookups.idleOf?.(node.id) ? 'idle' : 'unknown') : null,
       openedByCaller: lookups.openedByCaller(node.id)
     }
   })

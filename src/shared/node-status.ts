@@ -29,6 +29,7 @@ import type { AgentState } from './agents/normalize'
  */
 export type NodeStatusKind =
   | 'working'
+  | 'idle'
   | 'waiting'
   | 'blocked'
   | 'failed'
@@ -99,6 +100,7 @@ export const NODE_STATUS_PRESENTATION: Record<
   { glyph: string; word: string }
 > = {
   working: { glyph: '▶', word: 'WORKING' },
+  idle: { glyph: '○', word: 'IDLE' },
   waiting: { glyph: '?', word: 'WAITING' },
   blocked: { glyph: '!', word: 'BLOCKED' },
   failed: { glyph: '✕', word: 'FAILED' },
@@ -122,6 +124,7 @@ export const NODE_STATUS_SEVERITY: readonly NodeStatusKind[] = [
   'waiting',
   'unknown',
   'working',
+  'idle',
   'completed'
 ]
 
@@ -138,6 +141,7 @@ export interface NodeFailureFact {
 export interface NodeStatusInput {
   /** Last hook-fed state. `undefined` = nothing has ever reported for this node. */
   state?: AgentState
+  idleSince?: number
   /** When `state` was last ASSERTED (freshness, not transition time). Absent = no clock. */
   updatedAt?: number
   /**
@@ -259,7 +263,7 @@ export function deriveNodeStatus(input: NodeStatusInput): NodeStatusView {
 
 function resolveKind(input: NodeStatusInput, stale: boolean): NodeStatusKind {
   if (input.failure) return 'failed'
-  if (!input.state) return 'unknown'
+  if (!input.state) return input.idleSince !== undefined && input.pane !== 'dead' ? 'idle' : 'unknown'
   if (input.state === 'done') return 'completed'
   if (input.pane === 'dead' && FAILABLE_STATES.has(input.state)) return 'failed'
   if (input.state === 'working') {
@@ -311,6 +315,9 @@ function buildDetail(
       } else {
         parts.push('Unknown: no status event has been received for this node.')
       }
+      break
+    case 'idle':
+      parts.push('Idle: session started, no turn yet.')
       break
     case 'working':
       parts.push('Working.')
@@ -395,6 +402,7 @@ export function paneProbeCandidates(
   entries: ReadonlyArray<{
     id: string
     state?: AgentState
+    idleSince?: number
     updatedAt?: number
     /** When this node's pane was last probed (the store's `paneAt`). */
     paneAt?: number
@@ -407,7 +415,7 @@ export function paneProbeCandidates(
   const out: string[] = []
   for (const e of entries) {
     if (e.failed) continue
-    if (!e.state || !FAILABLE_STATES.has(e.state)) continue
+    if (e.state ? !FAILABLE_STATES.has(e.state) : e.idleSince === undefined) continue
     if (typeof e.updatedAt !== 'number') continue
     if (now - e.updatedAt <= staleMs) continue
     // Already asked recently. Without this a canvas of parked approvals would be re-probed on
