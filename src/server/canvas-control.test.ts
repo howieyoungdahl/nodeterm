@@ -70,6 +70,56 @@ describe('initServerCanvasControl', () => {
     fs.rmSync(dataDir, { recursive: true, force: true })
   })
 
+  it('does not treat a plain terminal as an agent from a mirror entry older than six hours', async () => {
+    // agentIdOf feeds sourceCanControl and source recovery. Mirror entries now live 7 days for the
+    // badges; this authority input must keep the old 6 h horizon (W-0596 review round 3).
+    const terminal = (id: string, agentId?: 'claude') => ({
+      id, kind: 'terminal' as const, position: { x: 0, y: 0 }, size: { width: 640, height: 440 },
+      title: id, color: '#d97757', group: null, ...(agentId ? { agentId } : {})
+    })
+    const workspace = {
+      version: 2, activeProjectId: 'p1',
+      projects: [{ id: 'p1', name: 'Project', color: '#0a84ff', viewport: { x: 0, y: 0, zoom: 1 },
+        nodes: [terminal('source', 'claude'), terminal('plain-fresh'), terminal('plain-old')] }]
+    } as unknown as Workspace
+    const store = {
+      load: vi.fn(async () => workspace), save: vi.fn(async () => undefined),
+      persistedCanvases: () => [{ id: 'p1', nodes: workspace.projects[0].nodes }],
+      capabilityProjectFor: () => ({})
+    } as unknown as WorkspaceStore
+    const pty = {
+      createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
+      sendText: vi.fn(async () => true), destroySession: vi.fn(async () => undefined),
+      paneOwner: vi.fn(async () => null), sendEnvelope: vi.fn(async () => true),
+      hasLiveSession: () => true
+    } as unknown as PtyManager
+    const t0 = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(t0 - 7 * 60 * 60_000)
+      recordAgentEvent({ nodeId: 'plain-old', agentId: 'claude', kind: 'state', state: 'done' } as never)
+      vi.setSystemTime(t0 - 60 * 60_000)
+      recordAgentEvent({ nodeId: 'plain-fresh', agentId: 'claude', kind: 'state', state: 'done' } as never)
+      vi.setSystemTime(t0)
+      runtime = await initServerCanvasControl({
+        workspaceStore: store, ptyManager: pty, settings: (): Settings => ({ ...DEFAULT_SETTINGS }),
+        boardLog: { append: async () => false },
+        cliCaps: async () => ({ version: null, autoPermissionMode: false, fullscreenTui: false,
+          sessionIdFlag: false, remoteControlFlag: false }),
+        codexSharedIdentity: async () => true,
+        creationReceipts: new AssistantCreationReceipts(path.join(dataDir, 'creation-receipts')),
+        installAgentIntegrations: false
+      })
+      const reply = await runtime.handler({ verb: 'list', nodeId: 'source', args: {}, verified: true })
+      expect(reply).toMatchObject({ ok: true })
+      const lines = String((reply as { message?: string }).message).split('\n')
+      expect(lines.find((l) => l.startsWith('plain-fresh '))).toContain('agent=claude')
+      expect(lines.find((l) => l.startsWith('plain-old '))).toContain('agent=-')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('gates installs/messaging and consumes the boot-populated Server Codex capability', async () => {
     const workspace: Workspace = {
       version: 2,

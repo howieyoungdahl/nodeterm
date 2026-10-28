@@ -14,6 +14,7 @@ import {
 import { sendOperatorMessage as sendOperatorMessageCore, type OperatorDeliveryInput } from '../core/agents/operator-messaging'
 import { paneOwnerProject } from '../core/agents/pane-ownership'
 import {
+  freshMirrorEntry,
   mirrorEntry,
   nodeState
 } from '../core/agent-status-mirror'
@@ -171,7 +172,9 @@ export async function initServerCanvasControl(
     stateOf: nodeState,
     // Like stateOf for done, inventory reports idle without a pane check.
     idleOf: (nodeId) => mirrorEntry(nodeId)?.idleSince !== undefined,
-    agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
+    // Authority input (sourceCanControl, source recovery): keep the old 6 h horizon so a plain
+    // terminal that last ran an agent days ago is not still treated as one after a restart.
+    agentIdOf: (nodeId) => freshMirrorEntry(nodeId)?.agentId,
     sessionTitleOf: (nodeId) => mirrorEntry(nodeId)?.name,
     paneProjectOf: paneOwnerProject,
     creationReceipts: deps.creationReceipts,

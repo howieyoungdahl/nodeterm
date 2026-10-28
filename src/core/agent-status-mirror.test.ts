@@ -8,6 +8,8 @@ import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
 import { IPC } from '../shared/ipc'
 import {
+  freshMirrorEntry,
+  mirrorEntry,
   reduceEntry,
   buildFile,
   filterMirrorForNodes,
@@ -2424,5 +2426,15 @@ describe('session badge boundaries', () => {
   })
   it.each(['startup', 'resume', 'clear'])('marks Claude %s idle', (source) => {
     expect(reduceEntry(undefined, ev({ kind: 'session', sessionPhase: 'start', sessionSource: source } as Partial<NormalizedAgentEvent>), 2000).idleSince).toBe(2000)
+  })
+})
+
+describe('freshMirrorEntry (server decisions keep the 6 h horizon)', () => {
+  it('returns the entry inside EXPIRE_MS and nothing past it, while mirrorEntry keeps it', () => {
+    recordAgentEvent({ nodeId: 'n-fresh-horizon', agentId: 'claude', kind: 'state', state: 'done' } as NormalizedAgentEvent)
+    const at = mirrorEntry('n-fresh-horizon')!.updatedAt
+    expect(freshMirrorEntry('n-fresh-horizon', at + 60 * 60_000)?.agentId).toBe('claude')
+    expect(freshMirrorEntry('n-fresh-horizon', at + 7 * 60 * 60_000)).toBeUndefined()
+    expect(mirrorEntry('n-fresh-horizon')?.agentId).toBe('claude')
   })
 })

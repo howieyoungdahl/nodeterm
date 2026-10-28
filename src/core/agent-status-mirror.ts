@@ -1736,6 +1736,13 @@ export function mirrorEntry(nodeId: string): MirrorEntry | undefined {
   return state.get(nodeId)
 }
 
+/** The entry only while it is inside the old EXPIRE_MS horizon. Server DECISIONS (authority,
+ *  delivery, cleanup) read this so the 7-day display retention never widens what they allow. */
+export function freshMirrorEntry(nodeId: string, now = Date.now()): MirrorEntry | undefined {
+  const entry = state.get(nodeId)
+  return entry && now - entry.updatedAt <= EXPIRE_MS ? entry : undefined
+}
+
 /**
  * Newest in-process activity timestamp for operator inventory. Main-state hooks and raw tool/context
  * activity live in separate mirror maps; taking the later value keeps the management plane from
