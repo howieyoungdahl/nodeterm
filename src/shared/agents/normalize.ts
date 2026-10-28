@@ -52,6 +52,7 @@ export interface NormalizedAgentEvent {
   sessionTitle?: string
   // session lifecycle phase: 'start' resets to idle, 'end' resets + clears loop/fan-out
   sessionPhase?: 'start' | 'end'
+  sessionSource?: string
   /** Explicit provider startup, never resume/reconnect/unknown. Cleanup also requires a fresh
    * current-host process marker; this lifecycle label alone cannot establish child coverage. */
   freshSession?: boolean
@@ -114,6 +115,7 @@ const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
 const RECURRING_TOOLS = new Set(['Skill', 'CronCreate', 'ScheduleWakeup'])
 
 interface ClaudePayload {
+  source?: string
   hook_event_name?: string
   session_id?: string
   /** Deterministic-approval ticket the managed hook script added to its POST body and the hook
@@ -301,7 +303,7 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
     }
     return null
   }
-  if (ev === 'SessionStart') return { ...base, kind: 'session', sessionPhase: 'start' }
+  if (ev === 'SessionStart') return { ...base, kind: 'session', sessionPhase: 'start', ...(p.source ? { sessionSource: p.source } : {}) }
   if (ev === 'SessionEnd') return { ...base, kind: 'session', sessionPhase: 'end' }
   return null
 }
@@ -771,4 +773,9 @@ export function normalizeFor(agentId: AgentId, env: RawHookEnvelope): Normalized
   if (agentId === 'grok') return normalizeGrok(env)
   if (agentId === 'copilot') return normalizeCopilot(env)
   return null
+}
+
+/** Only these session-start providers also report a session end. */
+export function reportsSessionEnd(agentId: string | undefined): boolean {
+  return agentId === 'claude' || agentId === 'gemini' || agentId === 'copilot' || agentId === 'grok'
 }

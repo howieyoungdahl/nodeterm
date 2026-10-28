@@ -1,3 +1,4 @@
+import { reportsSessionEnd } from '../shared/agents/normalize'
 import fs from 'fs'
 import path from 'path'
 import { writeFileAtomic } from './fs-atomic'
@@ -506,14 +507,15 @@ export function reduceEntry(
     // rather than merged — an event with no stamp is a report that this node is running a script
     // that cannot send one, which is exactly what a stale entry would hide.
     if (!heldOff) commitState(ev.state, ev.verified === true)
-  } else if (ev.kind === 'session') {
+  } else if (ev.kind === 'session' && ev.sessionSource !== 'compact') {
     // Session boundaries reset state; only start establishes a positive idle fact.
     // The proof goes with the state it was about, and `false` is passed EXPLICITLY rather than
     // `ev.verified`: this commits idle, and "the idle was verified" is not a claim worth making.
     // `verifiedAt` stays — "this node has proven itself at least once" survives a session boundary
     // and is what makes a refusal retryable.
     commitState(undefined, false)
-    if (ev.sessionPhase === 'start') next.idleSince = now
+    // A crash without SessionEnd leaves IDLE, just as it leaves COMPLETED for done.
+    if (ev.sessionPhase === 'start' && reportsSessionEnd(ev.agentId)) next.idleSince = now
     next.awaitingInput = undefined
   }
   // subagent-start / subagent-end / recurring: identity captured above, main state untouched.
@@ -1209,7 +1211,7 @@ function loadPersisted(file: string): void {
       for (const [id, e] of Object.entries(doc.nodes)) {
         if (!e || typeof e !== 'object') continue
         const updatedAt = typeof e.updatedAt === 'number' ? e.updatedAt : 0
-        if (now - updatedAt > NODE_RETENTION_MS) continue
+        if (now - updatedAt > NODE_RETENTION_MS || (e.state === 'working' && now - updatedAt > EXPIRE_MS)) continue
         state.set(id, {
           state: e.state,
           ...(typeof e.idleSince === 'number' && Number.isFinite(e.idleSince) && !e.state ? { idleSince: e.idleSince } : {}),

@@ -10733,7 +10733,7 @@ export function Canvas() {
           break
         case 'session':
           if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
-          if (e.sessionPhase === 'start') {
+          if (e.sessionPhase === 'start' && e.sessionSource !== 'compact') {
             cs.setSessionPhase(e.nodeId, 'start', e.agentId)
             // A SessionStart is proof a CLI just LAUNCHED in that pane, so a hibernated flag on
             // this node is now false — our own `/exit` produces a SessionEnd, never a

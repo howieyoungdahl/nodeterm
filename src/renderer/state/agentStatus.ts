@@ -1,3 +1,4 @@
+import { reportsSessionEnd } from '@shared/agents/normalize'
 import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentId } from '@shared/agents/config'
@@ -667,7 +668,7 @@ export function createAgentStatusSession(
             state: entry.state,
             idleSince: entry.state ? undefined : entry.idleSince,
             stateAt: entry.updatedAt,
-            lastEventAt: entry.updatedAt,
+            lastEventAt: Math.max(prev?.lastEventAt ?? 0, entry.updatedAt),
             // A seed presents no per-node token, so it asserts nothing — and a `true` left over
             // from an earlier, now-overwritten state would claim proof for a transition we did
             // not witness (same rule as `stateVerified`'s field comment).
@@ -694,7 +695,7 @@ export function createAgentStatusSession(
     setSessionPhase: (id, phase, agentId) => {
       store.getState().setState(id, undefined, agentId)
       const now = Date.now()
-      set((s) => ({ byId: { ...s.byId, [id]: { ...(s.byId[id] ?? EMPTY), idleSince: phase === 'start' ? now : undefined, stateAt: now, lastEventAt: now } } }))
+      set((s) => ({ byId: { ...s.byId, [id]: { ...(s.byId[id] ?? EMPTY), idleSince: phase === 'start' && reportsSessionEnd(agentId) ? now : undefined, stateAt: now, lastEventAt: now } } }))
     },
 
     setSession: (id, session) =>

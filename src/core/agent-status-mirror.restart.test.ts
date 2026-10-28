@@ -169,3 +169,9 @@ describe('status retention and idle recovery', () => {
     expect(saved.nodes.old).toBeUndefined()
   })
 })
+
+it('does not restore working older than six hours', () => {
+  fs.writeFileSync(file, JSON.stringify({ nodes: { n1: { state: 'working', agentId: 'claude', updatedAt: Date.now() - 7 * 3600_000 } } }))
+  initAgentStatusMirror(file)
+  expect(_snapshot().n1).toBeUndefined()
+})

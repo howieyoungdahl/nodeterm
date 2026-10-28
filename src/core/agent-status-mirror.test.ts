@@ -2411,3 +2411,18 @@ describe('registerAgentStatusSnapshotIpc', () => {
     expect(fake.sent).toEqual([])
   })
 })
+
+
+describe('session badge boundaries', () => {
+  it('keeps working during compaction and does not mark idle', () => {
+    const next = reduceEntry({ state: 'working', updatedAt: 1000 }, ev({ kind: 'session', sessionPhase: 'start', sessionSource: 'compact' } as Partial<NormalizedAgentEvent>), 2000)
+    expect(next.state).toBe('working')
+    expect(next.idleSince).toBeUndefined()
+  })
+  it('does not mark opencode idle without an end event', () => {
+    expect(reduceEntry(undefined, ev({ agentId: 'opencode', kind: 'session', sessionPhase: 'start' }), 2000).idleSince).toBeUndefined()
+  })
+  it.each(['startup', 'resume', 'clear'])('marks Claude %s idle', (source) => {
+    expect(reduceEntry(undefined, ev({ kind: 'session', sessionPhase: 'start', sessionSource: source } as Partial<NormalizedAgentEvent>), 2000).idleSince).toBe(2000)
+  })
+})

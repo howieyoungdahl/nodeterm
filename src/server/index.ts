@@ -493,6 +493,10 @@ export async function startServer(
   let canvasControl: ServerCanvasControl | null = null
   const assistantCreationReceipts = new AssistantCreationReceipts(path.join(config.dataDir, 'assistant-creation-receipts'))
   const activeLoopNodes = new Set<string>()
+  const freshMirror = (nodeId: string) => {
+    const entry = mirrorEntry(nodeId)
+    return entry && Date.now() - entry.updatedAt <= EXPIRE_MS ? entry : undefined
+  }
   const nodeOps = new ServerNodeOps({
     workspaceStore,
     backendGeneration: () => ptyManager.cleanupBackendGeneration(),
@@ -508,7 +512,7 @@ export async function startServer(
         : undefined
     },
     ownerOf: (nodeId) => nodeOwnership.ownerOf(nodeId),
-    sessionIdOf: (nodeId) => mirrorEntry(nodeId)?.sessionId,
+    sessionIdOf: (nodeId) => freshMirror(nodeId)?.sessionId,
     recordOwnership: (nodeId, owner) => nodeOwnership.record(nodeId, owner),
     flushOwnership: () => nodeOwnership.flush(),
     creationReceipts: assistantCreationReceipts,
@@ -552,7 +556,7 @@ export async function startServer(
       }
       return [...held]
     },
-    mirrorOf: (nodeId) => mirrorEntry(nodeId),
+    mirrorOf: (nodeId) => freshMirror(nodeId),
     // The adopted id was NOT created during this Server run, so it takes the persisted-card
     // classification, not the fresh-spawn path: `attach-session` only, dead card if the session
     // vanishes. Same production function Server boot runs over the saved cards.
@@ -575,11 +579,11 @@ export async function startServer(
     dataDir: config.dataDir,
     ...cleanupPersistence,
     exclusive: work => workspaceMutationQueue.run(work),
-    probe: createCleanupProbe({ tmuxBin: () => ptyManager.getTmuxBin(), status: mirrorEntry,
+    probe: createCleanupProbe({ tmuxBin: () => ptyManager.getTmuxBin(), status: freshMirror,
       lastActivity: nodeLastActivityAt, activity: cleanupActivity,
       assistantTaskEvidence: (project, node) => assistantCreationReceipts.attestNode(project.id, node.id, nodeOwnership.ownerOf(node.id)) }),
     reviewedProbe: createReviewedCleanupProbe({ tmuxBin: () => ptyManager.getTmuxBin(), owner: id => nodeOwnership.ownerOf(id),
-      status: mirrorEntry, activity: nodeLastActivityAt }),
+      status: freshMirror, activity: nodeLastActivityAt }),
     activityVersion: ids => cleanupActivity.version(ids),
     reserveSessions: ids => cleanupReservations.reserve(ids.map(sessionName)),
     publish: project => platform.broadcast(IPC.workspaceServerChange, cleanupPersistence.publication(project))

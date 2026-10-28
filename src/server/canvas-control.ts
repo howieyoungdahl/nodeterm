@@ -169,6 +169,7 @@ export async function initServerCanvasControl(
     codexSharedIdentity:
       deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
+    // Like stateOf for done, inventory reports idle without a pane check.
     idleOf: (nodeId) => mirrorEntry(nodeId)?.idleSince !== undefined,
     agentIdOf: (nodeId) => mirrorEntry(nodeId)?.agentId,
     sessionTitleOf: (nodeId) => mirrorEntry(nodeId)?.name,

@@ -267,3 +267,10 @@ describe('seedFromSnapshot — availability', () => {
     )
   })
 })
+
+it('does not rewind a newer activity clock when seeding', () => {
+  const store = createAgentStatusSession().store
+  store.setState({ byId: { n1: { lastEventAt: NOW, stateAt: NOW - 120_000 } } } as any)
+  store.getState().seedFromSnapshot(snap({ n1: { state: 'done', updatedAt: NOW - 60_000 } }), NOW)
+  expect(store.getState().byId.n1.lastEventAt).toBe(NOW)
+})

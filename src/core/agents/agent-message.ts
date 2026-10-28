@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { MirrorEntry } from '../agent-status-mirror'
+import { EXPIRE_MS, type MirrorEntry } from '../agent-status-mirror'
 import type { AgentState } from '../../shared/agents/normalize'
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
 import { agentPidIn, isAgentPane } from '../../shared/agents/pane-owner-predicate'
@@ -360,6 +360,11 @@ export async function deliverAgentMessage(
     return o
   }
 
+  const freshTarget = (): MirrorEntry | undefined => {
+    const entry = deps.mirrorEntry(req.targetNodeId)
+    return entry && deps.now() - entry.updatedAt <= EXPIRE_MS ? entry : undefined
+  }
+
   return deps.lock(req.targetNodeId, async () => {
     // The free gates first, and this ordering is load-bearing rather than tidy: a caller that is
     // not permitted, is talking to itself, is over its rate budget, cannot prove its target's
@@ -371,7 +376,7 @@ export async function deliverAgentMessage(
       notPermitted: req.notPermitted,
       retryAfterMs: req.retryAfterMs,
       targetLive: req.targetLive ?? true,
-      target: deps.mirrorEntry(req.targetNodeId),
+      target: freshTarget(),
       tokenFilePresent: deps.tokenFilePresent(req.targetNodeId),
       targetIsRemote: req.targetIsRemote
     })
@@ -404,7 +409,7 @@ export async function deliverAgentMessage(
       targetLive: req.targetLive ?? true,
       pane: verdict,
       paneObserved: before?.command,
-      target: deps.mirrorEntry(req.targetNodeId),
+      target: freshTarget(),
       tokenFilePresent: deps.tokenFilePresent(req.targetNodeId),
       targetIsRemote: req.targetIsRemote
       // `pasteAware` deliberately absent: the flag costs a second tmux round-trip and there is no

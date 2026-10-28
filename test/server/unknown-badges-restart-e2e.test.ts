@@ -52,7 +52,8 @@ describe('agent status survives a Server restart past six hours', () => {
             terminal('n-done-7h', 0),
             terminal('n-blocked-7h', 700),
             terminal('n-idle-7h', 1400),
-            terminal('n-done-8d', 2100)
+            terminal('n-done-8d', 2100),
+            terminal('n-done-1h', 2800)
           ],
           bridges: [],
           ropes: []
@@ -69,6 +70,7 @@ describe('agent status survives a Server restart past six hours', () => {
           'n-done-7h': { state: 'done', agentId: 'claude', sessionId: 's-done', updatedAt: bootAt - 7 * HOUR },
           'n-blocked-7h': { state: 'blocked', agentId: 'claude', sessionId: 's-blocked', updatedAt: bootAt - 7 * HOUR },
           'n-idle-7h': { agentId: 'claude', sessionId: 's-idle', idleSince: bootAt - 7 * HOUR, updatedAt: bootAt - 7 * HOUR },
+          'n-done-1h': { state: 'done', agentId: 'claude', sessionId: 's-recent', updatedAt: bootAt - HOUR },
           'n-done-8d': { state: 'done', agentId: 'claude', sessionId: 's-old', updatedAt: bootAt - 8 * 24 * HOUR }
         }
       }),
@@ -108,6 +110,7 @@ describe('agent status survives a Server restart past six hours', () => {
     expect(byId.get('n-blocked-7h')).toBeNull()
     expect(byId.get('n-idle-7h')).toBeNull()
     expect(byId.get('n-done-8d')).toBeNull()
+    expect(byId.get('n-done-1h')).not.toBeNull()
     const snapshot = agentStatusSnapshot()
     expect(snapshot.nodes['n-done-7h']?.state).toBe('done')
     expect(snapshot.nodes['n-blocked-7h']?.state).toBe('blocked')
