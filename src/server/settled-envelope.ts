@@ -71,8 +71,9 @@ type ComposerInspection = 'clear' | 'draft' | 'unknown'
  * text after the Claude/Codex prompt glyph is a human draft and must be preserved. */
 export function inspectOperatorComposer(captureText: string): ComposerInspection {
   const rows: Array<{ text: string; dim: boolean[]; sgr: boolean }> = []
+  const rawRows = captureText.split('\n')
   let dim = false
-  for (const raw of captureText.split('\n')) {
+  for (const raw of rawRows) {
     let text = ''
     const styles: boolean[] = []
     let sgr = false
@@ -115,6 +116,14 @@ export function inspectOperatorComposer(captureText: string): ComposerInspection
   let lastVisible = rows.length - 1
   while (lastVisible >= 0 && !rows[lastVisible].text.trim()) lastVisible--
   const footer = rows[lastVisible]?.text ?? ''
+  // Current Codex may render a styled shortcuts/warnings row below the model
+  // footer. Only the observed row shape is recognized; arbitrary chrome must
+  // not move the composer boundary past a human draft.
+  const codexHelp = /^  \x1b\[1m\?\x1b\[0m for shortcuts/.test(rawRows[lastVisible] ?? '') &&
+    /^\s+\? for shortcuts(?:\s+⚠ \d+ warnings? · f2 to view)?\s*$/.test(footer) &&
+    /^  \x1b\[38;2;\d{1,3};\d{1,3};\d{1,3}mGPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max)\x1b\[39m · /.test(rawRows[lastVisible - 1] ?? '')
+  const codexFooterIndex = codexHelp ? lastVisible - 1 : lastVisible
+  const codexFooter = rows[codexFooterIndex]?.text ?? ''
   const legacyClaudeFooter = /^\s+⏵⏵ (?:auto|accept edits|bypass permissions) mode on\s+\(shift\+tab to cycle\)(?: · ← \d+ agents)?\s*$/.test(footer)
   const currentClaudeFooter = /^\s+⏵⏵ bypass permissions on\s+\(shift\+tab to cycle\)\s*$/.test(footer)
   if (legacyClaudeFooter || currentClaudeFooter) {
@@ -131,11 +140,11 @@ export function inspectOperatorComposer(captureText: string): ComposerInspection
     eligible = candidates.filter((candidate) => candidate.glyph === '❯' && candidate.start > rails[0] && candidate.start < rails[1])
     end = rails[1]
     recognizedLayout = true
-  } else if (/^\s{2,}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · .+/.test(footer)) {
+  } else if (/^\s{2,}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · .+/.test(codexFooter)) {
     // Codex renders historical user prompt glyphs dim and the active glyph at normal intensity.
     // Its model/effort footer bounds the multi-line composer; unknown footer variants refuse.
     eligible = candidates.filter((candidate) => candidate.glyph === '›' && !candidate.row.dim[candidate.glyphOffset])
-    end = lastVisible
+    end = codexFooterIndex
     recognizedLayout = true
   }
   if (!recognizedLayout) return 'unknown'
