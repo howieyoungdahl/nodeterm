@@ -1879,7 +1879,10 @@ export function sweepStaleWorking(
   const swept: string[] = []
   for (const [nodeId, e] of state) {
     if (!isStaleWorking(e.state, e.updatedAt, now, staleMs)) continue
-    state.set(nodeId, { ...e, state: 'done', ...(e.agentId === 'codex' ? { stateSource: 'stale', stateVerified: false } : {}) })
+    // This is a timeout-derived display state, not a verified turn-end hook for ANY provider.
+    // Retaining the prior working event's proof would let message delivery mistake it for a
+    // verified idle state. The original timestamp remains unchanged for freshness diagnostics.
+    state.set(nodeId, { ...e, state: 'done', stateVerified: false, ...(e.agentId === 'codex' ? { stateSource: 'stale' } : {}) })
     clearActivity(nodeId, now)
     swept.push(nodeId)
     fireNodeStateChange({

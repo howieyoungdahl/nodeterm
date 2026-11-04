@@ -570,6 +570,9 @@ state provenance. `stateVerified` is telemetry from this server run, and is forc
 false with `stateSource: restored` on reload. `stateSource: stale` marks the quiet-time
 synthetic done transition. Context publication time never warms a target. The separate
 mobile consumer can ignore these optional fields; it must not turn them into authority.
+For every provider, a synthetic timeout must also clear `stateVerified`; an earlier verified
+working hook cannot prove the synthetic done. Operator status observations are diagnostics,
+not proof of current process identity or permission to deliver.
 
 Dead-card sweep evidence spans separate passes on the same answering tmux server generation.
 Healthy backlogs warm once and drain bounded batches; whole-server loss stays protected.

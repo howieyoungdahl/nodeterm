@@ -999,6 +999,7 @@ export async function startServer(
     managementToken: opsToken,
     bindings: operatorBindings,
     projects: () => workspaceStore.persistedCanvases(),
+    statusOf: mirrorEntry,
     sendMessage: async (input) => canvasControl
       ? canvasControl.sendOperatorMessage(input)
       : { kind: 'notPermitted', reason: 'unsupported-edition' }

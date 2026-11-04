@@ -14,6 +14,7 @@ import { sendOperatorMessage } from '../core/agents/operator-messaging'
 import type { AgentMessageOutcome } from '../core/agents/agent-message-decide'
 import { createOperatorConversationApi } from './operator-conversation-api'
 import type { OperatorDeliveryInput } from '../core/agents/operator-messaging'
+import type { MirrorEntry } from '../core/agent-status-mirror'
 
 const token = 'operator-token-012345678901234567890123456789'
 const secondToken = 'second-operator-012345678901234567890123456789'
@@ -29,6 +30,7 @@ describe('operator conversation HTTP API', () => {
   let projects: Array<{ id: string; nodes: Array<{ id: string; kind: string }> }>
   let sends: OperatorDeliveryInput[]
   let drain: (() => Promise<void>) | undefined
+  let statusEntry: MirrorEntry | undefined
 
   async function setup(scopes: { read?: boolean; message?: boolean; standing?: boolean } = { read: true, message: true },
     dispatch?: (input: OperatorDeliveryInput) => Promise<AgentMessageOutcome>) {
@@ -47,8 +49,9 @@ describe('operator conversation HTTP API', () => {
     bindings.transcript('n1', 'session1', 'claude', transcript)
     projects = [{ id: 'p1', nodes: [{ id: 'n1', kind: 'terminal' }] }]
     sends = []
+    statusEntry = undefined
     const handler = createOperatorConversationApi({ dataDir: dir, managementToken: management, bindings,
-      projects: () => projects,
+      projects: () => projects, statusOf: () => statusEntry,
       sendMessage: async (input) => { sends.push(input); return dispatch ? dispatch(input) : { kind: 'queued', retryAfterMs: 10 } as never }
     })
     drain = handler.drain
@@ -70,6 +73,8 @@ describe('operator conversation HTTP API', () => {
   const auth = { authorization: `Bearer ${token}` }
   const conversationUrl = (t: object) =>
     `${base}/opsapi/v1/conversation?${new URLSearchParams(Object.entries(t).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))}`
+  const statusUrl = (t: object) =>
+    `${base}/opsapi/v1/session-status?${new URLSearchParams(Object.entries(t).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))}`
 
   async function editPolicy(edit: (value: ReturnType<typeof JSON.parse>) => void) {
     const file = path.join(dir, OPERATOR_POLICY_FILE)
@@ -86,6 +91,29 @@ describe('operator conversation HTTP API', () => {
     const promise = new Promise<void>((r) => { resolve = r })
     return { promise, resolve }
   }
+
+  it('reports only scoped status observations and performs no delivery or receipt admission', async () => {
+    const target = await setup({ message: true })
+    expect(await (await fetch(statusUrl(target), { headers: auth })).json())
+      .toMatchObject({ version: 1, target, observation: 'no_status', diagnosticOnly: true })
+    statusEntry = { agentId: 'claude', sessionId: target.sessionId, state: 'done',
+      stateVerified: true, updatedAt: Date.now() - 7 * 3600_000 }
+    expect(await (await fetch(statusUrl(target), { headers: auth })).json()).toMatchObject({ observation: 'expired' })
+    statusEntry = { ...statusEntry, updatedAt: Date.now() }
+    expect(await (await fetch(statusUrl(target), { headers: auth })).json()).toMatchObject({ observation: 'recorded_done', diagnosticOnly: true })
+    expect(sends).toEqual([])
+    await expect(readFile(path.join(dir, 'operator-message-receipts.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await fetch(statusUrl({ ...target, generation: 'wrong' }), { headers: auth })).status).toBe(409)
+    expect((await fetch(`${statusUrl(target)}&extra=1`, { headers: auth })).status).toBe(400)
+    await editPolicy(value => { value.principals[0].message = [] })
+    expect((await fetch(statusUrl(target), { headers: auth })).status).toBe(403)
+    expect(sends).toEqual([])
+  })
+
+  it('does not reveal message status to a read-only principal', async () => {
+    const target = await setup({ read: true })
+    expect((await fetch(statusUrl(target), { headers: auth })).status).toBe(403)
+  })
 
   it.each(['read', 'message'] as const)('enumerates current and future verified sessions across projects with independent standing %s', async (operation) => {
     const current = await setup({ read: operation === 'read', message: operation === 'message', standing: true })
