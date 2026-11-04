@@ -65,6 +65,32 @@ describe('sendSettledEnvelope', () => {
     '\x1b[1;2m› \x1b[0mearlier submitted user message', '\x1b[2m• \x1b[0mREADY_FIXTURE', '',
     `\x1b[1m›\x1b[0m ${body}`, '', '  GPT-6.1-Sol xhigh · /synthetic-project · Synthetic test'
   ].join('\n')
+  const currentClaudePane = (body: string) => [
+    '\x1b[38;5;239m❯\x1b[39m earlier submitted user message', '● READY_FIXTURE',
+    '\x1b[38;5;244m──────────────────────────────', `\x1b[39m❯ ${body}`,
+    '\x1b[38;5;244m──────────────────────────────',
+    '\x1b[39m   PROD  synthetic-project (main) · Overseer session restart',
+    '\x1b[39m  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  ].join('\n')
+
+  it('recognizes the observed Claude status layout while refusing drafts and ambiguous frames', async () => {
+    expect(inspectOperatorComposer(currentClaudePane(''))).toBe('clear')
+    for (const body of ['human draft', '\nsecond-line human draft']) {
+      const snapshot = currentClaudePane(body)
+      const writes: string[] = []
+      expect(inspectOperatorComposer(snapshot)).toBe('draft')
+      await expect(sendSettledEnvelope({
+        captureSession: async () => '', captureStyledSession: async () => snapshot,
+        sendText: async (_id, text) => { writes.push(text); return true }
+      }, 'target', 'envelope', { rejectPrefilledComposer: true }))
+        .rejects.toMatchObject({ reason: 'composer-draft', pasted: false })
+      expect(writes).toEqual([])
+    }
+    expect(inspectOperatorComposer(currentClaudePane('').replace('PROD  synthetic-project', 'unknown status'))).toBe('unknown')
+    expect(inspectOperatorComposer(currentClaudePane('').replace('bypass permissions on', 'unknown mode on'))).toBe('unknown')
+    expect(inspectOperatorComposer(currentClaudePane('\n\x1b[39m❯ second prompt'))).toBe('unknown')
+    expect(inspectOperatorComposer(currentClaudePane('').replace('\x1b[39m   PROD', '   PROD'))).toBe('unknown')
+  })
 
   it('bounds actual fullscreen Claude and Codex composers, excluding history and status chrome', () => {
     for (const fixture of [claudePane, codexPane]) {

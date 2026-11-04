@@ -115,12 +115,19 @@ export function inspectOperatorComposer(captureText: string): ComposerInspection
   let lastVisible = rows.length - 1
   while (lastVisible >= 0 && !rows[lastVisible].text.trim()) lastVisible--
   const footer = rows[lastVisible]?.text ?? ''
-  if (/^\s+⏵⏵ (?:auto|accept edits|bypass permissions) mode on\s+\(shift\+tab to cycle\)(?: · ← \d+ agents)?\s*$/.test(footer)) {
+  const legacyClaudeFooter = /^\s+⏵⏵ (?:auto|accept edits|bypass permissions) mode on\s+\(shift\+tab to cycle\)(?: · ← \d+ agents)?\s*$/.test(footer)
+  const currentClaudeFooter = /^\s+⏵⏵ bypass permissions on\s+\(shift\+tab to cycle\)\s*$/.test(footer)
+  if (legacyClaudeFooter || currentClaudeFooter) {
     // Claude fullscreen has a styled, bounded composer between two horizontal rules.
     // Earlier submitted prompts also start with ❯ but are outside this frame. More rules
     // or prompt rows are ambiguous (including a draft trying to mimic the frame).
     const rails = rows.flatMap((row, i) => /^─{20,}\s*$/.test(row.text) && row.sgr ? [i] : [])
-    if (rails.length !== 2 || rails[1] !== lastVisible - 1 || rows[rails[0]].text.trim() !== rows[rails[1]].text.trim()) return 'unknown'
+    const legacyFrame = legacyClaudeFooter && rails[1] === lastVisible - 1
+    // The observed current Claude layout has one styled PROD status row between
+    // the lower rail and footer. Other footer/status layouts remain unrecognized.
+    const currentFrame = currentClaudeFooter && rails[1] === lastVisible - 2 &&
+      rows[lastVisible - 1]?.sgr && /^\s+PROD {2}\S.*$/.test(rows[lastVisible - 1].text)
+    if (rails.length !== 2 || (!legacyFrame && !currentFrame) || rows[rails[0]].text.trim() !== rows[rails[1]].text.trim()) return 'unknown'
     eligible = candidates.filter((candidate) => candidate.glyph === '❯' && candidate.start > rails[0] && candidate.start < rails[1])
     end = rails[1]
     recognizedLayout = true
