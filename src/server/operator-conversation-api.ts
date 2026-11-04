@@ -11,12 +11,15 @@ import { readOperatorConversation, OperatorConversationError } from '../core/ope
 import type { OperatorDeliveryInput } from '../core/agents/operator-messaging'
 import type { AgentMessageOutcome } from '../core/agents/agent-message-decide'
 import type { OperatorSessionTarget } from '../shared/operator-conversations'
+import type { MirrorEntry } from '../core/agent-status-mirror'
+import { operatorStatusObservation } from '../core/agents/operator-status-diagnostic'
 
 export interface OperatorConversationApiDeps {
   dataDir: string
   managementToken: string
   bindings: OperatorSessionBindings
   projects(): readonly OperatorProject[]
+  statusOf?(nodeId: string): MirrorEntry | undefined
   sendMessage(input: OperatorDeliveryInput): Promise<AgentMessageOutcome>
 }
 
@@ -66,6 +69,7 @@ export function createOperatorConversationApi(deps: OperatorConversationApiDeps)
     try {
       const url = new URL(req.url ?? '/', 'http://operator.local')
       if (url.pathname === '/opsapi/v1/conversation') operation = 'read'
+      else if (url.pathname === '/opsapi/v1/session-status') operation = 'status'
       else if (url.pathname === '/opsapi/v1/messages') operation = 'message'
       else if (url.pathname.startsWith('/opsapi/v1/receipts/')) operation = 'receipt'
       if (!isLoopbackPeer(req.socket.remoteAddress)) throw new OperatorTargetError('loopback_only', 403)
@@ -99,6 +103,21 @@ export function createOperatorConversationApi(deps: OperatorConversationApiDeps)
           operatorAllowed(principal, 'read', t) || operatorAllowed(principal, 'message', t))
         audit('ok')
         sendJson(res, 200, { version: 1, targets })
+        return
+      }
+      if (url.pathname === '/opsapi/v1/session-status' && req.method === 'GET') {
+        const keys = ['projectId', 'nodeId', 'sessionId', 'generation']
+        if ([...url.searchParams.keys()].some(key => !keys.includes(key) || url.searchParams.getAll(key).length !== 1))
+          throw new OperatorTargetError('invalid_query', 400)
+        const candidate = Object.fromEntries(keys.map(key => [key, url.searchParams.get(key)]))
+        if (!isOperatorTarget(candidate)) throw new OperatorTargetError('invalid_target', 400)
+        target = candidate
+        permission('message', target)
+        const session = deps.bindings.resolve(deps.projects(), target)
+        const observation = deps.statusOf ? operatorStatusObservation(deps.statusOf(target.nodeId),
+          { sessionId: target.sessionId, agentId: session.agentId }) : 'unavailable'
+        audit('ok')
+        sendJson(res, 200, { version: 1, target, observation, diagnosticOnly: true })
         return
       }
       if (url.pathname === '/opsapi/v1/conversation' && req.method === 'GET') {

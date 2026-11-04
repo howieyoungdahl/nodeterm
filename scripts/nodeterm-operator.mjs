@@ -60,13 +60,14 @@ function targetFrom(file) {
 async function main() {
   const o = args(process.argv.slice(2))
   const command = o.positional[0]
-  if (!['capabilities', 'sessions', 'read', 'send', 'receipt'].includes(command) || o.positional.length !== 1) fail('invalid_command')
+  if (!['capabilities', 'sessions', 'status', 'read', 'send', 'receipt'].includes(command) || o.positional.length !== 1) fail('invalid_command')
   const base = baseUrl(o.url)
   const token = readPrivateFile(o['credential-file'])
   const headers = { authorization: `Bearer ${token}`, accept: 'application/json' }
   let route, method = 'GET', body
   if (command === 'capabilities') route = '/opsapi/v1/capabilities'
   if (command === 'sessions') route = '/opsapi/v1/sessions'
+  if (command === 'status') route = `/opsapi/v1/session-status?${new URLSearchParams(targetFrom(o['target-file']))}`
   if (command === 'read') {
     const target = targetFrom(o['target-file'])
     const q = new URLSearchParams(target)
