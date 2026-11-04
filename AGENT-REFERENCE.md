@@ -46,6 +46,11 @@ means — and what you may assume when writing a feature — is three tiers, not
 
 Messaging queue integrity: `docs/message-delivery-integrity.md` defines the optional assignment-validation callback, logical message receipts, and legacy compatibility boundary. A target turn hook does not establish message-specific work acceptance. Queue expiry must be checked at the send boundary as well as by timers.
 
+The operator queue freeze retains queued entries and waits for queue-owned admissions, drains and
+expiry traces. It is local to one queue, may wait on unrelated FIFO work, and cannot prove receipt
+durability, direct-send completion, listener shutdown, or other-process exclusion. A cutover must
+establish those boundaries separately and must never replay an uncertain delivery.
+
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall hook)
 npm run dev        # dev mode with renderer HMR

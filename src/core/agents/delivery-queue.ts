@@ -155,6 +155,10 @@ export class DeliveryQueue {
   private readonly drains = new Map<string, Promise<void>>()
   private readonly inFlight = new Set<string>()
   private readonly retries = new Map<string, CancelTimer>()
+  private operatorFrozen = false
+  private readonly operatorAdmissions = new Set<Promise<void>>()
+  private readonly operatorExpirations = new Set<Promise<void>>()
+  private operatorTraceFailed = false
   private readonly capacity: number
   private readonly ttlMs: number
   private readonly schedule: (ms: number, fn: () => void) => CancelTimer
@@ -189,6 +193,24 @@ export class DeliveryQueue {
     )
   }
 
+  /** Stop new operator queue work in this instance. Existing queued messages are retained. */
+  freezeOperatorTraffic(): void { this.operatorFrozen = true }
+
+  /**
+   * Wait for admissions, active drains and operator expiry tracing, then refuse if operator work
+   * remains queued. This can wait on unrelated drains; a frozen FIFO head holds later work.
+   * It does not close direct sends, other processes, receipt observers, or an entire server.
+   */
+  async waitForOperatorQuiescence(): Promise<void> {
+    if (!this.operatorFrozen) throw new Error('operator_queue_not_frozen')
+    while (this.operatorAdmissions.size) await Promise.all([...this.operatorAdmissions])
+    while (this.drains.size) await Promise.all([...this.drains.values()])
+    while (this.operatorExpirations.size) await Promise.all([...this.operatorExpirations])
+    if ([...this.queues.values()].some((entries) => entries.some((entry) => entry.req.operator)))
+      throw new Error('operator_queue_not_empty')
+    if (this.operatorTraceFailed) throw new Error('operator_trace_unavailable')
+  }
+
   /**
    * Enqueue a message whose initial delivery refused as `targetBusy` (or whose target is
    * hibernated). Returns the `queued` receipt (with its position and TTL) or `queueFull` at the
@@ -206,12 +228,24 @@ export class DeliveryQueue {
       return { kind: 'messageRejected', reason: 'invalid-agent-principal' }
     }
     if (Buffer.byteLength(req.body) > MESSAGE_BODY_MAX_BYTES) return { kind: 'messageRejected', reason: 'body-too-large' }
+    if (req.operator && this.operatorFrozen) return { kind: 'notPermitted', reason: 'switch-off' }
+    let finish: (() => void) | undefined
+    let tracked: Promise<void> | undefined
     if (req.operator) {
-      try {
-        if (!(await req.operator.authorize())) return { kind: 'notPermitted', reason: 'switch-off' }
-      } catch { return { kind: 'notPermitted', reason: 'switch-off' } }
+      tracked = new Promise<void>((resolve) => { finish = resolve })
+      this.operatorAdmissions.add(tracked)
     }
-    return this.messages.admit(req, (snapshot) => this.admit(snapshot, opts))
+    try {
+      if (req.operator) {
+        try {
+          if (!(await req.operator.authorize()) || this.operatorFrozen) return { kind: 'notPermitted', reason: 'switch-off' }
+        } catch { return { kind: 'notPermitted', reason: 'switch-off' } }
+      }
+      return await this.messages.admit(req, (snapshot) => this.admit(snapshot, opts))
+    } finally {
+      if (tracked) this.operatorAdmissions.delete(tracked)
+      finish?.()
+    }
   }
 
   private async admit(req: QueuedDeliveryRequest, opts: { hibernated?: boolean }): Promise<AgentMessageOutcome> {
@@ -242,13 +276,15 @@ export class DeliveryQueue {
     req: QueuedDeliveryRequest,
     opts: { hibernated?: boolean }
   ): Promise<AgentMessageOutcome> {
+    if (req.operator && this.operatorFrozen) return { kind: 'notPermitted', reason: 'switch-off' }
     const occupied = this.depth(req.targetNodeId) + (this.inFlight.has(req.targetNodeId) ? 1 : 0)
     if (occupied >= this.capacity) {
       // Refused, not dropped-oldest: an accepted message is never silently discarded to make room.
       return { kind: 'queueFull', capacity: this.capacity }
     }
     const now = this.deps.now()
-    const t = await this.deps.trace({
+    let t: Awaited<ReturnType<DeliveryQueueDeps['trace']>>
+    try { t = await this.deps.trace({
       ...(req.sourceNodeId ? { sourceNodeId: req.sourceNodeId } : {}),
       ...(req.sourcePrincipal ? { sourcePrincipal: req.sourcePrincipal } : {}),
       sourceTitle: req.sourceTitle,
@@ -256,7 +292,12 @@ export class DeliveryQueue {
       outcome: 'queued',
       bodyChars: req.body.length,
       messageId: req.message?.message_id ?? req.operator?.messageId, actionId: req.message?.action_id
-    })
+    }) } catch (error) {
+      if (req.operator) this.operatorTraceFailed = true
+      throw error
+    }
+    if (req.operator && t.traced !== 'board-log') this.operatorTraceFailed = true
+    if (req.operator && this.operatorFrozen) return { kind: 'notPermitted', reason: 'switch-off' }
     const entry: QueueEntry = {
       req,
       enqueuedAt: now,
@@ -311,6 +352,7 @@ export class DeliveryQueue {
       const list = this.queues.get(nodeId)
       if (!list || list.length === 0) return
       const entry = list[0]
+      if (entry.req.operator && this.operatorFrozen) return
       if (this.deps.now() >= entry.enqueuedAt + entry.ttlMs) {
         await this.expire(nodeId, entry)
         continue
@@ -333,6 +375,10 @@ export class DeliveryQueue {
           return this.messages.guard(entry.req, 'delivery')
         }
         const refusal = await beforeSend()
+        if (entry.req.operator && this.operatorFrozen) {
+          this.requeueFront(nodeId, entry)
+          return
+        }
         outcome = refusal ?? (entry.attempts++ >= 3
           ? { kind: 'messageRejected', reason: 'retry-limit' }
           : await (entry.req.sourcePrincipal === 'operator' && this.deps.deliverOperator
@@ -397,7 +443,18 @@ export class DeliveryQueue {
    * have. Idempotent against a flush that already removed the entry (the timer can fire in the seam
    * before its cancel runs).
    */
-  private async expire(nodeId: string, entry: QueueEntry): Promise<void> {
+  private expire(nodeId: string, entry: QueueEntry): Promise<void> {
+    if (!entry.req.operator) return this.expireNow(nodeId, entry)
+    let resolve!: () => void
+    let reject!: (error: unknown) => void
+    const operation = new Promise<void>((ok, fail) => { resolve = ok; reject = fail })
+    const tracked = operation.finally(() => this.operatorExpirations.delete(tracked))
+    this.operatorExpirations.add(tracked)
+    void this.expireNow(nodeId, entry).then(resolve, reject)
+    return tracked
+  }
+
+  private async expireNow(nodeId: string, entry: QueueEntry): Promise<void> {
     const list = this.queues.get(nodeId)
     if (!list) return
     const i = list.indexOf(entry)
@@ -419,7 +476,7 @@ export class DeliveryQueue {
   }
 
   private async traceOutcome(entry: QueueEntry, outcome: AgentMessageOutcome['kind']): Promise<{ traceId: string }> {
-    try { return await this.deps.trace({
+    try { const result = await this.deps.trace({
       ...(entry.req.sourceNodeId ? { sourceNodeId: entry.req.sourceNodeId } : {}),
       ...(entry.req.sourcePrincipal ? { sourcePrincipal: entry.req.sourcePrincipal } : {}),
       sourceTitle: entry.req.sourceTitle,
@@ -428,7 +485,13 @@ export class DeliveryQueue {
       bodyChars: entry.req.body.length,
       messageId: entry.req.message?.message_id ?? entry.req.operator?.messageId,
       actionId: entry.req.message?.action_id
-    }) } catch { return { traceId: entry.queuedTraceId || randomUUID() } }
+    })
+      if (entry.req.operator && result.traced !== 'board-log') this.operatorTraceFailed = true
+      return result
+    } catch {
+      if (entry.req.operator) this.operatorTraceFailed = true
+      return { traceId: entry.queuedTraceId || randomUUID() }
+    }
   }
 
   private observe(fn: () => void): void {
