@@ -170,6 +170,10 @@ names the client that dropped it. Validate Server upgrades against a disposable 
 Restarting a shared live service is an explicit operator action, never a test or an automatic
 repair step.
 
+`DeliveryQueue`'s operator freeze is a local prerequisite only. It retains queued messages and
+waits for queue activity, but does not fence other processes, direct sends, receipt observers or
+server shutdown. Never use it alone as proof that migration or replay is safe.
+
 **The Server operator API is a different principal, not an agent escape hatch.** `/opsapi/*` is
 TCP-loopback-only and authenticates only the `0600` `ops-token` bearer; browser cookies, the
 operator password, proxy headers, and node tokens never substitute for it. Keep agent

@@ -85,8 +85,133 @@ const req = (over: Partial<QueuedDeliveryRequest> = {}): QueuedDeliveryRequest =
   body: 'ping',
   ...over
 })
+const operatorReq = (): QueuedDeliveryRequest => ({
+  sourcePrincipal: 'operator', targetNodeId: 'dst', sourceTitle: 'Operator', body: 'synthetic',
+  operator: { target: { projectId: 'p', nodeId: 'dst', sessionId: 's', generation: 'g' },
+    callerId: 'caller', messageId: 'message', authorize: async () => true, onOutcome: () => {} }
+})
 
 describe('DeliveryQueue', () => {
+  it('freezes new operator work and refuses quiescence while a queued message remains', async () => {
+    const h = harness(); const q = new DeliveryQueue(h.deps)
+    await expect(q.waitForOperatorQuiescence()).rejects.toThrow('operator_queue_not_frozen')
+    expect((await q.enqueue(operatorReq())).kind).toBe('queued')
+    q.freezeOperatorTraffic()
+    expect((await q.enqueue(operatorReq())).kind).toBe('notPermitted')
+    await q.onTargetIdle('dst')
+    expect(q.depth('dst')).toBe(1)
+    expect(h.delivered).toEqual([])
+    await expect(q.waitForOperatorQuiescence()).rejects.toThrow('operator_queue_not_empty')
+    q.resetForTests()
+  })
+
+  it('waits for an enqueue already tracing and refuses its insertion after freezing', async () => {
+    let entered!: () => void; let release!: () => void
+    const tracing = new Promise<void>((resolve) => { entered = resolve })
+    const proceed = new Promise<void>((resolve) => { release = resolve })
+    const h = harness({ trace: async () => { entered(); await proceed; return { traceId: 't', traced: 'board-log' } } })
+    const q = new DeliveryQueue(h.deps)
+    const pending = q.enqueue(operatorReq())
+    await tracing
+    q.freezeOperatorTraffic()
+    let quiet = false
+    const waiting = q.waitForOperatorQuiescence().then(() => { quiet = true })
+    await Promise.resolve()
+    expect(quiet).toBe(false)
+    release()
+    expect((await pending).kind).toBe('notPermitted')
+    await waiting
+    expect(q.depth('dst')).toBe(0)
+  })
+
+  it('waits for an operator delivery already in flight before reporting queue quiescence', async () => {
+    let entered!: () => void; let release!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const proceed = new Promise<void>((resolve) => { release = resolve })
+    const h = harness({ trace: async () => ({ traceId: 't', traced: 'board-log' }),
+      deliverOperator: async () => { entered(); await proceed; return { kind: 'unknown', reason: 'delivery-exception' } } })
+    const q = new DeliveryQueue(h.deps)
+    expect((await q.enqueue(operatorReq())).kind).toBe('queued')
+    const delivery = q.onTargetIdle('dst')
+    await started
+    q.freezeOperatorTraffic()
+    let quiet = false
+    const waiting = q.waitForOperatorQuiescence().then(() => { quiet = true })
+    await Promise.resolve()
+    expect(quiet).toBe(false)
+    release()
+    await delivery; await waiting
+    expect(q.depth('dst')).toBe(0)
+    expect(h.flushed[0].outcome.kind).toBe('unknown')
+  })
+
+  it('waits for operator expiry tracing even after the entry leaves the queue', async () => {
+    let entered!: () => void; let release!: () => void; let traces = 0
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const proceed = new Promise<void>((resolve) => { release = resolve })
+    const h = harness({ trace: async () => {
+      if (++traces === 2) { entered(); await proceed }
+      return { traceId: 't', traced: 'board-log' }
+    } })
+    const q = new DeliveryQueue(h.deps, { ttlMs: 1000 })
+    await q.enqueue(operatorReq())
+    h.setClock(2001)
+    h.fireLatestTimer()
+    await started
+    expect(q.depth('dst')).toBe(0)
+    q.freezeOperatorTraffic()
+    let quiet = false
+    const waiting = q.waitForOperatorQuiescence().then(() => { quiet = true })
+    await Promise.resolve()
+    expect(quiet).toBe(false)
+    release(); await waiting
+  })
+
+  it('tracks expiry before a reentrant outcome callback can request quiescence', async () => {
+    let release!: () => void; let entered!: () => void; let traces = 0
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const proceed = new Promise<void>((resolve) => { release = resolve })
+    const h = harness({ trace: async () => {
+      if (++traces === 2) { entered(); await proceed }
+      return { traceId: 't', traced: 'board-log' }
+    } })
+    const q = new DeliveryQueue(h.deps, { ttlMs: 1000 }); const message = operatorReq()
+    let waiting!: Promise<void>; let quiet = false
+    message.operator!.onOutcome = () => { q.freezeOperatorTraffic(); waiting = q.waitForOperatorQuiescence().then(() => { quiet = true }) }
+    await q.enqueue(message)
+    h.setClock(2001); h.fireLatestTimer(); await started
+    await Promise.resolve()
+    expect(quiet).toBe(false)
+    release(); await waiting
+  })
+
+  it('refuses queue quiescence when an operator expiry trace fails', async () => {
+    let traces = 0
+    const h = harness({ trace: async () => {
+      if (++traces === 2) throw new Error('synthetic trace failure')
+      return { traceId: 't', traced: 'board-log' }
+    } })
+    const q = new DeliveryQueue(h.deps, { ttlMs: 1000 })
+    await q.enqueue(operatorReq())
+    h.setClock(2001); h.fireLatestTimer(); q.freezeOperatorTraffic()
+    await expect(q.waitForOperatorQuiescence()).rejects.toThrow('operator_trace_unavailable')
+  })
+
+  it('refuses queue quiescence if operator traces fell back to memory', async () => {
+    const h = harness(); const q = new DeliveryQueue(h.deps, { ttlMs: 1000 })
+    await q.enqueue(operatorReq())
+    h.setClock(2001); h.fireLatestTimer(); q.freezeOperatorTraffic()
+    await expect(q.waitForOperatorQuiescence()).rejects.toThrow('operator_trace_unavailable')
+  })
+
+  it('refuses queue quiescence when only the operator expiry trace falls back to memory', async () => {
+    let traces = 0
+    const h = harness({ trace: async () => ({ traceId: 't', traced: ++traces === 1 ? 'board-log' : 'memory' }) })
+    const q = new DeliveryQueue(h.deps, { ttlMs: 1000 })
+    await q.enqueue(operatorReq())
+    h.setClock(2001); h.fireLatestTimer(); q.freezeOperatorTraffic()
+    await expect(q.waitForOperatorQuiescence()).rejects.toThrow('operator_trace_unavailable')
+  })
   it('expires at the deadline even when the timer callback is delayed', async () => {
     const h = harness()
     const q = new DeliveryQueue(h.deps, { ttlMs: 1000 })
