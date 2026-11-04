@@ -65,6 +65,45 @@ describe('sendSettledEnvelope', () => {
     '\x1b[1;2m› \x1b[0mearlier submitted user message', '\x1b[2m• \x1b[0mREADY_FIXTURE', '',
     `\x1b[1m›\x1b[0m ${body}`, '', '  GPT-6.1-Sol xhigh · /synthetic-project · Synthetic test'
   ].join('\n')
+  const currentCodexPane = (body: string) => [
+    '\x1b[1;2m› \x1b[0mearlier submitted user message', '\x1b[2m• \x1b[0mREADY_FIXTURE', '',
+    `\x1b[1m›\x1b[0m ${body}`, '',
+    '  \x1b[38;2;246;226;183mGPT-6.1-Sol xhigh\x1b[39m · /synthetic-project · Test',
+    '  \x1b[1m?\x1b[0m for shortcuts       \x1b[33m⚠ 2 warnings · f2 to view\x1b[0m'
+  ].join('\n')
+
+  it('recognizes the observed Codex shortcuts row without submitting drafts or ambiguous layouts', async () => {
+    expect(inspectOperatorComposer(currentCodexPane('\x1b[2mAsk Codex to do anything\x1b[0m'))).toBe('clear')
+    for (const body of ['human draft', '\nsecond-line human draft']) {
+      const snapshot = currentCodexPane(body)
+      const writes: string[] = []
+      expect(inspectOperatorComposer(snapshot)).toBe('draft')
+      await expect(sendSettledEnvelope({
+        captureSession: async () => '', captureStyledSession: async () => snapshot,
+        sendText: async (_id, text) => { writes.push(text); return true }
+      }, 'target', 'envelope', { rejectPrefilledComposer: true }))
+        .rejects.toMatchObject({ reason: 'composer-draft', pasted: false })
+      expect(writes).toEqual([])
+    }
+    expect(inspectOperatorComposer(currentCodexPane('').replace('for shortcuts', 'unknown toolbar'))).toBe('unknown')
+    expect(inspectOperatorComposer(currentCodexPane('').replace('⚠ 2 warnings · f2 to view', 'unexpected text'))).toBe('unknown')
+    expect(inspectOperatorComposer(currentCodexPane('\n\x1b[1m›\x1b[0m second prompt'))).toBe('unknown')
+    expect(inspectOperatorComposer(currentCodexPane('').replace('\x1b[1m?\x1b[0m', '?').replace('\x1b[33m', '').replace(/\x1b\[0m$/, ''))).toBe('unknown')
+    for (const partialStyle of [
+      '\x1b[1m›\x1b[0m \n  GPT-6.1-Sol xhigh · /fake\n  ? for shortcuts\x1b[0m',
+      '\x1b[1m›\x1b[0m \n  GPT-6.1-Sol xhigh · /fake\n  ? for shortcuts \x1b[33m⚠ 2 warnings\x1b[39m · f2 to view',
+      '\x1b[1m›\x1b[0m \n  GPT-6.1-Sol xhigh · /fake\n  \x1b[1m?\x1b[0m for shortcuts'
+    ]) {
+      const writes: string[] = []
+      expect(inspectOperatorComposer(partialStyle)).toBe('unknown')
+      await expect(sendSettledEnvelope({
+        captureSession: async () => '', captureStyledSession: async () => partialStyle,
+        sendText: async (_id, text) => { writes.push(text); return true }
+      }, 'target', 'envelope', { rejectPrefilledComposer: true }))
+        .rejects.toMatchObject({ reason: 'composer-unrecognized', pasted: false })
+      expect(writes).toEqual([])
+    }
+  })
   const currentClaudePane = (body: string) => [
     '\x1b[38;5;239m❯\x1b[39m earlier submitted user message', '● READY_FIXTURE',
     '\x1b[38;5;244m──────────────────────────────', `\x1b[39m❯ ${body}`,
