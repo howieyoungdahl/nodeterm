@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, writeFile, chmod, symlink, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as atomicFiles from '../core/fs-atomic'
 import { OperatorReceiptStore, appendOperatorAudit } from './operator-receipts'
 
 let dir = ''
@@ -10,6 +11,40 @@ const target = { projectId: 'p1', nodeId: 'n1', sessionId: 's1', generation: 'g1
 async function fresh() { dir = await mkdtemp(path.join(os.tmpdir(), 'operator-receipts-')); return dir }
 
 describe('OperatorReceiptStore', () => {
+  it('fails already-queued admissions when a preceding persistence operation fails', async () => {
+    const d = await fresh()
+    const store = new OperatorReceiptStore(d)
+    const existing = await store.admit('caller', 'existing', target, 'existing')
+    const originalWrite = atomicFiles.writeFileAtomic
+    let entered!: () => void
+    let release!: () => void
+    const enteredFirst = new Promise<void>((resolve) => { entered = resolve })
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let calls = 0
+    const spy = vi.spyOn(atomicFiles, 'writeFileAtomic').mockImplementation(async (...args) => {
+      if (++calls === 1) {
+        entered()
+        await gate
+        throw new Error('synthetic storage failure')
+      }
+      return originalWrite(...args)
+    })
+    try {
+      // Delivery updates can persist independently of the API's admission queue.
+      const first = store.update(existing.receipt.id, 'queued', 'queued').then(() => 'updated', () => 'failed')
+      await enteredFirst
+      const second = store.admit('caller', 'second', target, 'second').then(() => 'admitted', () => 'failed')
+      release()
+      expect(await first).toBe('failed')
+      expect(await second).toBe('failed')
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(() => store.find('caller', 'second', target, 'second'))
+        .toThrowError(expect.objectContaining({ code: 'receipt_store_unavailable' }))
+    } finally {
+      release()
+      spy.mockRestore()
+    }
+  })
   it('deduplicates by caller and idempotency key, detects changed payloads, and persists lifecycle', async () => {
     const store = new OperatorReceiptStore(await fresh())
     const [a, b] = await Promise.all([

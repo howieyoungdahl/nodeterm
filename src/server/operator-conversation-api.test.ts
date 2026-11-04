@@ -9,6 +9,7 @@ import * as policyModule from './operator-conversation-policy'
 import * as conversationModule from '../core/operator-conversation'
 import { OperatorReceiptStore } from './operator-receipts'
 import { writeFileAtomic } from '../core/fs-atomic'
+import * as atomicFiles from '../core/fs-atomic'
 import { DeliveryQueue } from '../core/agents/delivery-queue'
 import { sendOperatorMessage } from '../core/agents/operator-messaging'
 import type { AgentMessageOutcome } from '../core/agents/agent-message-decide'
@@ -86,6 +87,46 @@ describe('operator conversation HTTP API', () => {
     const promise = new Promise<void>((r) => { resolve = r })
     return { promise, resolve }
   }
+
+  it('does not dispatch a new admission queued behind a failed delivery receipt update', async () => {
+    let finishDelivery!: (outcome: AgentMessageOutcome) => void
+    const delivery = new Promise<AgentMessageOutcome>((resolve) => { finishDelivery = resolve })
+    const target = await setup({ message: true }, () => delivery)
+    expect((await post(target, 'first-request-001')).status).toBe(202)
+    expect(sends).toHaveLength(1)
+
+    const entered = deferred(); const release = deferred(); const admitted = deferred()
+    const originalWrite = atomicFiles.writeFileAtomic
+    const originalAdmit = OperatorReceiptStore.prototype.admit
+    let writes = 0
+    vi.spyOn(atomicFiles, 'writeFileAtomic').mockImplementation(async (...args) => {
+      if (++writes === 1) {
+        entered.resolve()
+        await release.promise
+        throw new Error('synthetic storage failure')
+      }
+      return originalWrite(...args)
+    })
+    vi.spyOn(OperatorReceiptStore.prototype, 'admit').mockImplementationOnce(function (this: OperatorReceiptStore, ...args) {
+      const pending = originalAdmit.apply(this, args)
+      admitted.resolve()
+      return pending
+    })
+    try {
+      sends[0].onAccepted?.()
+      await entered.promise
+      const second = post(target, 'second-request-001')
+      await admitted.promise
+      release.resolve()
+      const response = await second
+      expect(response.status).toBe(503)
+      expect((await response.json()).error).toBe('receipt_store_unavailable')
+      expect(sends).toHaveLength(1)
+    } finally {
+      release.resolve()
+      finishDelivery({ kind: 'queued', traceId: 'synthetic', position: 1, ttlMs: 1 })
+    }
+  })
 
   it.each(['read', 'message'] as const)('enumerates current and future verified sessions across projects with independent standing %s', async (operation) => {
     const current = await setup({ read: operation === 'read', message: operation === 'message', standing: true })

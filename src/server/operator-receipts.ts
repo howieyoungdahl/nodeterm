@@ -88,6 +88,9 @@ export class OperatorReceiptStore {
   private async persist(): Promise<void> {
     if (!this.healthy) throw new OperatorStoreError('receipt_store_unavailable')
     const task = this.pending.then(async () => {
+      // A preceding queued write may have failed after this task was enqueued.
+      // Never let a later admission proceed once the receipt store is unhealthy.
+      if (!this.healthy) throw new OperatorStoreError('receipt_store_unavailable')
       await writeFileAtomic(this.file, JSON.stringify({ version: 1, records: [...this.records.values()] }), { mode: 0o600 })
       this.recovered = false
     })
