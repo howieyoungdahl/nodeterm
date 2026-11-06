@@ -2,8 +2,8 @@ import http from 'node:http'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import type { OpsAdoptResult, OpsCreateInput, OpsCreateResult, OpsUpdateInput, OpsUpdateResult } from './node-ops'
-import { createOpsApiHandler, isLoopbackPeer } from './ops-api'
+import type { OpsRemoveResult, OpsAdoptResult, OpsCreateInput, OpsCreateResult, OpsUpdateInput, OpsUpdateResult } from './node-ops'
+import { createOpsApiHandler, isLoopbackPeer, type OpsApiDeps } from './ops-api'
 import { SpawnHandlerState } from './spawn-handler-state'
 
 describe('/opsapi', () => {
@@ -18,8 +18,15 @@ describe('/opsapi', () => {
   let createResult: OpsCreateResult
   let updateCalls: Array<{ nodeId: string; input: OpsUpdateInput; force: boolean }>
   let updateResult: OpsUpdateResult
+  let deps: OpsApiDeps
+  let deadCalls: string[]
+  let legacyRemoveCalls: string[]
+  let deadResult: OpsRemoveResult
 
   beforeEach(async () => {
+    deadCalls = []
+    legacyRemoveCalls = []
+    deadResult = { ok: true, removedIds: ['dead'], forced: false }
     adoptCalls = 0
     sweepForce = undefined
     adoptResult = { adopted: [], skipped: [], live: true }
@@ -28,14 +35,15 @@ describe('/opsapi', () => {
     updateCalls = []
     updateResult = { ok: true, id: 'term-abc', title: 'renamed', size: { width: 640, height: 440 } }
     spawn = new SpawnHandlerState({ now: () => now, wedgeAfterMs: 100 })
-    const handler = createOpsApiHandler({
+    deps = {
       token: 'ops-secret',
       nodes: async () => [],
       sweep: async (dryRun, force) => {
         sweepForce = force
         return { dryRun, affectedIds: ['dead-a'], scanned: 2 }
       },
-      remove: async (id, force) => ({ ok: true, removedIds: [id], forced: force }),
+      remove: async (id, force) => { legacyRemoveCalls.push(id); return { ok: true, removedIds: [id], forced: force } },
+      removeDead: async (id) => { deadCalls.push(id); return deadResult },
       adoptOrphans: async () => {
         adoptCalls += 1
         return adoptResult
@@ -57,7 +65,8 @@ describe('/opsapi', () => {
         deliveryQueueDepths: { 'node-b': 3 },
         projects: [{ id: 'p1', nodeCount: 2 }]
       })
-    })
+    }
+    const handler = createOpsApiHandler(deps)
     server = http.createServer((req, res) => void handler(req, res))
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
@@ -144,6 +153,31 @@ describe('/opsapi', () => {
       body: JSON.stringify({ dryRun: false, force: '1' })
     })
     expect(bad.status).toBe(400)
+  })
+
+  it('routes authenticated dead-only deletion separately even with a force query', async () => {
+    expect((await fetch(`${base}/opsapi/dead-nodes/dead`, { method: 'DELETE' })).status).toBe(401)
+    const response = await fetch(`${base}/opsapi/dead-nodes/dead?force=1`, { method: 'DELETE', headers: auth })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true, removedIds: ['dead'], forced: false })
+    expect(deadCalls).toEqual(['dead'])
+    expect(legacyRemoveCalls).toEqual([])
+  })
+
+  it('preserves strict refusal status and accepts no alternate HTTP method', async () => {
+    deadResult = { ok: false, status: 409, error: 'pane_alive', paneState: 'alive' }
+    const response = await fetch(`${base}/opsapi/dead-nodes/dead`, { method: 'DELETE', headers: auth })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({ error: 'pane_alive', paneState: 'alive' })
+    expect((await fetch(`${base}/opsapi/dead-nodes/dead`, { method: 'POST', headers: auth })).status).toBe(405)
+    expect(legacyRemoveCalls).toEqual([])
+  })
+
+  it('fails closed when the strict deletion capability is unavailable', async () => {
+    deps.removeDead = undefined
+    expect((await fetch(`${base}/opsapi/dead-nodes/dead`, { method: 'DELETE', headers: auth })).status).toBe(404)
+    expect(deadCalls).toEqual([])
+    expect(legacyRemoveCalls).toEqual([])
   })
 
   it('passes the explicit force gate to one-card deletion', async () => {

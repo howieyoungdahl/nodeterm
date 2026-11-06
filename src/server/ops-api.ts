@@ -65,6 +65,8 @@ export interface OpsApiDeps {
   nodes(): Promise<OpsNodeInventoryItem[]>
   sweep(dryRun: boolean, force: boolean): Promise<OpsSweepResult>
   remove(nodeId: string, force: boolean): Promise<OpsRemoveResult>
+  /** Optional only for older embedders; absence returns 404, never legacy removal. */
+  removeDead?(nodeId: string): Promise<OpsRemoveResult>
   /** The sweep's mirror image: card a live `nt-<id>` session that no project still lists. */
   adoptOrphans(): Promise<OpsAdoptResult>
   /** Create a terminal node with no live source node to anchor it. See `ServerNodeOps.create`. */
@@ -451,6 +453,23 @@ export function createOpsApiHandler(
           taskId: 'required', creationKey: 'exact-required', metadata: 'owner-project-workstream-functionalRole-required',
           privateReceipt: 'before-save-and-spawn', verifiedCreatorSource: true,
           taskPlanning: 'category-urgency-reason-relationship-before-save-and-spawn' } })
+        return
+      }
+
+      const deadNodeMatch = /^\/opsapi\/dead-nodes\/([^/]+)$/.exec(pathname)
+      if (deadNodeMatch) {
+        if (!deps.removeDead) { sendJson(res, 404, { error: 'not_found' }); return }
+        if (method !== 'DELETE') {
+          res.setHeader('Allow', 'DELETE')
+          sendJson(res, 405, { error: 'method_not_allowed' })
+          return
+        }
+        const nodeId = validNodeIdSegment(deadNodeMatch[1])
+        if (!nodeId) { sendJson(res, 400, { error: 'invalid_node_id' }); return }
+        const result = await deps.removeDead(nodeId)
+        sendJson(res, result.ok ? 200 : result.status, result.ok ? result : {
+          error: result.error, ...(result.paneState ? { paneState: result.paneState } : {})
+        })
         return
       }
 
