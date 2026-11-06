@@ -381,7 +381,7 @@ export function codexThreadPermissionParams(permissions: CodexThreadPermissions)
 
 const isCodexApprovalPolicy = (v: string): v is CodexApprovalPolicy =>
   (CODEX_APPROVAL_POLICIES as readonly string[]).includes(v)
-const isCodexSandboxMode = (v: string): v is CodexSandboxMode =>
+export const isCodexSandboxMode = (v: string): v is CodexSandboxMode =>
   (CODEX_SANDBOX_MODES as readonly string[]).includes(v)
 
 /**

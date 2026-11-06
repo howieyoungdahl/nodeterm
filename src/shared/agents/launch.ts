@@ -58,6 +58,11 @@ export interface LaunchInputs {
    * Callers must feature-detect support before setting this.
    */
   remoteControl?: string
+  /** Codex filesystem sandbox (`read-only|workspace-write|danger-full-access`), emitted as
+   *  `--sandbox <mode>` for codex-based agents only. Separate from the permission mode on purpose
+   *  (./approval-mode): it is the caller's explicit choice, never inferred from "Bypass all". The
+   *  managed launcher lifts it off argv onto `thread/start` (core/codex-identity-proxy.ts). */
+  sandbox?: string
   /** Should a SHARED_IDENTITY_CAPABLE agent (codex) name its managed launcher instead of the bare
    *  CLI? The caller's answer to "will the launcher actually be there?" — false (the default) emits
    *  the bare command byte-for-byte. A remote node must pass false (the host has no launcher). */
@@ -206,8 +211,12 @@ export function assembleLaunchCommand(
     }
     return withRemoteControl(withAgentModel(withMode, capId, inputs.model))
   }
+  const withSandbox = (cmd: string): string =>
+    inputs.sandbox && capId === 'codex' ? `${cmd} --sandbox ${shellSingleQuote(inputs.sandbox)}` : cmd
 
-  const command = usesSep ? `${flagged(baseCmd)} ${sep} ${promptArg}` : flagged(withPrompt)
+  const command = usesSep
+    ? `${withSandbox(flagged(baseCmd))} ${sep} ${promptArg}`
+    : withSandbox(flagged(withPrompt))
   return { command, missingEnv: [...m1, ...m2] }
 }
 
