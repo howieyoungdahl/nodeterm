@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { ACCOUNT_SCOPE_UPDATE_ENV, tmuxConf } from './pty-manager'
+import { ACCOUNT_SCOPE_UPDATE_ENV, APP_WHEEL_REPORTS, tmuxConf } from './pty-manager'
 import { leadPaneHookLines } from '../shared/tmux-lead-pane'
 
 describe('tmuxConf', () => {
@@ -87,5 +87,19 @@ describe('tmuxConf', () => {
     for (const dup of ['ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY']) {
       expect(line!.split(dup).length - 1).toBe(1)
     }
+  })
+  it('repeats the forwarded wheel report for full-screen mouse apps, nowhere else', () => {
+    // xterm.js sends one wheel report per wheel event and Claude Code's fullscreen TUI scrolls
+    // one line per report, so stock tmux moved it one line a notch. Measured on a real tmux in
+    // tmux-wheel.realtmux.test.ts; here only the shape is pinned.
+    expect(APP_WHEEL_REPORTS).toBe(3)
+    const up = c.split('\n').find((l) => l.startsWith('bind -T root WheelUpPane'))
+    const down = c.split('\n').find((l) => l.startsWith('bind -T root WheelDownPane'))
+    expect(up).toBe(
+      'bind -T root WheelUpPane   if -F "#{pane_in_mode}" { send -M } { if -F "#{mouse_any_flag}" { send -M ; send -M ; send -M } { copy-mode -e } }'
+    )
+    expect(down).toBe(
+      'bind -T root WheelDownPane if -F "#{&&:#{mouse_any_flag},#{?pane_in_mode,0,1}}" { send -M ; send -M ; send -M } { send -M }'
+    )
   })
 })

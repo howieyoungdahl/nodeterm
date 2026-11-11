@@ -2344,6 +2344,20 @@ body,
   height: 0;
 }
 
+/* The board's card modal shows the SAME tmux session, and its emulator bar was still drawn: a
+   thin track down the right edge that never moves anything, because tmux paints the alternate
+   screen and the emulator holds no scrollback to scroll (measured: viewport scrollHeight ==
+   clientHeight). History lives in tmux (plain shell: the wheel enters copy-mode) or in the app
+   itself (full-screen Claude Code: the wheel is forwarded to it), so the wheel is the scroll
+   control in both views and the dead bar goes, as on the canvas. */
+.kanban-modal__term .xterm-viewport {
+  scrollbar-width: none;
+}
+.kanban-modal__term .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 /* Co-attach: the pty runs at the SMALLEST subscriber's grid, so the terminal can be smaller than
    this node's body. Center the leftover space instead of stretching — letterboxing, not
    distortion. Only applied while a smaller peer is actually clamping us: a solo user's grid IS the

@@ -13,3 +13,15 @@ describe('Kanban column row layout', () => {
     )
   })
 })
+
+describe('Kanban card modal terminal scrollbar', () => {
+  it('hides the emulator scrollbar in the card modal, as the canvas node does', () => {
+    // tmux paints the alternate screen, so the emulator holds no scrollback: its bar was a dead
+    // control down the modal's right edge. The wheel (tmux copy-mode, or the full-screen app)
+    // is the scroll control in both views.
+    expect(CSS).toMatch(/\.kanban-modal__term \.xterm-viewport\s*{[^}]*scrollbar-width:\s*none;/s)
+    expect(CSS).toMatch(
+      /\.kanban-modal__term \.xterm-viewport::-webkit-scrollbar\s*{[^}]*width:\s*0;/s
+    )
+  })
+})
