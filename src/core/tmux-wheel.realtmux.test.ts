@@ -24,7 +24,19 @@ const WHEEL_UP = '\x1b[<64;20;10M'
 const WHEEL_DOWN = '\x1b[<65;20;10M'
 
 let tmp: string
-let ok = false
+// Probed at module load so `it.skipIf` reports a host without tmux or util-linux `script` as
+// SKIPPED, not passed (BSD/macOS `script` rejects --version, so it skips there too).
+const ok = (() => {
+  try {
+    execFileSync('tmux', ['-V'], { stdio: 'ignore' })
+    execFileSync('script', ['--version'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+})()
+// Several capped waits chain inside one test; a loaded host must not trip vitest's 5 s default.
+const T = 20_000
 
 function tmux(args: string[]): string {
   return execFileSync('tmux', ['-L', SOCKET, ...args], {
@@ -77,13 +89,7 @@ function reports(log: string): string[] {
 }
 
 beforeAll(() => {
-  try {
-    execFileSync('tmux', ['-V'], { stdio: 'ignore' })
-    execFileSync('script', ['--version'], { stdio: 'ignore' })
-    ok = true
-  } catch {
-    return // no tmux or util-linux script on this host: every test below self-skips
-  }
+  if (!ok) return
   tmp = makeTmuxTmpdir('ntwheel-', SOCKET)
   const conf = path.join(tmp, 'tmux.conf')
   fs.writeFileSync(conf, tmuxConf(2000))
@@ -101,15 +107,13 @@ afterAll(() => {
 })
 
 describe('wheel over a real tmux client', () => {
-  it('the generated conf parses: both wheel bindings are live in the root table', () => {
-    if (!ok) return
+  it.skipIf(!ok)('the generated conf parses: both wheel bindings are live in the root table', () => {
     const keys = tmux(['list-keys', '-T', 'root'])
     expect(keys).toMatch(/WheelUpPane\s+if-shell -F "#\{pane_in_mode\}"/)
     expect(keys).toMatch(/WheelDownPane\s+if-shell -F/)
-  })
+  }, T)
 
-  it(`a full-screen mouse app gets ${APP_WHEEL_REPORTS} reports per wheel event, both directions`, async () => {
-    if (!ok) return
+  it.skipIf(!ok)(`a full-screen mouse app gets ${APP_WHEEL_REPORTS} reports per wheel event, both directions`, async () => {
     const log = path.join(tmp, 'wheel.log')
     const app = writeMouseApp(log)
     tmux(['new-session', '-d', '-x', '120', '-y', '40', '-s', 'app', `node ${app}; sleep 300`])
@@ -131,10 +135,9 @@ describe('wheel over a real tmux client', () => {
     } finally {
       client.kill()
     }
-  })
+  }, T)
 
-  it('a plain shell still scrolls tmux history in copy-mode, 5 lines per event as stock', async () => {
-    if (!ok) return
+  it.skipIf(!ok)('a plain shell still scrolls tmux history in copy-mode, 5 lines per event as stock', async () => {
     tmux(['new-session', '-d', '-x', '120', '-y', '40', '-s', 'sh', 'seq 1 400; sleep 300'])
     expect(await until(() => Number(pane('sh', '#{history_size}')) > 300)).toBe(true)
     const client = attach('sh')
@@ -148,5 +151,5 @@ describe('wheel over a real tmux client', () => {
     } finally {
       client.kill()
     }
-  })
+  }, T)
 })
