@@ -317,7 +317,41 @@ bind -T copy-mode    DoubleClick1Pane send-keys -X select-word \\; send-keys -X 
 bind -T copy-mode-vi DoubleClick1Pane send-keys -X select-word \\; send-keys -X copy-pipe-and-cancel
 bind -T copy-mode    TripleClick1Pane send-keys -X select-line \\; send-keys -X copy-pipe-and-cancel
 bind -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X copy-pipe-and-cancel
+${appWheelBindLines()}
 ${leadPaneHookLines(leadPaneWidth)}`
+}
+
+/**
+ * How many wheel reports tmux forwards per wheel event to a pane app that tracks the mouse.
+ * See `appWheelBindLines`.
+ */
+export const APP_WHEEL_REPORTS = 3
+
+/**
+ * WHEEL SPEED FOR FULL-SCREEN APPS (Claude Code's `"tui": "fullscreen"`, vim, less with mouse).
+ *
+ * Such an app runs on the alternate screen with mouse tracking on and keeps its OWN history: tmux
+ * has none to scroll (measured: live Claude panes at history_size 0-10) and neither does the
+ * emulator, so the wheel is the only way back through the conversation. xterm.js sends exactly ONE
+ * wheel report per browser wheel event whatever its distance (5.5 `Terminal.ts`: the line count
+ * only gates zero), and stock tmux forwards that one report (`send-keys -M`). Claude Code scrolls
+ * one line per report, so a notch moved the transcript ONE line (measured: 20 notches, 20 lines),
+ * which reads as "I can't scroll up". A native terminal sends about three reports per notch.
+ *
+ * So: when the pane app wants the mouse and the pane is NOT in a mode, forward the report
+ * `APP_WHEEL_REPORTS` times. Copy-mode and the plain-shell path are unchanged (one report into the
+ * mode, which scrolls its own 5 lines; `copy-mode -e` on the first wheel-up), exactly the stock
+ * tmux 3.4 `WheelUpPane` decision with the forwarding branch repeated. WheelDownPane is unbound in
+ * stock root (an unbound mouse key reaches the pane as one report), so its fallback is one
+ * `send -M`. Mirrored on a real tmux in tmux-wheel.realtmux.test.ts.
+ */
+export function appWheelBindLines(reports: number = APP_WHEEL_REPORTS): string {
+  const fwd = Array.from({ length: reports }, () => 'send -M').join(' ; ')
+  return [
+    '# Wheel: repeat the forwarded report for full-screen mouse apps — see appWheelBindLines.',
+    `bind -T root WheelUpPane   if -F "#{pane_in_mode}" { send -M } { if -F "#{mouse_any_flag}" { ${fwd} } { copy-mode -e } }`,
+    `bind -T root WheelDownPane if -F "#{&&:#{mouse_any_flag},#{?pane_in_mode,0,1}}" { ${fwd} } { send -M }`
+  ].join('\n')
 }
 
 /**
