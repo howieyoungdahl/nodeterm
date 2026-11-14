@@ -300,10 +300,17 @@ The v1 contract is deliberately narrow:
   considers local terminal cards only, requires two definitive absent-pane probes, and treats every
   failed/unreachable probe as `unknown`. Dry-run and the periodic reaper use this same mutation
   engine.
-- `DELETE /opsapi/nodes/<id>` removes one card. A live pane returns `409 pane_alive`, and an
-  unreadable pane returns `503 pane_state_unknown`; `?force=1` is the explicit operator gate. A
-  forced local terminal deletion confirms backend teardown before saving the card removal. Agents
-  using this operator API by convention must never force a live or unknown target.
+- `DELETE /opsapi/dead-nodes/<id>` is the authenticated, strictly dead-only operation. It accepts
+  only a local terminal with fresh, repeated DEAD evidence and a stable backend generation inside
+  the serialized mutation. Live, unknown, SSH, nonterminal, protected, draft and pending-launch
+  targets are refused. The last boundary check revalidates backend generation, live-loop protection
+  and working/blocked status. Success returns `{ok:true, removedIds:[id], forced:false}` and never
+  kills a backend; `?force=1` cannot escalate this route. Older servers return 404 rather than
+  falling back to legacy deletion.
+- `DELETE /opsapi/nodes/<id>` retains its legacy semantics: operator-created nodes implicitly use
+  forced removal, while other nodes need `?force=1` to override live or unknown pane protection.
+  Forced local terminal deletion confirms backend teardown before saving the card removal. Use
+  the separate dead-only route when removal must never terminate a live backend.
 - `POST /opsapi/adopt-orphans` takes no body and returns `{adopted, skipped, live}`. It is the
   sweep's mirror image: it gives a card back to every live local `nt-<id>` tmux session that no
   project still lists, placing each into the project whose folder is that pane's nearest ancestor.
