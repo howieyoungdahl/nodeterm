@@ -146,6 +146,19 @@ describe('parseControlRequest', () => {
     })
   })
 
+  it('accepts --sandbox only on open-agent --agent codex', () => {
+    expect(parseControlRequest('open-agent', { agent: 'codex', sandbox: 'danger-full-access' })).toEqual({
+      verb: 'open-agent',
+      args: { agent: 'codex', sandbox: 'danger-full-access' }
+    })
+    expect(parseControlRequest('open-agent', { agent: 'claude', sandbox: 'danger-full-access' })).toEqual({
+      error: '--sandbox is supported only by open-agent --agent codex'
+    })
+    expect(parseControlRequest('open-terminal', { sandbox: 'danger-full-access' })).toEqual({
+      error: '--sandbox is supported only by open-agent --agent codex'
+    })
+  })
+
   it('resize requires one node and a named compact or normal size', () => {
     expect(parseControlRequest('resize', {})).toEqual({ error: 'resize requires --node <id>' })
     expect(parseControlRequest('resize', { node: 'n1' })).toEqual({
