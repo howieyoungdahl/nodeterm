@@ -41,7 +41,7 @@ export function useSavePersistence() {
  *  silently "keep mine") and while a programmatic project load is in flight — a request made
  *  while disabled is DROPPED, not queued, exactly like `markDirty`'s `loadingRef` no-op.
  */
-export function useCreateFlush(persist: () => Promise<void>, enabled: boolean): () => void {
+export function useCreateFlush(persist: () => Promise<void>, enabled: boolean, whileDisabled?: () => void): () => void {
   const [request, setRequest] = useState(0)
   /** The last request this hook has already decided about — served or deliberately dropped. */
   const settledRef = useRef(0)
@@ -51,9 +51,11 @@ export function useCreateFlush(persist: () => Promise<void>, enabled: boolean): 
     // Settle FIRST: a request is decided exactly once, so re-enabling later (or `persist` merely
     // changing identity) can never replay a flush that was already served or dropped.
     settledRef.current = request
-    if (!enabled) return
+    // Still not a save: a disabled flush only REPORTS the canvas (see useSuspendedObserve), so the
+    // card just created survives a reload even while the bar holds every write.
+    if (!enabled) { whileDisabled?.(); return }
     void persist()
-  }, [request, enabled, persist])
+  }, [request, enabled, persist, whileDisabled])
   return requestFlush
 }
 
@@ -71,4 +73,27 @@ export function useAutosave(
     return () => clearTimeout(timer)
     // A failure leaves dirty unchanged. Delivery MUST re-arm the timer even without another edit.
   }, [dirty, conflictOpen, persist, resaveTick, delivery])
+}
+
+/** First report after saves become suspended, and the steady cadence while they stay suspended. */
+export const SUSPENDED_REPORT_DELAY_MS = 2_000
+export const SUSPENDED_REPORT_INTERVAL_MS = 30_000
+
+/** While autosave is suspended (the conflict bar, or a revision conflict still resyncing), report
+ *  the canvas to the host WITHOUT saving it.
+ *
+ *  Field 2026-11-17 (Server Edition): a tab sat behind the bar for 64 minutes. Every write was held,
+ *  the create flush was dropped, and the Server never heard of a card opened in that time; its
+ *  recovery only ever learned presentation from a REFUSED save, and a suspended tab sends none.
+ *  A browser refresh then loaded the file without the card while its agent kept running in tmux.
+ *  The report feeds that same presentation-only path, so the Server persists a live terminal card
+ *  after its usual grace period. It never resolves the bar and never overwrites anything.
+ */
+export function useSuspendedObserve(suspended: boolean, report: () => void): void {
+  useEffect(() => {
+    if (!suspended) return
+    const first = setTimeout(report, SUSPENDED_REPORT_DELAY_MS)
+    const steady = setInterval(report, SUSPENDED_REPORT_INTERVAL_MS)
+    return () => { clearTimeout(first); clearInterval(steady) }
+  }, [suspended, report])
 }
