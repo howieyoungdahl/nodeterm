@@ -145,7 +145,7 @@ import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunc
 import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
-import { useAutosave, useCreateFlush, useSavePersistence } from '../lib/useSavePersistence'
+import { useAutosave, useCreateFlush, useSavePersistence, useSuspendedObserve } from '../lib/useSavePersistence'
 import { resolveWorkspaceConflict, saveWorkspace, subscribeWorkspacePublications } from '../lib/workspacePersistence'
 import { SaveFailureBar } from '../components/SaveFailureBar'
 import { planServerChange } from '../lib/serverChange'
@@ -872,7 +872,7 @@ export function Canvas() {
   // nodes that arrived with it and were already adopted onto the canvas — they are never part of
   // the choice (see adoptIncomingNodes), only of the sentence, so the bar cannot imply that
   // "Keep my version" would throw a live session away. One-shot v2→v3 migration note (dismissible strip).
-  const [conflict, setConflict] = useState<{ project: Project; added: number } | null>(null)
+  const [conflict, setConflict] = useState<{ project: Project; added: number; reason?: string } | null>(null)
   const [migrationNote, setMigrationNote] = useState<string | null>(null)
   // A local edit team-sync cannot carry (a node over MUTATION_MAX_BYTES — in practice a sticky
   // whose body someone pasted a document into). The reflector refuses it SILENTLY, so the user is
@@ -2458,7 +2458,7 @@ export function Canvas() {
       if (result.kind === 'duplicate') return { kind: 'duplicate', revision: store.revision! }
       if (result.kind === 'conflict') {
         if (!resyncSnapshot) resync()
-        else setConflict({ project, added: 0 })
+        else setConflict({ project, added: 0, reason: result.reason })
         return { kind: 'conflict' }
       }
       applyWorkspaceFlowPublication(result, {
@@ -2572,12 +2572,25 @@ export function Canvas() {
   // resolving it (either button clears it) re-arms the save.
   useAutosave(dirty, !workspaceStartup.ready || !!conflict || revisionConflict, persist, resaveTick, saveDelivery)
 
+  // Saves held by the bar must not hide live cards from the host: report (never save) while held.
+  const savesSuspended = workspaceStartup.ready && (!!conflict || revisionConflict)
+  const suspendedReason = conflict ? `conflict bar open (${conflict.reason ?? 'unknown'})` : revisionConflict ? 'revision conflict resync' : ''
+  const reportSuspendedCanvas = useCallback(() => {
+    const observe = api.workspace.observe
+    if (!observe || loadingRef.current) return
+    commitActiveToStore()
+    void observe(useProjects.getState().toWorkspace(), suspendedReason).catch((error) =>
+      console.warn('[canvas] suspended canvas report failed', error))
+  }, [api.workspace, commitActiveToStore, suspendedReason])
+  useSuspendedObserve(savesSuspended, reportSuspendedCanvas)
+
   // Creating a terminal-backed card ALSO flushes the save immediately, on top of the debounce
   // above: a brand-new card was otherwise not on disk for at least 800ms (4.5s to 55s in the
   // field), and every server-side decision that reads the file — agent-hook recovery,
   // canvas-control source resolution — raced it. Same conflict gate as the debounce, so the
   // flush can never bypass the bar's "keep mine or reload" choice.
-  const flushSave = useCreateFlush(persist, workspaceStartup.ready && !conflict && !revisionConflict)
+  const flushSave = useCreateFlush(persist, workspaceStartup.ready && !conflict && !revisionConflict,
+    savesSuspended ? reportSuspendedCanvas : undefined)
   /** Ask for that flush. A no-op during a programmatic load, mirroring `markDirty`. */
   const requestSaveFlush = useCallback(() => {
     if (!loadingRef.current) flushSave()

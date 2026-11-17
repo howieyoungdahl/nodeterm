@@ -1004,6 +1004,9 @@ export interface WorkspaceApi {
   load(): Promise<Workspace>
   /** Older hosts may return void; the renderer refuses that missing acknowledgment. */
   save(workspace: Workspace): Promise<WorkspaceSaveAck | void>
+  /** Report the canvas without saving it, while autosave is suspended. Optional: older hosts and
+   *  the desktop shell have no server-side recovery to feed. Never writes the workspace. */
+  observe?(workspace: Workspace, note?: string): Promise<void>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
   probeFolder(folder: string): Promise<Project | null>
   /** Whether <folder>/.nodeterm/project.json is `present`, definitely `absent`, or `unreadable`

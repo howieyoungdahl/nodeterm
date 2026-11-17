@@ -272,6 +272,13 @@ export class WorkspaceStore {
       }
       return this.clientMutationRunner ? this.clientMutationRunner(work) : work()
     })
+    // A tab whose autosave is suspended (conflict bar) still reports what it holds, so the Server
+    // can persist a live terminal card it would otherwise lose on reload. Presentation only: the
+    // same refused-save path, never a write. `note` names why saves are suspended, for diagnosis.
+    platform().handleWithSender(IPC.workspaceObserve, (senderId: number, workspace: Workspace, note?: unknown) => {
+      if (typeof note === 'string' && note) console.info(`[workspace] ui:${senderId} saves suspended: ${note.slice(0, 200)}`)
+      if (workspace && typeof workspace === 'object') this.onClientSaveSnapshot?.(workspace, { senderId, accepted: false })
+    })
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
     platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
       typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')

@@ -290,6 +290,9 @@ export const IPC = {
   ptyResync: (sessionId: string) => `pty:resync:${sessionId}`,
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
+  /** Presentation-only report of the canvas while its saves are suspended (conflict bar). Never
+   *  writes; lets the Server persist a live terminal card the suspended tab is holding. */
+  workspaceObserve: 'workspace:observe',
   workspaceProbeFolder: 'workspace:probe-folder',
   /** Is a folder's .nodeterm/project.json present / absent / unreadable — the distinction
    *  `probeFolder`'s null collapses. Recovery of an `unavailable` project needs it (issue #385). */

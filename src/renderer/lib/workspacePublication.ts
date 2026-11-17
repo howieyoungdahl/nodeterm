@@ -1,5 +1,6 @@
 import type { Project, WorkspacePublication } from '@shared/types'
 import { reconcileEntityOrder } from '@shared/project-reconciliation'
+import { applyDeletedEntities } from './deletedEntities'
 
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const equal = (a: unknown, b: unknown): boolean => {
@@ -20,6 +21,27 @@ const clean = (p: Project): Project => {
     titleAuto: n.titleAuto === undefined ? true : n.titleAuto,
     collapsed: n.collapsed === undefined ? false : n.collapsed
   })) }
+}
+
+/** How a card looks and where it sits. A local change confined to these says nothing worth keeping
+ * once the card is closed; text drafts, urls, files and launch state are content and still ask. */
+const PRESENTATION = new Set(['position', 'size', 'compactRect', 'controlSize', 'title', 'titleAuto', 'color', 'group',
+  'parentId', 'collapsed', 'pinned', 'manualPlacement', 'tags', 'hideFanout', 'taskFrame'])
+
+/** A close recorded with the incoming file (`deletedEntities`) beats a local presentation edit of
+ * that card. Field 2026-11-17: the server closed a card the tab had just retitled, edit-vs-delete
+ * raised the conflict bar, autosave stayed suspended for 64 minutes and a card opened meanwhile
+ * was never saved. Only nodes the base also held qualify, so nothing local-only is dropped. */
+function closeRecordedDeletions(base: Project | undefined, local: Project, incoming: Project | undefined): Project {
+  const recorded = incoming?.id === local.id ? incoming.deletedEntities : undefined
+  if (!base || !recorded?.nodes.length) return local
+  const baseNodes = new Map(base.nodes.map(n => [n.id, n as unknown as Record<string, unknown>]))
+  const nodes = recorded.nodes.filter(id => {
+    const was = baseNodes.get(id), now = local.nodes.find(n => n.id === id) as unknown as Record<string, unknown> | undefined
+    if (!was || !now) return false
+    return [...new Set([...Object.keys(was), ...Object.keys(now)])].every(k => PRESENTATION.has(k) || equal(was[k], now[k]))
+  })
+  return nodes.length ? applyDeletedEntities(local, { ...incoming!, deletedEntities: { ...recorded, nodes } }) : local
 }
 
 /** Merge every field, not only new nodes. Arrays without entity IDs are atomic choices, so
@@ -78,7 +100,7 @@ export function mergeWorkspacePublication(revision: string | undefined, projects
       ids.add(delta.after.id)
       const i = result.findIndex(p => p.id === delta.after.id)
       if (i < 0 || result.filter(p => p.id === delta.after.id).length !== 1) throw new Error('foreign-project')
-      result[i] = { ...merge(clean(delta.before), clean(result[i]), clean(delta.after)) as Project,
+      result[i] = { ...merge(clean(delta.before), clean(closeRecordedDeletions(delta.before, result[i], delta.after)), clean(delta.after)) as Project,
         revision: delta.after.revision, deletedEntities: delta.after.deletedEntities, loadedKanban: delta.after.kanban ?? null }
       // The same persisted equality/default semantics used by the merge decide whether
       // adoption retained local content that still needs a save. Durable incoming content does not.
@@ -92,7 +114,8 @@ export function mergeWorkspacePublication(revision: string | undefined, projects
 export function mergeWorkspaceSnapshot(base: Project[], local: Project[], incoming: Project[], revision: string): ReturnType<typeof mergeWorkspacePublication> {
   if (!/^[a-f0-9]{64}$/.test(revision)) return { kind: 'conflict', reason: 'revision-acknowledgment-missing' }
   try {
-    const projects = merge(base.map(clean), local.map(clean), incoming.map(clean), ['projects']) as Project[]
+    const closed = (p: Project) => closeRecordedDeletions(base.find(b => b.id === p.id), p, incoming.find(r => r.id === p.id))
+    const projects = merge(base.map(clean), local.map(p => clean(closed(p))), incoming.map(clean), ['projects']) as Project[]
     const durable = new Map(incoming.map(p => [p.id, p]))
     return { kind: 'adopt', revision, localEditsRemain: !equal(projects, incoming.map(clean)),
       projects: projects.map(p => ({ ...p, revision: durable.get(p.id)?.revision,
