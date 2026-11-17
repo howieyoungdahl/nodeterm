@@ -198,7 +198,7 @@ function AccountUsageBlock({
             {!!cards && (
               <span
                 className="usage-account__host"
-                title="Cards on this canvas whose session is running on this login"
+                title="Cards on this canvas whose session last ran on this login"
               >
                 {cardCountText(cards)}
               </span>
@@ -402,21 +402,19 @@ export function UsageIndicator({
       .map((n) => n.id)
       .join('\n')
   )
+  // JSON, not a delimiter join: a config dir is free text and may hold any separator.
   const observedKey = useAgentStatus((s) =>
-    (cardIdsKey ? cardIdsKey.split('\n') : [])
-      .map((id) => {
+    JSON.stringify(
+      (cardIdsKey ? cardIdsKey.split('\n') : []).flatMap((id) => {
         const a = s.byId[id]?.account
-        return a ? `${id}\t${a.configDir ?? ''}\t${a.accountId ?? ''}\t${a.known ? 1 : 0}` : ''
+        return a ? [[id, a.configDir ?? '', a.accountId ?? null, a.known]] : []
       })
-      .filter(Boolean)
-      .join('\n')
+    )
   )
   const cardCounts = useMemo(() => {
+    const rows = JSON.parse(observedKey) as [string, string, string | null, boolean][]
     const observed = new Map(
-      (observedKey ? observedKey.split('\n') : []).map((line) => {
-        const [id, configDir, accountId, known] = line.split('\t')
-        return [id, { configDir, accountId: accountId || null, known: known === '1' }] as const
-      })
+      rows.map(([id, configDir, accountId, known]) => [id, { configDir, accountId, known }] as const)
     )
     return countCardsByAccount([...observed.keys()], (id) => observed.get(id), accounts, externalClaude)
   }, [observedKey, accounts, externalClaude])
@@ -604,7 +602,9 @@ export function UsageIndicator({
   if (
     !hasAnyUsage(claudeUsage, visibleProviders, visibleRemote) &&
     externalClaude.length === 0 &&
-    cardCounts.unconfigured.length === 0
+    // Local only: the unconfigured rows render in the local section, so on an SSH project they
+    // would earn a pill whose popover never explains it.
+    !(scope.kind === 'local' && cardCounts.unconfigured.length > 0)
   ) {
     return null
   }
@@ -782,7 +782,7 @@ export function UsageIndicator({
                 <div className="usage-account" key={`unconfigured:${u.configDir}`}>
                   <div className="usage-account__label">
                     {u.configDir.split(/[\\/]/).filter(Boolean).pop() ?? u.configDir}{' '}
-                    <span className="usage-account__host" title="Cards on this canvas whose session is running on this login">
+                    <span className="usage-account__host" title="Cards on this canvas whose session last ran on this login">
                       {cardCountText(u.count)}
                     </span>
                   </div>
