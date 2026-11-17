@@ -2,11 +2,11 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { isSafeLocalTranscriptPathFollowingLinks } from './transcript-jail'
+import { safeLocalTranscriptPathFollowingLinks } from './transcript-jail'
 
 // Real symlinks on a real filesystem: the bug was a profile whose `projects` dir is a link into
 // `~/.claude/projects`, refused by a text-only jail, so no fake can stand in for the link.
-describe('isSafeLocalTranscriptPathFollowingLinks', () => {
+describe('safeLocalTranscriptPathFollowingLinks', () => {
   let home: string
   let userData: string
   beforeEach(() => {
@@ -20,12 +20,23 @@ describe('isSafeLocalTranscriptPathFollowingLinks', () => {
   })
   afterEach(() => fs.rmSync(home, { recursive: true, force: true }))
 
-  const ok = (p: string) => isSafeLocalTranscriptPathFollowingLinks(p, home, userData)
+  const read = (p: string) => safeLocalTranscriptPathFollowingLinks(p, home, userData)
+  const ok = (p: string) => read(p) !== undefined
 
   it('admits a profile transcript whose projects dir links into ~/.claude/projects', () => {
     const tp = path.join(home, '.claude-3', 'projects', '-repo', 's.jsonl')
     fs.writeFileSync(path.join(home, '.claude', 'projects', '-repo', 's.jsonl'), '')
-    expect(ok(tp)).toBe(true)
+    // The RESOLVED path, so the tails read what was checked.
+    expect(read(tp)).toBe(path.join(home, '.claude', 'projects', '-repo', 's.jsonl'))
+  })
+
+  it('reads what was checked even if the link is repointed afterwards', () => {
+    const link = path.join(home, 'attacker-link')
+    fs.symlinkSync(path.join(home, '.claude', 'projects'), link)
+    const admitted = read(path.join(link, 'id_rsa'))
+    fs.unlinkSync(link)
+    fs.symlinkSync(path.join(home, '.ssh'), link)
+    expect(admitted).toBe(path.join(home, '.claude', 'projects', 'id_rsa'))
   })
 
   it('admits it before the transcript file exists (SessionStart)', () => {

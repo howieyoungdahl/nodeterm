@@ -22,7 +22,7 @@ import { codexContextParse } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { setNodeTranscript } from '../core/context-link'
-import { isSafeLocalTranscriptPathFollowingLinks } from '../core/transcript-jail'
+import { safeLocalTranscriptPathFollowingLinks } from '../core/transcript-jail'
 import { linkedClaudeConfigDirs } from '../core/claude-config-dir'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
@@ -187,15 +187,13 @@ export function wireAgentStatus(
     // Linked accounts' dirs come from SETTINGS, never from the POST — `<dir>/projects/**` only,
     // so `~/.claude-2/.ssh` is as refused as it ever was. Without them the meter and the subagent
     // cards silently never fill for a pane running the user's own CLAUDE_CONFIG_DIR.
-    return isSafeLocalTranscriptPathFollowingLinks(
+    return safeLocalTranscriptPathFollowingLinks(
       abs,
       homedir(),
       platform.userDataDir,
       codexHome(),
       linkedClaudeConfigDirs()
     )
-      ? abs
-      : undefined
   }
 
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
