@@ -600,7 +600,12 @@ export function UsageIndicator({
   // segment), so without this a user whose Claude only lives in `~/.claude-2` would have nothing
   // to click and no way to reach the panel that has their numbers. The pill reads '···' until the
   // popover's first fetch lands, exactly as it does for any other source still being read.
-  if (!hasAnyUsage(claudeUsage, visibleProviders, visibleRemote) && externalClaude.length === 0) {
+  // Cards running on a profile with no row earn it too: the panel is where that gap is named.
+  if (
+    !hasAnyUsage(claudeUsage, visibleProviders, visibleRemote) &&
+    externalClaude.length === 0 &&
+    cardCounts.unconfigured.length === 0
+  ) {
     return null
   }
 
