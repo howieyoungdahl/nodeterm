@@ -151,6 +151,34 @@ describe('verified browser-server updates', () => {
     expect((await updater().update(true, true)).outcome).toBe('deployed')
   })
 
+  it('retries a build step that timed out on later ticks, then quarantines it', async () => {
+    const timedOut = Object.assign(new Error('spawnSync npm ETIMEDOUT'), { code: 'ETIMEDOUT' })
+    const run = runtime.run
+    let timeouts = 2
+    runtime.run = (command, args, cwd, build) => {
+      if (command === 'npm' && args[0] === 'test' && timeouts-- > 0) throw timedOut
+      return run(command, args, cwd, build)
+    }
+    expect(await updater().update(true)).toMatchObject({ outcome: 'deferred', detail: expect.stringContaining('1 of 3') })
+    expect(await updater().update(true)).toMatchObject({ outcome: 'deferred', detail: expect.stringContaining('2 of 3') })
+    await expect(fs.access(path.join(config.stateDir, 'failed.json'))).rejects.toThrow()
+    expect((await updater().update(true)).outcome).toBe('deployed')
+    expect(restarts).toBe(1)
+  })
+
+  it('quarantines a commit whose build keeps timing out', async () => {
+    const timedOut = Object.assign(new Error('spawnSync npm ETIMEDOUT'), { code: 'ETIMEDOUT' })
+    const run = runtime.run
+    runtime.run = (command, args, cwd, build) => {
+      if (command === 'npm' && args[0] === 'test') throw timedOut
+      return run(command, args, cwd, build)
+    }
+    for (let i = 1; i < 3; i++) expect((await updater().update(true)).outcome).toBe('deferred')
+    expect((await updater().update(true)).outcome).toBe('failed')
+    expect((await updater().update(true)).outcome).toBe('blocked')
+    expect(restarts).toBe(0)
+  })
+
   it.each(['startup', 'pane', 'card'])('rolls back and verifies the old release after failed %s continuity', async (failure) => {
     failStartup = failure === 'startup'; losePane = failure === 'pane'; loseCard = failure === 'card'
     const result = await updater().update(true)

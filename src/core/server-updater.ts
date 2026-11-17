@@ -51,6 +51,9 @@ export function buildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ...env, NODE_OPTIONS: '--max-old-space-size=4096', npm_config_jobs: '2' }
 }
 
+/** Timed-out build attempts per commit before it is quarantined like any other failure. */
+export const BUILD_TIMEOUT_ATTEMPTS = 3
+
 export function systemUpdateRuntime(config: UpdateConfig): UpdateRuntime {
   return {
     run(command, args, cwd, build) {
@@ -286,6 +289,19 @@ export class ServerUpdater {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       if (phase === 'fetch' || phase === 'preflight') return this.status('deferred', sha, detail)
+      // A build step that ran out of time says the host was busy, not that the commit is bad.
+      // Field 2026-11-17: `npm test` passed file after file on a loaded host and hit the 15 min step
+      // limit; the commit was quarantined until someone ran --retry by hand. Retry on later ticks,
+      // a bounded number of times, then quarantine as before.
+      if (phase === 'build' && sha && (error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+        const file = path.join(this.config.stateDir, 'build-timeouts.json')
+        const prior = await this.readStatus('build-timeouts.json') as unknown as { sha?: string; count?: number } | undefined
+        const count = (prior?.sha === sha ? prior.count ?? 0 : 0) + 1
+        if (count < BUILD_TIMEOUT_ATTEMPTS) {
+          await writeFileAtomic(file, JSON.stringify({ sha, count }))
+          return this.status('deferred', sha, `Build step timed out (${count} of ${BUILD_TIMEOUT_ATTEMPTS}); retrying on a later tick: ${detail}`)
+        }
+      }
       if (sha) await writeFileAtomic(path.join(this.config.stateDir, 'failed.json'), JSON.stringify({ sha, detail }))
       return this.status('failed', sha, detail)
     }
