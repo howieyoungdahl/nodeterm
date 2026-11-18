@@ -37,6 +37,17 @@ describe('the derivation table', () => {
     expect(view({ idleSince: old }).kind).toBe('idle')
   })
 
+  it('shows an agent that ended its own session as EXITED, with its age and no stale mark', () => {
+    // The hibernated-card report (2026-11-18): Claude exited 30 minutes ago and the card read
+    // "UNKNOWN 30m stale". An exit the agent reported is a fact, and a final one.
+    const v = view({ endedAt: old, updatedAt: old })
+    expect(v.kind).toBe('exited')
+    expect(v.word).toBe('EXITED')
+    expect(v.age).not.toBe('')
+    expect(v.stale).toBe(false)
+    expect(view({ endedAt: old, updatedAt: old, pane: 'dead' }).kind).toBe('exited')
+  })
+
   it('maps the four hook-fed states', () => {
     expect(view({ state: 'working' }).kind).toBe('working')
     expect(view({ state: 'waiting' }).kind).toBe('waiting')

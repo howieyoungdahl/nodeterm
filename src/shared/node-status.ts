@@ -34,6 +34,7 @@ export type NodeStatusKind =
   | 'blocked'
   | 'failed'
   | 'completed'
+  | 'exited'
   | 'unknown'
 
 /**
@@ -105,6 +106,7 @@ export const NODE_STATUS_PRESENTATION: Record<
   blocked: { glyph: '!', word: 'BLOCKED' },
   failed: { glyph: '✕', word: 'FAILED' },
   completed: { glyph: '✓', word: 'COMPLETED' },
+  exited: { glyph: '■', word: 'EXITED' },
   unknown: { glyph: '·', word: 'UNKNOWN' }
 }
 
@@ -125,7 +127,8 @@ export const NODE_STATUS_SEVERITY: readonly NodeStatusKind[] = [
   'unknown',
   'working',
   'idle',
-  'completed'
+  'completed',
+  'exited'
 ]
 
 /** Why a node is `failed`, as proven — never as guessed. */
@@ -142,6 +145,13 @@ export interface NodeStatusInput {
   /** Last hook-fed state. `undefined` = nothing has ever reported for this node. */
   state?: AgentState
   idleSince?: number
+  /**
+   * When the agent's session ENDED cleanly (its own SessionEnd hook: `/exit`, a hibernate, a
+   * quit). A positive fact, not an absence: without it a card whose agent left reads UNKNOWN, an
+   * admission that nothing reported, when something did. Cleared by any later state or session
+   * start, so it only ever describes the latest session boundary.
+   */
+  endedAt?: number
   /** When `state` was last ASSERTED (freshness, not transition time). Absent = no clock. */
   updatedAt?: number
   /**
@@ -199,6 +209,8 @@ export function truncateReason(text: string | undefined, max = STATUS_REASON_MAX
  *
  * ```
  * failure latched                                    → failed     (proven, and it stays proven)
+ * state undefined + session ended                    → exited     (the agent's own SessionEnd)
+ * state undefined + session started                  → idle
  * state undefined                                    → unknown    (no event has ever reported)
  * state done                                         → completed  (even with a dead pane)
  * state working|waiting|blocked + pane 'dead'        → failed     (the ONLY way to reach failed)
@@ -249,7 +261,8 @@ export function deriveNodeStatus(input: NodeStatusInput): NodeStatusView {
         : ageMs === null
           ? ''
           : formatStatusAge(ageMs),
-    stale: kind === 'failed' ? false : stale,
+    // A failure is current news and an exit is final: neither becomes old news by sitting still.
+    stale: kind === 'failed' || kind === 'exited' ? false : stale,
     // INLINE only where the question is "why does this need me?" — B3's actual wording. A
     // `working` node's last assistant message and a finished turn's closing line are interesting
     // but they are not a call for attention, and putting either on a node header turns a badge
@@ -263,7 +276,12 @@ export function deriveNodeStatus(input: NodeStatusInput): NodeStatusView {
 
 function resolveKind(input: NodeStatusInput, stale: boolean): NodeStatusKind {
   if (input.failure) return 'failed'
-  if (!input.state) return input.idleSince !== undefined && input.pane !== 'dead' ? 'idle' : 'unknown'
+  if (!input.state) {
+    // An exit is a fact the agent reported itself, so a dead pane does not change it: the
+    // session was already over before its terminal went away.
+    if (input.endedAt !== undefined) return 'exited'
+    return input.idleSince !== undefined && input.pane !== 'dead' ? 'idle' : 'unknown'
+  }
   if (input.state === 'done') return 'completed'
   if (input.pane === 'dead' && FAILABLE_STATES.has(input.state)) return 'failed'
   if (input.state === 'working') {
@@ -335,6 +353,9 @@ function buildDetail(
     case 'completed':
       parts.push('Completed its turn.')
       break
+    case 'exited':
+      parts.push('Exited: the agent ended its session.')
+      break
   }
   if (kind === 'failed' && input.failure) {
     parts.push(`Detected ${ago(input.now - input.failure.at)}.`)
@@ -342,7 +363,7 @@ function buildDetail(
     parts.push(`Reported ${ago(ageMs)}.`)
     // Only where the state is still being presented as itself. A proven failure is current news,
     // not old news, so calling it stale here would contradict the view's own `stale: false`.
-    if (stale && kind !== 'failed') {
+    if (stale && kind !== 'failed' && kind !== 'exited') {
       parts.push('Older than the freshness window — shown as stale, not as current.')
     }
   } else {

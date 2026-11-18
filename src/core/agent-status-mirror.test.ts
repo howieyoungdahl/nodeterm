@@ -63,6 +63,30 @@ function ev(partial: Partial<NormalizedAgentEvent>): NormalizedAgentEvent {
 }
 
 describe('reduceEntry (main-state reduction)', () => {
+  it('a clean session end records endedAt; any later state or start clears it', () => {
+    const done = reduceEntry(undefined, ev({ sessionId: 's1', state: 'done' }), 1000)
+    const ended = reduceEntry(done, ev({ sessionId: 's1', kind: 'session', sessionPhase: 'end' }), 2000)
+    expect(ended.state).toBeUndefined()
+    expect(ended.endedAt).toBe(2000)
+    expect(ended.updatedAt).toBe(2000)
+    expect(reduceEntry(ended, ev({ sessionId: 's1', state: 'working', newTurn: true }), 3000).endedAt).toBeUndefined()
+    // `/clear` is an end then a start: it must land on IDLE, not EXITED.
+    const cleared = reduceEntry(ended, ev({ sessionId: 's2', kind: 'session', sessionPhase: 'start', sessionSource: 'clear' } as Partial<NormalizedAgentEvent>), 3000)
+    expect(cleared.endedAt).toBeUndefined()
+    expect(cleared.idleSince).toBe(3000)
+  })
+
+  it('an end from a DIFFERENT session (a nested claude in the pane) is not this agent exiting', () => {
+    const working = reduceEntry(undefined, ev({ sessionId: 'outer', state: 'working', newTurn: true }), 1000)
+    const foreign = reduceEntry(working, ev({ sessionId: 'nested', kind: 'session', sessionPhase: 'end' }), 2000)
+    expect(foreign.endedAt).toBeUndefined()
+  })
+
+  it('a provider that never reports a session end gets no endedAt', () => {
+    const a = reduceEntry(undefined, ev({ agentId: 'codex', sessionId: 's1', state: 'done' }), 1000)
+    expect(reduceEntry(a, ev({ agentId: 'codex', sessionId: 's1', kind: 'session', sessionPhase: 'end' }), 2000).endedAt).toBeUndefined()
+  })
+
   it('reduces working → done and records the turn end', () => {
     const a = reduceEntry(undefined, ev({ kind: 'state', state: 'working', newTurn: true }), 1000)
     expect(a.state).toBe('working')
@@ -2310,12 +2334,13 @@ describe('agentStatusSnapshot (the restart display seed)', () => {
     initAgentStatusMirror(file)
   }
 
-  it('clears the idle fact when the session ends', () => {
+  it('replaces the idle fact with the exit fact when the session ends', () => {
     initAgentStatusMirror(file)
     recordAgentEvent(ev({ nodeId: 'n1', kind: 'session', sessionPhase: 'start' }))
     expect(agentStatusSnapshot().nodes.n1?.idleSince).toBeDefined()
     recordAgentEvent(ev({ nodeId: 'n1', kind: 'session', sessionPhase: 'end' }))
-    expect(agentStatusSnapshot().nodes.n1).toBeUndefined()
+    expect(agentStatusSnapshot().nodes.n1?.idleSince).toBeUndefined()
+    expect(agentStatusSnapshot().nodes.n1?.endedAt).toEqual(expect.any(Number))
   })
 
   it('carries the restored flag rather than filtering restored entries out', () => {

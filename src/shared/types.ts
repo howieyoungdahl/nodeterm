@@ -1299,6 +1299,8 @@ export type { PaneEvidence }
 export interface AgentStatusSnapshotEntry {
   state?: AgentState
   idleSince?: number
+  /** The agent's own clean session end (mirror `endedAt`); only on a stateless entry. */
+  endedAt?: number
   agentId?: AgentId
   sessionId?: string
   /** When the mirror last asserted the state or session boundary (ms epoch). */

@@ -57,7 +57,7 @@ export function buildNote(target: BreadcrumbTarget, status: AgentNodeStatus | un
     // hook state (the norm right after an app restart — `agentStatus.state` is transient) still
     // names the node instead of degrading to a generic "Claude Code · Task unobserved".
     const name = status?.session || target.title || agentLabel
-    const stateLabel = STATE_LABEL[sessionStatusKind(status?.state)]
+    const stateLabel = STATE_LABEL[sessionStatusKind(status?.state, status?.endedAt)]
     return `${name} · ${stateLabel}`
   }
   // A missing kind defaults to 'terminal'; there is deliberately NO generic fallback beyond it —

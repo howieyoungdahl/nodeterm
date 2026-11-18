@@ -55,6 +55,13 @@ export interface MirrorEntry extends CodexStatusMetadata {
   /** working/waiting/blocked/done; undefined = idle/unknown (e.g. after a session reset). */
   state?: AgentState
   idleSince?: number
+  /**
+   * When this node's agent reported its OWN session end (SessionEnd: `/exit`, a hibernate, a
+   * quit). Set only on a stateless entry and cleared by every later state or session start, so it
+   * describes the latest boundary only. Without it a card whose agent left read UNKNOWN — the
+   * badge for "nothing reported" — when the agent had in fact said it was leaving.
+   */
+  endedAt?: number
   agentId?: AgentId
   sessionId?: string
   /**
@@ -189,6 +196,7 @@ export interface MirrorFile {
       clientRevision?: number
       state?: AgentState
       idleSince?: number
+      endedAt?: number
       agentId?: AgentId
       sessionId?: string
       /** Observed Claude account (see MirrorEntry.account). Additive — absent on old files and
@@ -420,6 +428,7 @@ export function reduceEntry(
   const commitState = (state: AgentState | undefined, proof: boolean): void => {
     next.state = state
     delete next.idleSince
+    delete next.endedAt
     next.updatedAt = now
     next.stateVerified = proof
     if (ev.agentId === 'codex') {
@@ -516,6 +525,16 @@ export function reduceEntry(
     commitState(undefined, false)
     // A crash without SessionEnd leaves IDLE, just as it leaves COMPLETED for done.
     if (ev.sessionPhase === 'start' && reportsSessionEnd(ev.agentId)) next.idleSince = now
+    // A clean exit is a positive fact too. Only the node's OWN session may report it: an end
+    // carrying a different session id than the one this node is running is some other process
+    // (a nested `claude -p` inheriting the pane's environment), not this agent leaving.
+    if (
+      ev.sessionPhase === 'end' &&
+      reportsSessionEnd(ev.agentId) &&
+      (!ev.sessionId || !prev?.sessionId || ev.sessionId === prev.sessionId)
+    ) {
+      next.endedAt = now
+    }
     next.awaitingInput = undefined
   }
   // subagent-start / subagent-end / recurring: identity captured above, main state untouched.
@@ -581,6 +600,7 @@ export function buildFile(
       } : {}),
       state: e.state,
       ...(e.idleSince !== undefined ? { idleSince: e.idleSince } : {}),
+      ...(e.endedAt !== undefined && !e.state ? { endedAt: e.endedAt } : {}),
       agentId: e.agentId,
       sessionId: e.sessionId,
       // Spread-when-present, like `name`/`hibernated`: a node that never posted a claude payload
@@ -1215,6 +1235,7 @@ function loadPersisted(file: string): void {
         state.set(id, {
           state: e.state,
           ...(typeof e.idleSince === 'number' && Number.isFinite(e.idleSince) && !e.state ? { idleSince: e.idleSince } : {}),
+          ...(typeof e.endedAt === 'number' && Number.isFinite(e.endedAt) && !e.state ? { endedAt: e.endedAt } : {}),
           agentId: e.agentId,
           sessionId: e.sessionId,
           // Identity survives the restart like agentId/sessionId does — for a hand-launched
@@ -1787,16 +1808,18 @@ export function workingNodes(): { nodeId: string; agentId?: string; sessionId?: 
  *  - No freshness cut beyond the mirror's own expiry sweep. The renderer applies its own, because
  *    the cut is a display decision and it owns the clock the user is looking at.
  *
- * Stateless entries are sent only when a session start establishes an idle fact.
+ * Stateless entries are sent only when a session boundary established a fact: a start (idle) or
+ * the agent's own end (exited).
  */
 export function agentStatusSnapshot(now = Date.now()): AgentStatusSnapshot {
   const nodes: Record<string, AgentStatusSnapshotEntry> = {}
   for (const [nodeId, e] of state) {
-    if (!e.state && e.idleSince === undefined) continue
+    if (!e.state && e.idleSince === undefined && e.endedAt === undefined) continue
     if (now - e.updatedAt > NODE_RETENTION_MS) continue
     nodes[nodeId] = {
       state: e.state,
       idleSince: e.idleSince,
+      ...(e.endedAt !== undefined && !e.state ? { endedAt: e.endedAt } : {}),
       agentId: e.agentId,
       sessionId: e.sessionId,
       updatedAt: e.updatedAt,

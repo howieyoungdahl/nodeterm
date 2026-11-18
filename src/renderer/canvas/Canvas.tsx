@@ -10623,6 +10623,9 @@ export function Canvas() {
     }
     const unsubscribe = api.onAgentStatus((e: NormalizedAgentEvent) => {
       const cs = useAgentStatus.getState()
+      // Read BEFORE the line below overwrites it: a session end only means "this agent exited"
+      // when it comes from the session the node was running (the mirror's rule, reduceEntry).
+      const priorSessionId = cs.byId[e.nodeId]?.sessionId
       if (e.sessionId) cs.setSessionId(e.nodeId, e.sessionId)
       // Which Claude account the posting session is ACTUALLY on (hook-derived label, D3). Captured
       // off any event that carries one, exactly like `sessionId` above: a plain terminal running
@@ -10759,7 +10762,9 @@ export function Canvas() {
             cs.setHibernated(e.nodeId, false)
           }
           if (e.sessionPhase === 'end') {
-            cs.setSessionPhase(e.nodeId, 'end', e.agentId)
+            cs.setSessionPhase(e.nodeId, 'end', e.agentId, {
+              ownSession: !e.sessionId || !priorSessionId || e.sessionId === priorSessionId
+            })
             // In-session /loop dies with its session; cron (and scheduled cloud routines)
             // keep running after it — their cards stay until CronDelete / manual dismiss.
             const kind = cs.byId[e.nodeId]?.loop?.kind

@@ -189,7 +189,12 @@ export function projectSignalCounts(group: SessionGroup): { attention: number; u
   return { attention, unread, working }
 }
 
-export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {
+export function sessionStatusKind(
+  state: AgentNodeStatus['state'],
+  endedAt?: AgentNodeStatus['endedAt']
+): StatusKind {
+  // The agent ended its own session: settled, like a finished turn, not "unobserved".
+  if (!state && endedAt !== undefined) return 'done'
   switch (state) {
     case 'working':
       return 'working'
@@ -295,7 +300,7 @@ function toRow(
 ): SessionRowVM {
   // Workflow state and read state are deliberately independent. `done` means the agent finished a
   // turn and is waiting for a new user prompt; `unread` only controls notification/read affordances.
-  const statusKind = sessionStatusKind(status?.state)
+  const statusKind = sessionStatusKind(status?.state, status?.endedAt)
   return {
     id: n.id,
     title: n.title,
