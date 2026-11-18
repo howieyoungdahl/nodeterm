@@ -202,6 +202,40 @@ describe('verified browser-server updates', () => {
     await expect(fs.access(path.join(config.stateDir, 'failed.json'))).rejects.toThrow()
   })
 
+  it('quarantines a hung step even though no run can give it the full 15 minutes', async () => {
+    // Every run spends 90 s before its first step, so no step ever gets the full 15 minutes;
+    // the hung step is still the first step its run starts, so its timeouts count.
+    let clock = 0
+    const timedOut = Object.assign(new Error('spawnSync npm ETIMEDOUT'), { code: 'ETIMEDOUT' })
+    const run = runtime.run
+    runtime.now = () => clock
+    runtime.run = (command, args, cwd, build, timeoutMs) => {
+      if (command === 'git' && args.includes('fetch')) clock += 90_000
+      if (build && args.includes('typecheck')) { clock += timeoutMs!; throw timedOut }
+      return run(command, args, cwd, build, timeoutMs)
+    }
+    const outcomes: string[] = []
+    for (let i = 0; i < 5; i++) { outcomes.push((await updater().update(true)).outcome); clock += 5 * 60_000 }
+    // Run 1: typecheck follows three passed steps, so its cut is excused. Runs 2 to 4: it is the
+    // first step, so each timeout counts, and the third quarantines it.
+    expect(outcomes).toEqual(['deferred', 'deferred', 'deferred', 'failed', 'blocked'])
+  })
+
+  it('--retry rebuilds every step instead of resuming a recorded build', async () => {
+    // Fail after `npm ci` has passed and been recorded, so a resuming retry would skip it.
+    let failTypecheck = true
+    const run = runtime.run
+    runtime.run = (command, args, cwd, build, timeoutMs) => {
+      if (build && args.includes('typecheck') && failTypecheck) throw new Error('typecheck failed')
+      return run(command, args, cwd, build, timeoutMs)
+    }
+    expect((await updater().update(true)).outcome).toBe('failed')
+    failTypecheck = false
+    const before = commands.length
+    expect((await updater().update(true, true)).outcome).toBe('deployed')
+    expect(commands.slice(before).filter((c) => c[0] === 'npm')).toHaveLength(buildSteps().filter((s) => s.command === 'npm').length)
+  })
+
   it('does not start a step with too little of the window left', async () => {
     let clock = 0
     const run = runtime.run

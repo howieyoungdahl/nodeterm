@@ -270,16 +270,21 @@ export class ServerUpdater {
           throw new Error('Release worktree points at a different commit')
         if (this.runtime.run('git', ['-C', release, 'status', '--porcelain', '--untracked-files=no']).trim())
           throw new Error('Release worktree has source edits; preserving them')
-        // Resumable: each passed step is recorded in the release for this commit, and a later tick
-        // continues from the first step not recorded. Steps are given only the time left in this
-        // run's build window; one the window cuts short is run again, with a full limit, next tick.
-        const progressFile = path.join(release, '.updater-steps.json')
+        // Resumable: each passed step is recorded for this commit, and a later tick continues from
+        // the first step not recorded. The record lives in the state dir, not the release
+        // worktree, so release pruning (which keeps any worktree with stray files) is unaffected.
+        // --retry starts the commit over, so a damaged install is rebuilt rather than skipped.
+        const progressFile = path.join(this.config.stateDir, 'build-progress.json')
         let done: string[] = []
-        try {
-          const progress = JSON.parse(await fs.readFile(progressFile, 'utf8')) as { sha?: string; done?: unknown }
-          if (progress.sha === sha && Array.isArray(progress.done)) done = progress.done.filter((d): d is string => typeof d === 'string')
-        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        if (!retry) {
+          try {
+            const progress = JSON.parse(await fs.readFile(progressFile, 'utf8')) as { sha?: string; done?: unknown }
+            if (progress.sha === sha && Array.isArray(progress.done)) done = progress.done.filter((d): d is string => typeof d === 'string')
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        }
+        await writeFileAtomic(progressFile, JSON.stringify({ sha, done }))
         const steps = buildSteps()
+        let first = true
         for (const step of steps) {
           if (done.includes(step.name)) continue
           const left = started + BUILD_WINDOW_MS - now()
@@ -289,10 +294,14 @@ export class ServerUpdater {
           try {
             this.runtime.run(step.command, step.args, release, true, limit)
           } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT' && limit < BUILD_STEP_LIMIT_MS)
+            // Only a step that other steps crowded out of this run is excused. The first step a run
+            // starts had the whole window, so its timeout counts toward quarantine; a hung step is
+            // always first on the tick after, so it cannot defer forever.
+            if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT' && limit < BUILD_STEP_LIMIT_MS && !first)
               return this.status('deferred', sha, `Build step ${step.name} reached the end of this run; it restarts on the next tick (${done.length} of ${steps.length} steps done)`)
             throw error
           }
+          first = false
           done = [...done, step.name]
           await writeFileAtomic(progressFile, JSON.stringify({ sha, done }))
         }
