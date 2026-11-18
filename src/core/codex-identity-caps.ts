@@ -48,23 +48,16 @@ import { promisify } from 'util'
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import { type CodexIdentityCaps } from '../shared/types'
-import { installCodexLauncher, codexThreadIdentityAvailable } from './codex-identity-proxy'
+import {
+  CODEX_MANAGED_RUNTIME_PATHS,
+  installCodexLauncher,
+  codexThreadIdentityAvailable
+} from './codex-identity-proxy'
 import { codexHome } from './usage/codex-usage'
 import { findInLoginPath } from './pty-manager'
 
 const execFileP = promisify(execFile)
 const PROBE_TIMEOUT_MS = 5000
-
-/**
- * The fixed path `codex app-server daemon start` requires, under the CLI's own `CODEX_HOME`.
- *
- * Not a guess: the CLI names this exact path in the error it refuses with, and reports it as
- * `managedCodexPath` in `codex app-server daemon stop`'s JSON. Its own words are "the daemon starts
- * and updates app-server from that fixed path".
- */
-export function codexManagedRuntimePath(home = codexHome()): string {
-  return path.join(home, 'packages', 'standalone', 'current', 'codex')
-}
 
 /**
  * Can this install run a shared app-server? A STAT, and deliberately not `codex app-server daemon
@@ -90,12 +83,14 @@ export function codexManagedRuntimePath(home = codexHome()): string {
  * and a banner on every node.
  */
 export function codexManagedRuntimeInstalled(home = codexHome()): boolean {
-  try {
-    accessSync(codexManagedRuntimePath(home), constants.X_OK)
-    return true
-  } catch {
-    return false
-  }
+  return CODEX_MANAGED_RUNTIME_PATHS.some((runtime) => {
+    try {
+      accessSync(path.join(home, runtime), constants.X_OK)
+      return true
+    } catch {
+      return false
+    }
+  })
 }
 
 /**

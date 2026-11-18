@@ -7,7 +7,6 @@ import {
   codexCliSupportsRemote,
   codexIdentityCaps,
   codexManagedRuntimeInstalled,
-  codexManagedRuntimePath,
   refreshCodexIdentityCaps,
   resetCodexIdentityCapsForTests
 } from './codex-identity-caps'
@@ -41,6 +40,17 @@ afterEach(() => {
 })
 
 describe('codexIdentityCaps', () => {
+  it('installs the shared launcher on a standalone package with the executable in bin', async () => {
+    setCodexThreadIdentityAuthSecret(randomBytes(32))
+    const bin = path.join(dir, 'packages', 'standalone', 'current', 'bin')
+    fs.mkdirSync(bin, { recursive: true })
+    fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+    const caps = await refreshCodexIdentityCaps(remote(true), () => codexManagedRuntimeInstalled(dir))
+    expect(caps.shared).toBe(true)
+    expect(caps.launcherPath).toBe(path.join(dir, 'codex-bin', 'nodeterm-codex'))
+  })
+
   it('says yes, and installs the launcher, once the secret is in and the CLI has --remote', async () => {
     setCodexThreadIdentityAuthSecret(randomBytes(32))
     const caps = await refreshCodexIdentityCaps(remote(true), appServer(true))
@@ -156,19 +166,11 @@ describe('codexIdentityCaps', () => {
 })
 
 describe('codexManagedRuntimeInstalled', () => {
-  // The path is not inferred: `codex app-server daemon start` names it verbatim in its refusal, and
-  // `codex app-server daemon stop` reports it as `managedCodexPath` in JSON.
-  it('is the fixed path the CLI itself names, under CODEX_HOME', () => {
-    expect(codexManagedRuntimePath('/somewhere/.codex')).toBe(
-      path.join('/somewhere/.codex', 'packages', 'standalone', 'current', 'codex')
-    )
-  })
-
-  it('answers yes only for an executable runtime at that path', () => {
+  it.each(['codex', 'bin/codex'])('requires an executable runtime at %s', (layout) => {
     // An npm install has ~/.codex (auth, config, sessions) and no `packages/` at all — which is
     // exactly the shape measured on the machine this fix was written on.
     expect(codexManagedRuntimeInstalled(dir)).toBe(false)
-    const runtime = codexManagedRuntimePath(dir)
+    const runtime = path.join(dir, 'packages', 'standalone', 'current', layout)
     fs.mkdirSync(path.dirname(runtime), { recursive: true })
     fs.writeFileSync(runtime, '#!/bin/sh\nexit 0\n', { mode: 0o644 })
     // Present but not executable is not a runtime the daemon can exec, so it is still no.
