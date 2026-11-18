@@ -34,6 +34,8 @@ import {
 } from '@shared/usage-limits'
 import { externalProfileId, type ExternalUsageProfile } from '@shared/external-profile'
 import { systemAccountDisplay } from '../state/workspace'
+import { useAgentStatus } from '../state/agentStatus'
+import { cardCountText, countCardsByAccount } from '../lib/accountCardCounts'
 
 /** Grace period before a hover-opened popover closes, so the pointer can cross the pill's own
  *  gap (or clip a corner en route elsewhere) without the panel flickering shut. */
@@ -169,7 +171,8 @@ function AccountUsageBlock({
   onUse,
   collapsed,
   onToggle,
-  external = false
+  external = false,
+  cards
 }: {
   label: string
   email?: string
@@ -181,6 +184,8 @@ function AccountUsageBlock({
   onToggle: () => void
   /** An external profile directory: read for display only, never launched from. */
   external?: boolean
+  /** Cards on the active canvas observed running on this login. */
+  cards?: number
 }) {
   return (
     <div className="usage-account">
@@ -190,6 +195,14 @@ function AccountUsageBlock({
           <>
             {/* Says plainly that these numbers come from a directory the user already had, and
                 that the row is a readout — the account rows above it are launchable, this is not. */}
+            {!!cards && (
+              <span
+                className="usage-account__host"
+                title="Cards on this canvas whose session last ran on this login"
+              >
+                {cardCountText(cards)}
+              </span>
+            )}
             {external && (
               <span
                 className="usage-account__host"
@@ -381,6 +394,31 @@ export function UsageIndicator({
   )
   const externalClaudeIds = useMemo(() => externalClaude.map(externalProfileId), [externalClaude])
 
+  // Which cards spend which login. Both selectors return PRIMITIVE strings so a hook event on some
+  // other node, or an unrelated project save, does not re-render the pill.
+  const cardIdsKey = useProjects((s) =>
+    (s.projects.find((p) => p.id === s.activeProjectId)?.nodes ?? [])
+      .filter((n) => n.kind === 'terminal')
+      .map((n) => n.id)
+      .join('\n')
+  )
+  // JSON, not a delimiter join: a config dir is free text and may hold any separator.
+  const observedKey = useAgentStatus((s) =>
+    JSON.stringify(
+      (cardIdsKey ? cardIdsKey.split('\n') : []).flatMap((id) => {
+        const a = s.byId[id]?.account
+        return a ? [[id, a.configDir ?? '', a.accountId ?? null, a.known]] : []
+      })
+    )
+  )
+  const cardCounts = useMemo(() => {
+    const rows = JSON.parse(observedKey) as [string, string, string | null, boolean][]
+    const observed = new Map(
+      rows.map(([id, configDir, accountId, known]) => [id, { configDir, accountId, known }] as const)
+    )
+    return countCardsByAccount([...observed.keys()], (id) => observed.get(id), accounts, externalClaude)
+  }, [observedKey, accounts, externalClaude])
+
   // An external Codex home arrives as an ordinary provider row — the shell supplies it with the
   // external profile's id as `accountId`, because `fetchCodexUsage` already takes a home. Name it
   // from the user's own label so two Codex rows never both read "Codex".
@@ -560,7 +598,14 @@ export function UsageIndicator({
   // segment), so without this a user whose Claude only lives in `~/.claude-2` would have nothing
   // to click and no way to reach the panel that has their numbers. The pill reads '···' until the
   // popover's first fetch lands, exactly as it does for any other source still being read.
-  if (!hasAnyUsage(claudeUsage, visibleProviders, visibleRemote) && externalClaude.length === 0) {
+  // Cards running on a profile with no row earn it too: the panel is where that gap is named.
+  if (
+    !hasAnyUsage(claudeUsage, visibleProviders, visibleRemote) &&
+    externalClaude.length === 0 &&
+    // Local only: the unconfigured rows render in the local section, so on an SSH project they
+    // would earn a pill whose popover never explains it.
+    !(scope.kind === 'local' && cardCounts.unconfigured.length > 0)
+  ) {
     return null
   }
 
@@ -676,6 +721,7 @@ export function UsageIndicator({
                     // Avoid printing the email twice when it's already the display label.
                     email={systemLabelSetting.trim() ? (claudeUsage.email ?? undefined) : undefined}
                     u={claudeUsage}
+                    cards={cardCounts.system}
                     {...rowMark(null)}
                     {...sectionProps({ kind: 'claude' })}
                   />
@@ -686,6 +732,7 @@ export function UsageIndicator({
                       label={a.label}
                       email={a.email}
                       u={acctUsage[a.id] ?? null}
+                      cards={cardCounts.byId[a.id]}
                       {...rowMark(a.id)}
                       {...sectionProps({ kind: 'claude', accountId: a.id })}
                     />
@@ -724,10 +771,26 @@ export function UsageIndicator({
                     label={p.label}
                     u={acctUsage[id] ?? null}
                     external
+                    cards={cardCounts.byId[id]}
                     {...sectionProps({ kind: 'claude', accountId: id })}
                   />
                 )
               })}
+              {/* A profile cards are running on that has no row above: say so, with where to add
+                  it, rather than leave those cards' login missing from the overview. */}
+              {cardCounts.unconfigured.map((u) => (
+                <div className="usage-account" key={`unconfigured:${u.configDir}`}>
+                  <div className="usage-account__label">
+                    {u.configDir.split(/[\\/]/).filter(Boolean).pop() ?? u.configDir}{' '}
+                    <span className="usage-account__host" title="Cards on this canvas whose session last ran on this login">
+                      {cardCountText(u.count)}
+                    </span>
+                  </div>
+                  <div className="usage-popover__empty">
+                    Usage not read. Add {u.configDir} under Settings, Usage, Other profiles.
+                  </div>
+                </div>
+              ))}
             </>
           )}
           {/* On an SSH project these are the whole panel; the host badge is what says the numbers
