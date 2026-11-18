@@ -1053,7 +1053,11 @@ class HookServer {
         this.codexIdentityListener?.({ nodeId, mode: 'shared' })
         res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(`${threadId}\n`)
-      } catch {
+      } catch (e) {
+        // The launcher only sees a 503 and runs plain codex, and the browser only hears
+        // "thread-start-failed". Without this line the cause is nowhere: a seed delete slower than
+        // the start budget failed every launch on a busy daemon and left no trace on this host.
+        console.warn('[agent-hooks] codex thread start failed', (e as Error)?.message ?? e)
         res.writeHead(503)
         res.end()
       }
