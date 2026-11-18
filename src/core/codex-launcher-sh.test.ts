@@ -614,9 +614,9 @@ describe('falls back to plain codex', () => {
     expect(fallbacks).toEqual([{ nodeId: 'node-1', reason: 'codex-standalone-missing' }])
   })
 
-  it('honors CODEX_HOME when deciding which of the two it hit', async () => {
+  it('recognizes the current standalone package in the selected CODEX_HOME', async () => {
     const home = path.join(dir, 'relocated-codex')
-    const runtime = path.join(home, 'packages', 'standalone', 'current')
+    const runtime = path.join(home, 'packages', 'standalone', 'current', 'bin')
     fs.mkdirSync(runtime, { recursive: true })
     fs.writeFileSync(path.join(runtime, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
     const noServer = path.join(dir, 'nodeterm-codex-relocated')

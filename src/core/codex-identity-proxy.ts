@@ -499,6 +499,12 @@ export function codexLauncherDir(): string {
 
 export const CODEX_LAUNCHER_NAME = 'nodeterm-codex'
 
+// Codex's managed standalone package moved the executable into bin/.
+export const CODEX_MANAGED_RUNTIME_PATHS = [
+  'packages/standalone/current/bin/codex',
+  'packages/standalone/current/codex'
+] as const
+
 export function codexLauncherPath(): string {
   return path.join(codexLauncherDir(), CODEX_LAUNCHER_NAME)
 }
@@ -706,9 +712,8 @@ nt_preflight() {
   #
   # Two different facts wore one name before: an older CLI with no app-server at all, and a current
   # CLI installed off a channel that ships no standalone runtime (npm, snap) — where the daemon
-  # refuses with "managed standalone Codex install not found at
-  # <CODEX_HOME>/packages/standalone/current/codex". Caps normally keeps that second case away from
-  # here entirely, but the pane resolves CODEX_HOME from its OWN environment (§8.5) and an install
+  # refuses with "managed standalone Codex install not found". Caps normally keeps that case away
+  # from here, but the pane resolves CODEX_HOME from its OWN environment (§8.5) and an install
   # can be removed after boot, so the launcher still has to be able to say which it hit.
   #
   # A responsive app-server is authoritative even when Codex's PID ownership record has gone stale.
@@ -719,7 +724,7 @@ nt_preflight() {
   if nt_app_server_ready || nt_start_app_server; then
     return 0
   fi
-  if [ -x "\${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/codex" ]; then
+  if ${CODEX_MANAGED_RUNTIME_PATHS.map((p) => `[ -x "\${CODEX_HOME:-$HOME/.codex}/${p}" ]`).join(' || ')}; then
     nt_fail app-server-unavailable
   else
     nt_fail codex-standalone-missing
