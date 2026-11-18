@@ -37,6 +37,13 @@ import { CODEX_THREAD_START_TIMEOUT_MS, isSafeThreadId } from './codex-identity-
 const SOCKET_WAIT_ATTEMPTS = 3
 const SOCKET_WAIT_MS = 200
 
+/**
+ * How long a started thread's connection stays open to finish deleting its seed after the caller
+ * already has its answer. Measured on a busy shared daemon at 28 s and 49 s, so well above that;
+ * the timer is unref'd and never holds the process open.
+ */
+export const CODEX_THREAD_SEED_CLEANUP_MS = 120_000
+
 const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     const t = setTimeout(resolve, ms)
@@ -442,14 +449,31 @@ function startCodexThreadOnce(
     const permissionParams = codexThreadPermissionParams(permissions)
     let settled = false
     let ws: WebSocket
-    const finish = (error: Error | null, threadId?: string): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined
+    const closeSocket = (): void => {
       try {
         ws.close()
       } catch {
         /* the connection may never have opened */
+      }
+    }
+    const closeAfterCleanup = (): void => {
+      if (cleanupTimer) clearTimeout(cleanupTimer)
+      closeSocket()
+    }
+    const finish = (
+      error: Error | null,
+      threadId?: string,
+      opts: { keepOpenMs?: number } = {}
+    ): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (opts.keepOpenMs) {
+        cleanupTimer = setTimeout(closeSocket, opts.keepOpenMs)
+        cleanupTimer.unref?.()
+      } else {
+        closeSocket()
       }
       if (error) reject(error)
       else resolve(threadId as string)
@@ -586,17 +610,28 @@ function startCodexThreadOnce(
         }
         const seedThreadId = threadId
         threadId = readyThreadId
+        // The fork is the thread the node resumes, and it is complete NOW. Removing the seed is
+        // cleanup, and on a busy shared daemon it is slow: the seed is still "active" from its
+        // interrupted turn, so `thread/delete` shuts it down first. On the live canvas that took
+        // 28 s and 49 s, past this whole call's budget, so every start timed out after a good fork
+        // and every Codex node fell back to plain codex. Answer with the fork first and let the
+        // delete finish on this same connection, bounded by its own timer. A seed whose delete
+        // fails or outlives that timer is an orphan thread with no record and no node: wasted
+        // disk, never a wrong card.
+        finish(null, threadId, { keepOpenMs: CODEX_THREAD_SEED_CLEANUP_MS })
         ws.send(JSON.stringify({ id: 6, method: 'thread/delete', params: { threadId: seedThreadId } }))
       } else if (message.id === 6) {
-        if (message.error) {
-          finish(new Error('Codex app-server could not remove thread materialization seed'))
-          return
-        }
-        finish(null, threadId)
+        closeAfterCleanup()
       }
     })
-    ws.once('error', () => finish(new Error('Codex app-server is unavailable')))
-    ws.once('close', () => finish(new Error('Codex app-server closed before thread start')))
+    ws.once('error', () => {
+      finish(new Error('Codex app-server is unavailable'))
+      closeAfterCleanup()
+    })
+    ws.once('close', () => {
+      finish(new Error('Codex app-server closed before thread start'))
+      closeAfterCleanup()
+    })
   })
 }
 

@@ -45,6 +45,19 @@ threads.set('thread-preview', null)
 let initializeFails = false
 /** Every `thread/start` and `thread/fork` the fake daemon saw, with the params as sent. */
 let threadBirths: Array<{ method: string; params: Record<string, unknown> }> = []
+/** When set, the seed `thread/delete` is recorded but never answered (a busy daemon shutting it down). */
+let deleteHangs = false
+let deletesSeen: string[] = []
+/** Deletes held while `deleteHangs` is set. */
+let heldDeletes: Array<{ ws: WebSocket; id: unknown }> = []
+
+async function waitFor(cond: () => boolean, ms = 2000): Promise<void> {
+  const until = Date.now() + ms
+  while (!cond()) {
+    if (Date.now() > until) throw new Error('condition not met in time')
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
 
 function handle(ws: WebSocket): void {
   ws.on('message', (raw) => {
@@ -62,6 +75,13 @@ function handle(ws: WebSocket): void {
       ws.send(JSON.stringify({ method: 'turn/started', params: { turn: { id: 'turn-boot' } } }))
       ws.send(JSON.stringify({ method: 'turn/completed', params: { turn: { id: 'turn-boot' } } }))
       return
+    }
+    if (msg.method === 'thread/delete') {
+      deletesSeen.push(msg.params?.threadId)
+      if (deleteHangs) {
+        heldDeletes.push({ ws, id: msg.id })
+        return
+      }
     }
     if (msg.method === 'turn/interrupt' || msg.method === 'thread/delete') {
       ws.send(JSON.stringify({ id: msg.id, result: {} }))
@@ -135,6 +155,32 @@ describe('startCodexThreadAt', () => {
         permissions: ':danger-full-access'
       })
       expect(birth.params).not.toHaveProperty('sandbox')
+    }
+  })
+
+  // On the live canvas the seed delete took 28 s and 49 s, so a start that waited for it timed out
+  // after a good fork and every Codex node fell back to plain codex, whose hooks never reach a card.
+  it('answers with the fork without waiting for the seed delete, and still sends that delete', async () => {
+    // A previous test's seed delete travels AFTER its start resolved; let it finish first so the
+    // only delete held here is this test's own.
+    await waitFor(() => wss.clients.size === 0)
+    deleteHangs = true
+    deletesSeen = []
+    try {
+      const id = await startCodexThreadAt(sock, dir, 1000)
+      expect(id).toBe('thread-final')
+      await waitFor(() => heldDeletes.length > 0)
+      expect(deletesSeen).toEqual(['thread-seed'])
+      // The late answer still arrives on the connection the client kept open, and ends it.
+      const held = heldDeletes
+      const closed = held.map(
+        (h) => new Promise<void>((resolve) => h.ws.once('close', () => resolve()))
+      )
+      for (const h of held) h.ws.send(JSON.stringify({ id: h.id, result: {} }))
+      await Promise.all(closed)
+    } finally {
+      deleteHangs = false
+      heldDeletes = []
     }
   })
 
