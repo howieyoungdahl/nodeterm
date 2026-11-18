@@ -10759,7 +10759,9 @@ export function Canvas() {
             cs.setHibernated(e.nodeId, false)
           }
           if (e.sessionPhase === 'end') {
-            cs.setSessionPhase(e.nodeId, 'end', e.agentId)
+            // `sessionEnded` is the mirror's verdict that this end was the node's own agent
+            // exiting (session ownership, reduceEntry); a nested `claude -p` ending carries none.
+            cs.setSessionPhase(e.nodeId, 'end', e.agentId, { exited: e.sessionEnded === true })
             // In-session /loop dies with its session; cron (and scheduled cloud routines)
             // keep running after it — their cards stay until CronDelete / manual dismiss.
             const kind = cs.byId[e.nodeId]?.loop?.kind

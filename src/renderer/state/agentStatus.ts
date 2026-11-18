@@ -48,6 +48,11 @@ import type { AgentStatusSnapshot, NodeTerminalApi, ObservedClaudeAccount } from
  */
 export interface AgentNodeStatus {
   idleSince?: number
+  /**
+   * When this node's agent ended its own session (mirror `endedAt`). Renders EXITED rather than
+   * UNKNOWN; cleared by any later state or session start. Transient like `state`.
+   */
+  endedAt?: number
   /** Live activity; undefined = idle/unknown. */
   state?: AgentState
   /**
@@ -265,7 +270,13 @@ export interface AgentStatusStore {
    * clobbered; `now` is injected so the cut is testable. Writes nothing to localStorage.
    */
   seedFromSnapshot(snapshot: AgentStatusSnapshot, now?: number): void
-  setSessionPhase(id: string, phase: 'start' | 'end', agentId?: AgentId): void
+  setSessionPhase(
+    id: string,
+    phase: 'start' | 'end',
+    agentId?: AgentId,
+    /** `exited`: the mirror recorded this end as the node's own agent leaving. */
+    opts?: { exited?: boolean }
+  ): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
   /** Record the Claude account a hook event says this node is running under. Persisted; see
@@ -508,7 +519,14 @@ export function createAgentStatusSession(
         // The ONE place a state transition is recorded, so it is also the one place the idle
         // clock is stamped (the same-state fast path above deliberately does not touch it —
         // see `lastEventAt`).
-        const next = { ...prev, state, idleSince: undefined as number | undefined, stateAt: now, lastEventAt: now }
+        const next = {
+          ...prev,
+          state,
+          idleSince: undefined as number | undefined,
+          endedAt: undefined as number | undefined,
+          stateAt: now,
+          lastEventAt: now
+        }
         // Written on the same edge the state is — the evidence describes THIS transition, and an
         // absent argument is not evidence.
         next.stateVerified = verified === true
@@ -647,7 +665,7 @@ export function createAgentStatusSession(
         for (const [id, entry] of Object.entries(snapshot?.nodes ?? {})) {
           // A missing state is UNKNOWN unless a session start established idle. Older settled
           // states remain useful and display their age; only stale working is skipped.
-          if (!entry?.state && entry?.idleSince === undefined) continue
+          if (!entry?.state && entry?.idleSince === undefined && entry?.endedAt === undefined) continue
           if (entry.state === 'working' && now - entry.updatedAt > STALE_WORKING_MS) continue
           const prev = (byId ?? s.byId)[id]
           // Never clobber a LIVE state. The snapshot is one async round-trip old by the time it
@@ -667,6 +685,7 @@ export function createAgentStatusSession(
             ...(prev ?? EMPTY),
             state: entry.state,
             idleSince: entry.state ? undefined : entry.idleSince,
+            endedAt: entry.state ? undefined : entry.endedAt,
             stateAt: entry.updatedAt,
             lastEventAt: Math.max(prev?.lastEventAt ?? 0, entry.updatedAt),
             // A seed presents no per-node token, so it asserts nothing — and a `true` left over
@@ -692,10 +711,12 @@ export function createAgentStatusSession(
         return byId ? { byId } : s
       }),
 
-    setSessionPhase: (id, phase, agentId) => {
+    setSessionPhase: (id, phase, agentId, opts) => {
       store.getState().setState(id, undefined, agentId)
       const now = Date.now()
-      set((s) => ({ byId: { ...s.byId, [id]: { ...(s.byId[id] ?? EMPTY), idleSince: phase === 'start' && reportsSessionEnd(agentId) ? now : undefined, stateAt: now, lastEventAt: now } } }))
+      const reports = reportsSessionEnd(agentId)
+      const endedAt = phase === 'end' && reports && opts?.exited === true ? now : undefined
+      set((s) => ({ byId: { ...s.byId, [id]: { ...(s.byId[id] ?? EMPTY), idleSince: phase === 'start' && reports ? now : undefined, endedAt, stateAt: now, lastEventAt: now } } }))
     },
 
     setSession: (id, session) =>

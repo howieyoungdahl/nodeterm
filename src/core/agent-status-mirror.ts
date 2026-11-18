@@ -55,6 +55,21 @@ export interface MirrorEntry extends CodexStatusMetadata {
   /** working/waiting/blocked/done; undefined = idle/unknown (e.g. after a session reset). */
   state?: AgentState
   idleSince?: number
+  /**
+   * When this node's agent reported its OWN session end (SessionEnd: `/exit`, a hibernate, a
+   * quit). Set only on a stateless entry and cleared by every later state or session start, so it
+   * describes the latest boundary only. Without it a card whose agent left read UNKNOWN — the
+   * badge for "nothing reported" — when the agent had in fact said it was leaving.
+   */
+  endedAt?: number
+  /**
+   * The session that OWNS this node: taken from a session start only while no session is live
+   * here (first start, or a start after a recorded end). A `claude -p` run inside the pane
+   * inherits the node's identity and posts its own start and end; its start must not take the
+   * node over, or its end would read as this agent exiting. `sessionId` cannot serve, because
+   * every event (the nested one's included) overwrites it.
+   */
+  ownerSessionId?: string
   agentId?: AgentId
   sessionId?: string
   /**
@@ -189,6 +204,8 @@ export interface MirrorFile {
       clientRevision?: number
       state?: AgentState
       idleSince?: number
+      endedAt?: number
+      ownerSessionId?: string
       agentId?: AgentId
       sessionId?: string
       /** Observed Claude account (see MirrorEntry.account). Additive — absent on old files and
@@ -405,6 +422,10 @@ export function reduceEntry(
   now: number
 ): MirrorEntry {
   const next: MirrorEntry = prev ? { ...prev } : { updatedAt: now }
+  // Read off `prev` before identity capture below overwrites `sessionId`. An entry written before
+  // `ownerSessionId` existed falls back to its last session id.
+  const priorOwner = prev?.ownerSessionId ?? prev?.sessionId
+  const sessionLive = prev !== undefined && prev.endedAt === undefined && priorOwner !== undefined
   /**
    * Commit a state onto `next` — and everything that must move WITH it. One function rather than
    * the same four lines at each branch, because the alternative was measured: of the three branches
@@ -420,6 +441,7 @@ export function reduceEntry(
   const commitState = (state: AgentState | undefined, proof: boolean): void => {
     next.state = state
     delete next.idleSince
+    delete next.endedAt
     next.updatedAt = now
     next.stateVerified = proof
     if (ev.agentId === 'codex') {
@@ -516,6 +538,21 @@ export function reduceEntry(
     commitState(undefined, false)
     // A crash without SessionEnd leaves IDLE, just as it leaves COMPLETED for done.
     if (ev.sessionPhase === 'start' && reportsSessionEnd(ev.agentId)) next.idleSince = now
+    if (ev.sessionPhase === 'start' && reportsSessionEnd(ev.agentId)) {
+      // A start while another session is live here is a nested run, not a new owner.
+      if (sessionLive) next.ownerSessionId = priorOwner
+      else if (ev.sessionId) next.ownerSessionId = ev.sessionId
+      else delete next.ownerSessionId
+    }
+    // A clean exit is a positive fact too, but only from the session that owns the node: an end
+    // from any other session id is a nested `claude -p` finishing, not this agent leaving.
+    if (
+      ev.sessionPhase === 'end' &&
+      reportsSessionEnd(ev.agentId) &&
+      (!ev.sessionId || !priorOwner || ev.sessionId === priorOwner)
+    ) {
+      next.endedAt = now
+    }
     next.awaitingInput = undefined
   }
   // subagent-start / subagent-end / recurring: identity captured above, main state untouched.
@@ -581,6 +618,8 @@ export function buildFile(
       } : {}),
       state: e.state,
       ...(e.idleSince !== undefined ? { idleSince: e.idleSince } : {}),
+      ...(e.endedAt !== undefined && !e.state ? { endedAt: e.endedAt } : {}),
+      ...(e.ownerSessionId ? { ownerSessionId: e.ownerSessionId } : {}),
       agentId: e.agentId,
       sessionId: e.sessionId,
       // Spread-when-present, like `name`/`hibernated`: a node that never posted a claude payload
@@ -1215,6 +1254,8 @@ function loadPersisted(file: string): void {
         state.set(id, {
           state: e.state,
           ...(typeof e.idleSince === 'number' && Number.isFinite(e.idleSince) && !e.state ? { idleSince: e.idleSince } : {}),
+          ...(typeof e.endedAt === 'number' && Number.isFinite(e.endedAt) && !e.state ? { endedAt: e.endedAt } : {}),
+          ...(typeof e.ownerSessionId === 'string' && e.ownerSessionId ? { ownerSessionId: e.ownerSessionId } : {}),
           agentId: e.agentId,
           sessionId: e.sessionId,
           // Identity survives the restart like agentId/sessionId does — for a hand-launched
@@ -1328,6 +1369,11 @@ export function recordAgentEvent(ev: NormalizedAgentEvent): NormalizedAgentEvent
   let out = ev
   if (ev.kind === 'state' && ev.state === 'done' && next.awaitingInput && next.state === 'waiting') {
     out = { ...ev, state: 'waiting' }
+  }
+  // Same idea for an exit: the reducer decided whether this end was the node's own agent leaving
+  // (session ownership), so the broadcast carries that verdict rather than every consumer guessing.
+  if (ev.kind === 'session' && ev.sessionPhase === 'end' && next.endedAt === now) {
+    out = { ...out, sessionEnded: true }
   }
   const classification = produceInboxFromState(nodeId, out, prevState, next.state, now)
   scheduleWrite()
@@ -1787,16 +1833,18 @@ export function workingNodes(): { nodeId: string; agentId?: string; sessionId?: 
  *  - No freshness cut beyond the mirror's own expiry sweep. The renderer applies its own, because
  *    the cut is a display decision and it owns the clock the user is looking at.
  *
- * Stateless entries are sent only when a session start establishes an idle fact.
+ * Stateless entries are sent only when a session boundary established a fact: a start (idle) or
+ * the agent's own end (exited).
  */
 export function agentStatusSnapshot(now = Date.now()): AgentStatusSnapshot {
   const nodes: Record<string, AgentStatusSnapshotEntry> = {}
   for (const [nodeId, e] of state) {
-    if (!e.state && e.idleSince === undefined) continue
+    if (!e.state && e.idleSince === undefined && e.endedAt === undefined) continue
     if (now - e.updatedAt > NODE_RETENTION_MS) continue
     nodes[nodeId] = {
       state: e.state,
       idleSince: e.idleSince,
+      ...(e.endedAt !== undefined && !e.state ? { endedAt: e.endedAt } : {}),
       agentId: e.agentId,
       sessionId: e.sessionId,
       updatedAt: e.updatedAt,

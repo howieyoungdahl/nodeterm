@@ -53,6 +53,10 @@ export interface NormalizedAgentEvent {
   // session lifecycle phase: 'start' resets to idle, 'end' resets + clears loop/fan-out
   sessionPhase?: 'start' | 'end'
   sessionSource?: string
+  /** Set by the status mirror (never by a normalizer) on the broadcast of a session END it
+   *  recorded as the node's own agent exiting, so every consumer shows the same EXITED fact
+   *  instead of re-deriving session ownership. Absent on a nested session's end. */
+  sessionEnded?: boolean
   /** Explicit provider startup, never resume/reconnect/unknown. Cleanup also requires a fresh
    * current-host process marker; this lifecycle label alone cannot establish child coverage. */
   freshSession?: boolean

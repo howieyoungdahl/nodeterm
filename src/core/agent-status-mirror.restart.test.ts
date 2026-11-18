@@ -19,6 +19,7 @@ import {
   _inboxSnapshot,
   _snapshot,
   workingNodes,
+  agentStatusSnapshot,
   type InboxEvent
 } from './agent-status-mirror'
 
@@ -145,6 +146,21 @@ describe('agent-status mirror — restart survival of the done dedup', () => {
 })
 
 describe('status retention and idle recovery', () => {
+  it('keeps a clean session end (EXITED) through restart and the snapshot; a new start clears it', async () => {
+    // The hibernated-card case: Claude exits on purpose, the pane returns to a shell, and the
+    // updater then restarts the Server. The exit must still be a fact afterwards, not UNKNOWN.
+    initAgentStatusMirror(file)
+    recordAgentEvent(ev({ sessionId: 's1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ sessionId: 's1', state: 'done' }))
+    recordAgentEvent(ev({ sessionId: 's1', kind: 'session', sessionPhase: 'end' }))
+    await restart()
+    expect(_snapshot().n1?.state).toBeUndefined()
+    expect(_snapshot().n1?.endedAt).toEqual(expect.any(Number))
+    expect(agentStatusSnapshot().nodes.n1?.endedAt).toEqual(expect.any(Number))
+    recordAgentEvent(ev({ sessionId: 's1', kind: 'session', sessionPhase: 'start', sessionSource: 'resume' } as Partial<NormalizedAgentEvent>))
+    expect(_snapshot().n1?.endedAt).toBeUndefined()
+    expect(_snapshot().n1?.idleSince).toEqual(expect.any(Number))
+  })
   it('preserves an explicit session start through restart and clears it on state', async () => {
     initAgentStatusMirror(file)
     recordAgentEvent(ev({ kind: 'session', sessionPhase: 'start' }))

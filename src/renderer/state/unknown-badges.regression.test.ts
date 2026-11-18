@@ -23,10 +23,11 @@ describe('status recovery', () => {
     store.getState().sweepStaleWorking(-1)
     expect(statusViewFor(store.getState().byId.n, Date.now()).kind).toBe('unknown')
     store.getState().setSessionPhase('n', 'start', 'claude')
-    store.getState().setSessionPhase('n', 'end', 'claude')
-    expect(statusViewFor(store.getState().byId.n, Date.now()).kind).toBe('unknown')
+    store.getState().setSessionPhase('n', 'end', 'claude', { exited: true })
+    expect(statusViewFor(store.getState().byId.n, Date.now()).kind).toBe('exited')
+    // An older snapshot cannot overwrite the live exit.
     store.getState().seedFromSnapshot({ takenAt: now, nodes: { n: { updatedAt: now, idleSince: now } } }, now)
-    expect(statusViewFor(store.getState().byId.n, Date.now()).kind).toBe('unknown')
+    expect(statusViewFor(store.getState().byId.n, Date.now()).kind).toBe('exited')
   })
   it('seeds a positive idle fact but not a legacy stateless entry', () => {
     const store = createAgentStatusSession().store
