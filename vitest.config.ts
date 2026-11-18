@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config'
 import { resolve } from 'path'
 
+const timeoutScale = Math.max(1, Number(process.env.NODETERM_TEST_TIMEOUT_SCALE) || 1)
+
 export default defineConfig({
   test: {
     include: [
@@ -36,7 +38,13 @@ export default defineConfig({
     // reproduce alone and vanish with --no-file-parallelism. Half the cores keeps wall-clock
     // close (the suite is fs/IO-bound, not CPU-bound) while halving peak fd pressure. CI's 2-core
     // runners resolve to 1 worker, which is what they effectively ran anyway.
-    maxWorkers: '50%'
+    maxWorkers: '50%',
+    // The server updater builds on a host shared with every agent session and sets
+    // NODETERM_TEST_TIMEOUT_SCALE (server-updater.ts buildEnvironment) so a test that is only slow
+    // under that load is not failed by vitest's DEFAULT limits. Explicit per-test timeouts are
+    // untouched. Unset, the defaults are vitest's own 5 s and 10 s.
+    testTimeout: 5_000 * timeoutScale,
+    hookTimeout: 10_000 * timeoutScale
   },
   resolve: {
     alias: {
