@@ -2,7 +2,7 @@ import { promises as fs, mkdirSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ServerUpdater, buildEnvironment, mayRestart, survivingPanes, validateUpdateConfig,
+import { BUILD_STEP_LIMIT_MS, BUILD_WINDOW_MS, ServerUpdater, TEST_SHARDS, buildEnvironment, buildSteps, mayRestart, survivingPanes, validateUpdateConfig,
   type UpdateConfig, type UpdateRuntime } from '../../src/core/server-updater'
 import { updaterUnits } from '../../src/server/update-install'
 
@@ -94,9 +94,10 @@ describe('verified browser-server updates', () => {
     expect((await updater().update(true)).outcome).toBe('deployed')
     expect(restarts).toBe(1)
     expect(await current()).toBe(path.join(config.stateDir, 'releases', SHA))
+    const shards = Array.from({ length: TEST_SHARDS }, (_, i) => ['test', '--', '--maxWorkers=2', `--shard=${i + 1}/${TEST_SHARDS}`])
     expect(commands.filter((c) => c[0] === 'npm').map((c) => c.slice(1))).toEqual([
       ['ci', '--ignore-scripts'], ['rebuild', 'node-pty'], ['run', 'typecheck'],
-      ['test', '--', '--maxWorkers=2'], ['run', 'build'], ['run', 'server:build'], ['run', '--if-present', 'updater:build']
+      ...shards, ['run', 'build'], ['run', 'server:build'], ['run', '--if-present', 'updater:build']
     ])
     const snapshots = await fs.readdir(path.join(config.stateDir, 'snapshots'))
     const saved = path.join(config.stateDir, 'snapshots', snapshots[0])
@@ -166,6 +167,53 @@ describe('verified browser-server updates', () => {
     expect(restarts).toBe(1)
   })
 
+  it('spreads a long build over ticks: each step gets only the window left, and passed steps are not rerun', async () => {
+    // Every step takes 6 minutes on this fake clock, so a 16 min window holds two steps and the
+    // third would start with 4 minutes left: it gets 4, is cut short, and runs again next tick.
+    let clock = 0
+    const limits: number[] = []
+    const timedOut = Object.assign(new Error('spawnSync npm ETIMEDOUT'), { code: 'ETIMEDOUT' })
+    const run = runtime.run
+    runtime.now = () => clock
+    runtime.run = (command, args, cwd, build, timeoutMs) => {
+      if (!build) return run(command, args, cwd, build)
+      limits.push(timeoutMs!)
+      if (timeoutMs! < 6 * 60_000) { clock += timeoutMs!; throw timedOut }
+      clock += 6 * 60_000
+      return run(command, args, cwd, build)
+    }
+    const total = buildSteps().length
+    let ticks = 0
+    let result = await updater().update(true)
+    while (result.outcome === 'deferred' && ticks++ < 3 * total) {
+      expect(result.detail).not.toContain('of 3')
+      clock += 5 * 60_000
+      result = await updater().update(true)
+    }
+    expect(result.outcome).toBe('deployed')
+    expect(ticks).toBeGreaterThan(total / 3)
+    // No step was ever given time past the window, and none ran longer than the step limit.
+    expect(Math.max(...limits)).toBeLessThanOrEqual(BUILD_STEP_LIMIT_MS)
+    // Some steps were cut short by the window, and every step completed exactly once.
+    expect(limits.some((l) => l < 6 * 60_000)).toBe(true)
+    const npm = commands.filter((c) => c[0] === 'npm').map((c) => c.join(' '))
+    expect(npm).toHaveLength(buildSteps().filter((s) => s.command === 'npm').length)
+    expect(new Set(npm).size).toBe(npm.length)
+    await expect(fs.access(path.join(config.stateDir, 'failed.json'))).rejects.toThrow()
+  })
+
+  it('does not start a step with too little of the window left', async () => {
+    let clock = 0
+    const run = runtime.run
+    runtime.now = () => clock
+    runtime.run = (command, args, cwd, build, timeoutMs) => {
+      if (build) clock += BUILD_WINDOW_MS - 60_000
+      return run(command, args, cwd, build, timeoutMs)
+    }
+    expect(await updater().update(true)).toMatchObject({ outcome: 'deferred', detail: expect.stringContaining('1 of') })
+    expect(commands.filter((c) => c[0] === 'npm')).toHaveLength(1)
+  })
+
   it('quarantines a commit whose build keeps timing out', async () => {
     const timedOut = Object.assign(new Error('spawnSync npm ETIMEDOUT'), { code: 'ETIMEDOUT' })
     const run = runtime.run
@@ -221,7 +269,8 @@ describe('updater boundaries', () => {
   it('keeps credentials and provider/node identity out of build environments', () => {
     expect(buildEnvironment({ PATH: '/usr/bin', HOME: '/fixture', PROD_DB_URL: 'secret',
       NODETERM_NODE_ID: 'live-node', NODETERM_DATA_DIR: '/live', OPENAI_API_KEY: 'secret' }))
-      .toEqual({ PATH: '/usr/bin', HOME: '/fixture', NODE_OPTIONS: '--max-old-space-size=4096', npm_config_jobs: '2' })
+      .toEqual({ PATH: '/usr/bin', HOME: '/fixture', NODE_OPTIONS: '--max-old-space-size=4096', npm_config_jobs: '2',
+        NODETERM_TEST_TIMEOUT_SCALE: '4' })
   })
   it('requires known idle health and original pane pids', () => {
     expect(mayRestart(healthy)).toBe(true)

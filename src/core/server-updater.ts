@@ -20,11 +20,14 @@ interface Health {
   deliveryQueueDepths: Record<string, number>
 }
 export interface UpdateRuntime {
-  run(command: string, args: string[], cwd?: string, build?: boolean): string
+  /** `timeoutMs` overrides the default limit (15 min for a build step, 30 s otherwise). */
+  run(command: string, args: string[], cwd?: string, build?: boolean, timeoutMs?: number): string
   ops(route: string): Promise<unknown>
   sleep(ms: number): Promise<void>
   availableMemoryMb(): Promise<number>
   runningDirectory(): Promise<string>
+  /** Clock for the build window; Date.now when absent. */
+  now?(): number
 }
 interface Status { outcome: string; sha?: string; detail?: string; at?: string }
 
@@ -48,17 +51,56 @@ export function buildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
   for (const key of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'])
     if (source[key]) env[key] = source[key]
-  return { ...env, NODE_OPTIONS: '--max-old-space-size=4096', npm_config_jobs: '2' }
+  // The updater builds on a host shared with every agent session, so its test step runs under
+  // load. One scale on vitest's default test and hook timeouts (vitest.config.ts) keeps a test
+  // that is merely slow there from failing as if it were wrong. Tests with their own explicit
+  // timeouts are unchanged, and no test is skipped.
+  return { ...env, NODE_OPTIONS: '--max-old-space-size=4096', npm_config_jobs: '2', NODETERM_TEST_TIMEOUT_SCALE: '4' }
 }
 
 /** Timed-out build attempts per commit before it is quarantined like any other failure. */
 export const BUILD_TIMEOUT_ATTEMPTS = 3
 
+/** The longest any one build step may run. A step that needs more than this is a failure. */
+export const BUILD_STEP_LIMIT_MS = 15 * 60_000
+/**
+ * The part of one updater run that build steps may use. The systemd job is stopped at 20 min
+ * (`TimeoutStartSec`, written by update-install and not refreshed by a deploy); activation already
+ * refuses to start after 16 min. A step is never given time past this window, so systemd never
+ * stops the job mid-step, which would lose the step's outcome and any timeout count.
+ */
+export const BUILD_WINDOW_MS = 16 * 60_000
+/** Less than this left in the window: stop and continue on the next tick instead of starting. */
+export const BUILD_MIN_START_MS = 2 * 60_000
+/**
+ * The test suite runs as this many vitest shards, each its own resumable step. On a loaded host
+ * the whole suite took about two hours under the updater's CPU quota (2026-11-17), so no single
+ * run could hold it; a shard fits one tick.
+ */
+export const TEST_SHARDS = 12
+
+/** The build, in order. Each step is recorded when it passes and skipped on a later tick. */
+export function buildSteps(shards = TEST_SHARDS): { name: string; command: string; args: string[] }[] {
+  return [
+    { name: 'ci', command: 'npm', args: ['ci', '--ignore-scripts'] },
+    { name: 'patch-node-pty', command: 'node', args: ['scripts/patch-node-pty.mjs'] },
+    { name: 'rebuild-node-pty', command: 'npm', args: ['rebuild', 'node-pty'] },
+    { name: 'typecheck', command: 'npm', args: ['run', 'typecheck'] },
+    ...Array.from({ length: shards }, (_, i) => ({
+      name: `test-${i + 1}-of-${shards}`, command: 'npm',
+      args: ['test', '--', '--maxWorkers=2', `--shard=${i + 1}/${shards}`]
+    })),
+    { name: 'build', command: 'npm', args: ['run', 'build'] },
+    { name: 'server-build', command: 'npm', args: ['run', 'server:build'] },
+    { name: 'updater-build', command: 'npm', args: ['run', '--if-present', 'updater:build'] }
+  ]
+}
+
 export function systemUpdateRuntime(config: UpdateConfig): UpdateRuntime {
   return {
-    run(command, args, cwd, build) {
+    run(command, args, cwd, build, timeoutMs) {
       return execFileSync(command, args, {
-        cwd, encoding: 'utf8', timeout: build ? 15 * 60_000 : 30_000,
+        cwd, encoding: 'utf8', timeout: timeoutMs ?? (build ? BUILD_STEP_LIMIT_MS : 30_000),
         maxBuffer: 32 * 1024 * 1024, env: buildEnvironment(process.env),
         ...(build ? { stdio: ['ignore', 'inherit', 'inherit'] as ['ignore', 'inherit', 'inherit'] } : {})
       }) ?? ''
@@ -193,7 +235,8 @@ export class ServerUpdater {
     }
   }
   async update(apply: boolean, retry = false): Promise<Status> {
-    const started = Date.now()
+    const now = () => this.runtime.now?.() ?? Date.now()
+    const started = now()
     await fs.mkdir(this.config.stateDir, { recursive: true, mode: 0o700 })
     let sha: string | undefined
     let phase = 'fetch'
@@ -227,14 +270,32 @@ export class ServerUpdater {
           throw new Error('Release worktree points at a different commit')
         if (this.runtime.run('git', ['-C', release, 'status', '--porcelain', '--untracked-files=no']).trim())
           throw new Error('Release worktree has source edits; preserving them')
-        this.runtime.run('npm', ['ci', '--ignore-scripts'], release, true)
-        this.runtime.run('node', ['scripts/patch-node-pty.mjs'], release, true)
-        this.runtime.run('npm', ['rebuild', 'node-pty'], release, true)
-        this.runtime.run('npm', ['run', 'typecheck'], release, true)
-        this.runtime.run('npm', ['test', '--', '--maxWorkers=2'], release, true)
-        this.runtime.run('npm', ['run', 'build'], release, true)
-        this.runtime.run('npm', ['run', 'server:build'], release, true)
-        this.runtime.run('npm', ['run', '--if-present', 'updater:build'], release, true)
+        // Resumable: each passed step is recorded in the release for this commit, and a later tick
+        // continues from the first step not recorded. Steps are given only the time left in this
+        // run's build window; one the window cuts short is run again, with a full limit, next tick.
+        const progressFile = path.join(release, '.updater-steps.json')
+        let done: string[] = []
+        try {
+          const progress = JSON.parse(await fs.readFile(progressFile, 'utf8')) as { sha?: string; done?: unknown }
+          if (progress.sha === sha && Array.isArray(progress.done)) done = progress.done.filter((d): d is string => typeof d === 'string')
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        const steps = buildSteps()
+        for (const step of steps) {
+          if (done.includes(step.name)) continue
+          const left = started + BUILD_WINDOW_MS - now()
+          if (left < BUILD_MIN_START_MS)
+            return this.status('deferred', sha, `Build continues on the next tick (${done.length} of ${steps.length} steps done)`)
+          const limit = Math.min(BUILD_STEP_LIMIT_MS, left)
+          try {
+            this.runtime.run(step.command, step.args, release, true, limit)
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT' && limit < BUILD_STEP_LIMIT_MS)
+              return this.status('deferred', sha, `Build step ${step.name} reached the end of this run; it restarts on the next tick (${done.length} of ${steps.length} steps done)`)
+            throw error
+          }
+          done = [...done, step.name]
+          await writeFileAtomic(progressFile, JSON.stringify({ sha, done }))
+        }
         await fs.access(path.join(release, 'out', 'server', 'main.cjs'))
         await fs.access(path.join(release, 'out', 'renderer', 'index.html'))
         await writeFileAtomic(readyFile, JSON.stringify({ sha, at: new Date().toISOString() }))
@@ -242,7 +303,7 @@ export class ServerUpdater {
       if (!apply) return this.status('staged', sha)
       // The systemd job has a 20-minute limit. Never enter activation near that deadline: leave
       // enough time for both restart/health windows and rollback, then apply on the next tick.
-      if (Date.now() - started > 16 * 60_000)
+      if (now() - started > BUILD_WINDOW_MS)
         return this.status('staged', sha, 'Build completed; reserving activation for the next tick')
       phase = 'preflight'
       const health = await this.runtime.ops('health') as Health
