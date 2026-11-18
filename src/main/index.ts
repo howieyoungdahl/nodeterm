@@ -186,6 +186,7 @@ import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
+import { safeLocalTranscriptPathFollowingLinks } from '../core/transcript-jail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
@@ -252,7 +253,6 @@ import {
   registerClaudeAccountsSource
 } from '../core/claude-config-dir'
 import {
-  isSafeLocalTranscriptPath,
   isSafeRemoteTranscriptPath,
   remoteAccountConfigDirAbs
 } from '../core/claude-accounts-core'
@@ -2614,15 +2614,13 @@ app.whenReady().then(async () => {
     // Linked accounts' dirs come from SETTINGS, never from the POST — `<dir>/projects/**` only,
     // so `~/.claude-2/.ssh` is as refused as it ever was. Without them the meter and the subagent
     // cards silently never fill for a pane running the user's own CLAUDE_CONFIG_DIR.
-    return isSafeLocalTranscriptPath(
+    return safeLocalTranscriptPathFollowingLinks(
       abs,
       homedir(),
       app.getPath('userData'),
       codexHome(),
       linkedClaudeConfigDirs()
     )
-      ? abs
-      : undefined
   }
   // Remote analogue of safeTranscriptPath: a remote node's transcript_path is a remote absolute
   // path arriving over the reverse tunnel — a forged POST must not read an arbitrary remote file.
