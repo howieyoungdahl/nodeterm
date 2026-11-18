@@ -52,6 +52,23 @@ describe('seedFromSnapshot — what it paints', () => {
     })
   })
 
+  it('seeds a session the agent ended as EXITED after a reload, and live events move it on', () => {
+    // A tab reloaded after a card's Claude exited must not paint UNKNOWN: the mirror kept the end.
+    const store = session()
+    const endedAt = NOW - 30 * 60_000
+    store.getState().seedFromSnapshot(snap({ n1: { agentId: 'claude', endedAt, updatedAt: endedAt } }), NOW)
+    expect(store.getState().byId.n1).toMatchObject({ endedAt, stateAt: endedAt })
+    store.getState().setSessionPhase('n1', 'start', 'claude')
+    expect(store.getState().byId.n1?.endedAt).toBeUndefined()
+    // An end the mirror did not stamp as this agent exiting (a nested claude -p) is not an exit.
+    store.getState().setSessionPhase('n1', 'end', 'claude')
+    expect(store.getState().byId.n1?.endedAt).toBeUndefined()
+    store.getState().setSessionPhase('n1', 'end', 'claude', { exited: true })
+    expect(store.getState().byId.n1?.endedAt).toEqual(expect.any(Number))
+    store.getState().setState('n1', 'working', 'claude')
+    expect(store.getState().byId.n1?.endedAt).toBeUndefined()
+  })
+
   it('fills agentId/sessionId only when the store has none of its own', () => {
     // Local identity wins: `agentId`/`sessionId` hydrate from localStorage for a hand-launched
     // agent, and the mirror can lag a pane relaunched while the app was down.

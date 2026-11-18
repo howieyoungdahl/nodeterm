@@ -34,7 +34,7 @@ export interface ProjectInput {
   nodes: SessionNodeInput[]
 }
 
-export type StatusKind = 'working' | 'attention' | 'done' | 'unknown'
+export type StatusKind = 'working' | 'attention' | 'done' | 'exited' | 'unknown'
 
 /** Sessions sidebar top-level grouping mode. */
 export type SidebarGrouping = 'project' | 'status'
@@ -43,6 +43,7 @@ export const STATE_LABEL: Record<StatusKind, string> = {
   working: 'Running',
   attention: 'Waiting for your response',
   done: 'Done',
+  exited: 'Exited',
   unknown: 'Task unobserved'
 }
 
@@ -79,7 +80,8 @@ export function sessionStatusGroup(kind: StatusKind, unread: boolean): StatusGro
   if (kind === 'attention') return 'attention'
   if (kind === 'working') return 'working'
   if (unread) return 'unread'
-  if (kind === 'done') return 'idle'
+  // An exited agent is settled like a read finished turn: nothing is running and nothing asks.
+  if (kind === 'done' || kind === 'exited') return 'idle'
   return 'unknown'
 }
 
@@ -193,8 +195,9 @@ export function sessionStatusKind(
   state: AgentNodeStatus['state'],
   endedAt?: AgentNodeStatus['endedAt']
 ): StatusKind {
-  // The agent ended its own session: settled, like a finished turn, not "unobserved".
-  if (!state && endedAt !== undefined) return 'done'
+  // The agent ended its own session: a reported fact, not "unobserved", and not a finished turn
+  // waiting at a prompt either (there is no prompt), so it has its own kind and word.
+  if (!state && endedAt !== undefined) return 'exited'
   switch (state) {
     case 'working':
       return 'working'

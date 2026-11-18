@@ -274,7 +274,8 @@ export interface AgentStatusStore {
     id: string,
     phase: 'start' | 'end',
     agentId?: AgentId,
-    opts?: { ownSession?: boolean }
+    /** `exited`: the mirror recorded this end as the node's own agent leaving. */
+    opts?: { exited?: boolean }
   ): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
@@ -714,7 +715,7 @@ export function createAgentStatusSession(
       store.getState().setState(id, undefined, agentId)
       const now = Date.now()
       const reports = reportsSessionEnd(agentId)
-      const endedAt = phase === 'end' && reports && opts?.ownSession !== false ? now : undefined
+      const endedAt = phase === 'end' && reports && opts?.exited === true ? now : undefined
       set((s) => ({ byId: { ...s.byId, [id]: { ...(s.byId[id] ?? EMPTY), idleSince: phase === 'start' && reports ? now : undefined, endedAt, stateAt: now, lastEventAt: now } } }))
     },
 

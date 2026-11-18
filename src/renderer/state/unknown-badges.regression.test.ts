@@ -23,7 +23,7 @@ describe('status recovery', () => {
     store.getState().sweepStaleWorking(-1)
     expect(statusViewFor(store.getState().byId.n, Date.now()).kind).toBe('unknown')
     store.getState().setSessionPhase('n', 'start', 'claude')
-    store.getState().setSessionPhase('n', 'end', 'claude')
+    store.getState().setSessionPhase('n', 'end', 'claude', { exited: true })
     expect(statusViewFor(store.getState().byId.n, Date.now()).kind).toBe('exited')
     // An older snapshot cannot overwrite the live exit.
     store.getState().seedFromSnapshot({ takenAt: now, nodes: { n: { updatedAt: now, idleSince: now } } }, now)

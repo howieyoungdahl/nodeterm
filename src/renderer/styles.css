@@ -7286,6 +7286,7 @@ button.group-node__setup:disabled {
 
 .ss-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
 .ss-dot--unknown { background: var(--muted-2); }
+.ss-dot--exited { background: var(--muted); }
 /* A finished turn the user has already seen: a quiet, filled success dot (the unread state
    promotes to the pulsing check instead — see SessionRow). */
 .ss-dot--done { background: var(--success); }

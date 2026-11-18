@@ -62,6 +62,14 @@ export interface MirrorEntry extends CodexStatusMetadata {
    * badge for "nothing reported" — when the agent had in fact said it was leaving.
    */
   endedAt?: number
+  /**
+   * The session that OWNS this node: taken from a session start only while no session is live
+   * here (first start, or a start after a recorded end). A `claude -p` run inside the pane
+   * inherits the node's identity and posts its own start and end; its start must not take the
+   * node over, or its end would read as this agent exiting. `sessionId` cannot serve, because
+   * every event (the nested one's included) overwrites it.
+   */
+  ownerSessionId?: string
   agentId?: AgentId
   sessionId?: string
   /**
@@ -197,6 +205,7 @@ export interface MirrorFile {
       state?: AgentState
       idleSince?: number
       endedAt?: number
+      ownerSessionId?: string
       agentId?: AgentId
       sessionId?: string
       /** Observed Claude account (see MirrorEntry.account). Additive — absent on old files and
@@ -413,6 +422,10 @@ export function reduceEntry(
   now: number
 ): MirrorEntry {
   const next: MirrorEntry = prev ? { ...prev } : { updatedAt: now }
+  // Read off `prev` before identity capture below overwrites `sessionId`. An entry written before
+  // `ownerSessionId` existed falls back to its last session id.
+  const priorOwner = prev?.ownerSessionId ?? prev?.sessionId
+  const sessionLive = prev !== undefined && prev.endedAt === undefined && priorOwner !== undefined
   /**
    * Commit a state onto `next` — and everything that must move WITH it. One function rather than
    * the same four lines at each branch, because the alternative was measured: of the three branches
@@ -525,13 +538,18 @@ export function reduceEntry(
     commitState(undefined, false)
     // A crash without SessionEnd leaves IDLE, just as it leaves COMPLETED for done.
     if (ev.sessionPhase === 'start' && reportsSessionEnd(ev.agentId)) next.idleSince = now
-    // A clean exit is a positive fact too. Only the node's OWN session may report it: an end
-    // carrying a different session id than the one this node is running is some other process
-    // (a nested `claude -p` inheriting the pane's environment), not this agent leaving.
+    if (ev.sessionPhase === 'start' && reportsSessionEnd(ev.agentId)) {
+      // A start while another session is live here is a nested run, not a new owner.
+      if (sessionLive) next.ownerSessionId = priorOwner
+      else if (ev.sessionId) next.ownerSessionId = ev.sessionId
+      else delete next.ownerSessionId
+    }
+    // A clean exit is a positive fact too, but only from the session that owns the node: an end
+    // from any other session id is a nested `claude -p` finishing, not this agent leaving.
     if (
       ev.sessionPhase === 'end' &&
       reportsSessionEnd(ev.agentId) &&
-      (!ev.sessionId || !prev?.sessionId || ev.sessionId === prev.sessionId)
+      (!ev.sessionId || !priorOwner || ev.sessionId === priorOwner)
     ) {
       next.endedAt = now
     }
@@ -601,6 +619,7 @@ export function buildFile(
       state: e.state,
       ...(e.idleSince !== undefined ? { idleSince: e.idleSince } : {}),
       ...(e.endedAt !== undefined && !e.state ? { endedAt: e.endedAt } : {}),
+      ...(e.ownerSessionId ? { ownerSessionId: e.ownerSessionId } : {}),
       agentId: e.agentId,
       sessionId: e.sessionId,
       // Spread-when-present, like `name`/`hibernated`: a node that never posted a claude payload
@@ -1236,6 +1255,7 @@ function loadPersisted(file: string): void {
           state: e.state,
           ...(typeof e.idleSince === 'number' && Number.isFinite(e.idleSince) && !e.state ? { idleSince: e.idleSince } : {}),
           ...(typeof e.endedAt === 'number' && Number.isFinite(e.endedAt) && !e.state ? { endedAt: e.endedAt } : {}),
+          ...(typeof e.ownerSessionId === 'string' && e.ownerSessionId ? { ownerSessionId: e.ownerSessionId } : {}),
           agentId: e.agentId,
           sessionId: e.sessionId,
           // Identity survives the restart like agentId/sessionId does — for a hand-launched
@@ -1349,6 +1369,11 @@ export function recordAgentEvent(ev: NormalizedAgentEvent): NormalizedAgentEvent
   let out = ev
   if (ev.kind === 'state' && ev.state === 'done' && next.awaitingInput && next.state === 'waiting') {
     out = { ...ev, state: 'waiting' }
+  }
+  // Same idea for an exit: the reducer decided whether this end was the node's own agent leaving
+  // (session ownership), so the broadcast carries that verdict rather than every consumer guessing.
+  if (ev.kind === 'session' && ev.sessionPhase === 'end' && next.endedAt === now) {
+    out = { ...out, sessionEnded: true }
   }
   const classification = produceInboxFromState(nodeId, out, prevState, next.state, now)
   scheduleWrite()
