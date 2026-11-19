@@ -13,6 +13,7 @@ helper can call that client without editing its conversation credential, grants 
 ```sh
 node scripts/nodeterm-operator.mjs --url http://127.0.0.1:8443 --credential-file /protected/path/fern-operator.token capabilities
 node scripts/nodeterm-operator.mjs --url http://127.0.0.1:8443 --credential-file /protected/path/fern-operator.token sessions
+node scripts/nodeterm-operator.mjs --url http://127.0.0.1:8443 --credential-file /protected/path/fern-operator.token --target-file /protected/path/target.json status
 node scripts/nodeterm-operator.mjs --url http://127.0.0.1:8443 --credential-file /protected/path/fern-operator.token --target-file /protected/path/target.json --limit 50 read
 node scripts/nodeterm-operator.mjs --url http://127.0.0.1:8443 --credential-file /protected/path/fern-operator.token --target-file /protected/path/target.json --idempotency-key fern-20260930-01 send < message.txt
 node scripts/nodeterm-operator.mjs --url http://127.0.0.1:8443 --credential-file /protected/path/fern-operator.token --id 00000000-0000-4000-8000-000000000000 receipt
@@ -72,6 +73,8 @@ Authenticated native parent hooks establish identity and attach a jailed transcr
 
 After a Server restart, saved cards and mirrors remain discovery hints only. The first new authenticated parent hook establishes a fresh boot generation, including a hook with no UI state transition. Idle sessions that emit no authenticated hook remain unavailable. This code does not scan private sessions, wake providers, or derive authority from a saved title, status or transcript file. Re-enumerate when fresh hook evidence arrives.
 
+For a target that is still listed, `status` is a read-only diagnostic for a message-authorized principal. It reports the current mirror observation: `no_status`, `restored`, `invalid_time`, `expired`, `identity_mismatch`, `unverified`, `inferred_idle`, `unknown_state`, `busy`, `recorded_done`, or `unavailable`. `expired` means the observation is older than the six-hour delivery horizon; it does not mean that the process exited. `recorded_done` only describes the recorded state: it does not establish the current process, composer, permission, or delivery eligibility. The response is explicitly marked `diagnosticOnly`. It neither refreshes identity nor sends, queues, or retries a message. An idle session with no fresh hook is still unavailable after a Server restart. If the target itself is stale, the endpoint refuses it and the caller must re-enumerate; it never adopts a session from a saved mirror.
+
 ## Lifecycle, receipts, and rollback
 
 Policy edits take effect without a restart. Removing the last applicable read grant denies later reads. Removing the last applicable message grant denies receipt retrieval and unsent deliveries, including queued messages. Removing the principal revokes both operations. Remaining exact grants continue to apply after a standing tag is removed. An async operation retains the original principal id as well as the bearer and target. Revocation during durable admission records a failed receipt while preserving deduplication; it never dispatches that message. Revocation cannot retract bytes already submitted to a provider. An acknowledgement arriving later may still update the durable receipt as historical evidence, but callers lacking current message authority cannot retrieve it. Restarting the server changes session generations; operators must call `sessions` again, obtain the fresh exact target, and submit a new idempotency key only for a genuinely new message. There is no queued-message replay after restart.
@@ -88,6 +91,7 @@ All routes require the separate bearer credential and return `version: 1`. Brows
 | --- | --- |
 | `GET /opsapi/v1/capabilities` | Protocol and independent read/message availability |
 | `GET /opsapi/v1/sessions` | Approved, verified targets with boot/session generation |
+| `GET /opsapi/v1/session-status?projectId=.&nodeId=.&sessionId=.&generation=.` | Message-scoped mirror observation, not a delivery or identity proof |
 | `GET /opsapi/v1/conversation?projectId=…&nodeId=…&sessionId=…&generation=…&limit=50&cursor=…` | Ordered snapshot page |
 | `POST /opsapi/v1/messages` | JSON `{ "target": {…}, "text": "…" }`; required `Idempotency-Key` header |
 | `GET /opsapi/v1/receipts/<receipt-id>` | That caller's receipt, requiring current message scope |

@@ -148,6 +148,9 @@ hooks from replacing a resumed rollout. Recognized authenticated parent hooks ca
   Filtering private channels and redacting public blocks precede item/page splitting. Existing
   whole-file, snapshot, item, cache and concurrent-read caps still apply. The disposable hook HTTP
   regression must read after the first hook, without a later `Stop` concealing path loss.
+  The read-only operator status diagnostic describes mirror observations only. It never authorizes
+  delivery or recreates a binding. A synthetic stale-working sweep clears `stateVerified` for every
+  provider; a verified working event cannot prove the sweep's inferred done state.
   `SpawnHandlerState` synchronously observes both serialized preparation and parallel external
   launches, so health remains readable while its oldest operation is wedged. Management node
   creation and rename/resize have separate strict `/opsapi/nodes` routes. Assistant organization

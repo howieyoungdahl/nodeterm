@@ -83,6 +83,30 @@ async function read(target: OperatorSessionTarget) {
 }
 
 describe('operator authenticated hook coverage', () => {
+  it('reports mirror status without reviving an old binding after a disposable Server restart', async () => {
+    const policy = path.join(dataDir, OPERATOR_POLICY_FILE)
+    const value = JSON.parse(fs.readFileSync(policy, 'utf8'))
+    value.principals[0].message = [{ kind: OPERATOR_STANDING_SCOPE_KIND }]
+    fs.writeFileSync(policy, JSON.stringify(value), { mode: 0o600 })
+    await hook('SessionStart')
+    await hook('Stop')
+    const original = (await targets())[0]
+    const status = async (target: OperatorSessionTarget) => {
+      const response = await fetch(`${base}/opsapi/v1/session-status?${new URLSearchParams({ ...target })}`, { headers: auth })
+      return { status: response.status, body: await response.json() }
+    }
+    expect(await status(original)).toMatchObject({ status: 200, body: { observation: 'recorded_done', diagnosticOnly: true } })
+    await server!.close()
+    server = await startServer(config())
+    base = `http://127.0.0.1:${server.port}`
+    expect(await targets()).toEqual([])
+    expect(await status(original)).toMatchObject({ status: 409, body: { error: 'stale_target' } })
+    await hook('Stop')
+    const rebound = (await targets())[0]
+    expect(rebound.generation).not.toBe(original.generation)
+    expect(await status(rebound)).toMatchObject({ status: 200, body: { observation: 'recorded_done', diagnosticOnly: true } })
+  })
+
   it('attaches the first authenticated SessionStart path before a later Stop', async () => {
     await hook('SessionStart')
     const target = (await targets())[0]
