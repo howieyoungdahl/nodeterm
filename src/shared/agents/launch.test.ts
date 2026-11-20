@@ -104,6 +104,27 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
       assembleLaunchCommand({ agentId: 'codex', remoteControl: 'wrong provider' }, ENV).command
     ).toBe('codex')
   })
+
+  it('emits an explicit Codex sandbox after the approval flag, for codex only', () => {
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'codex',
+          initialPrompt: 'push it',
+          permissionMode: 'bypassPermissions',
+          sandbox: 'danger-full-access',
+          sharedIdentity: true
+        },
+        ENV
+      ).command
+    ).toBe("nodeterm-codex 'push it' --ask-for-approval never --sandbox 'danger-full-access'")
+    expect(assembleLaunchCommand({ agentId: 'codex', sandbox: 'workspace-write' }, ENV).command).toBe(
+      "codex --sandbox 'workspace-write'"
+    )
+    expect(assembleLaunchCommand({ agentId: 'claude', sandbox: 'danger-full-access' }, ENV).command).toBe(
+      'claude'
+    )
+  })
 })
 
 describe('assembleResumeCommand — Copilot', () => {

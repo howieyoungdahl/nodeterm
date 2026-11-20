@@ -292,6 +292,17 @@ describe('generated Codex launcher', () => {
       expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc do work'])
     })
 
+    it('lifts the trailing approval + sandbox pair a canvas `open-agent --sandbox` launch types', async () => {
+      // Exact argv of `nodeterm-codex 'commit and push' --ask-for-approval never --sandbox
+      // 'danger-full-access'` (shared/agents/launch.ts) once the pane's shell has parsed it.
+      await callLauncher(['commit and push', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access'])
+      expect(started[0]?.permissions).toEqual({
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access'
+      })
+      expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc commit and push'])
+    })
+
     it('every spelling: -a X, -aX, --sandbox=X, -s X, and the two -c keys (TOML quotes stripped); other -c stay', async () => {
       await callLauncher([
         '-c', 'approval_policy="untrusted"',
