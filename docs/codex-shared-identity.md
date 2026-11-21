@@ -125,7 +125,7 @@ If secure storage is unavailable the whole feature stays off — `codexIdentityC
 | `POST /codex-thread/fallback` | tokenless, or matching | mark the node as running plain codex |
 
 `start` mints through a five-step conversation (`initialize`, `thread/start`, an empty
-`turn/start`, `turn/interrupt`, `thread/fork` before that turn, `thread/delete` of the seed).
+`turn/start`, `turn/interrupt`, `thread/fork` before that turn, `thread/archive` of the seed).
 `thread/start` alone creates only app-server metadata and does **not** materialize the rollout file
 — a second client's `thread/resume` then fails with "no rollout found", which is precisely what the
 launcher does one line later. The fork-and-delete dance produces a thread with zero user turns and
@@ -359,7 +359,7 @@ PR #112, all still to be sliced.
    kill-session`, Ctrl-C mid-mint — still leaves the handler to finish and write its record. That is
    bounded now: §2's pruning removes it with the node, and the next launch mints a fresh thread
    anyway. (b) An app-server that aborts mid-conversation can leave the seed and/or the forked
-   thread alive on ITS side, because the closing `thread/delete` may never be sent. Orphan
+   thread alive on ITS side, because the closing `thread/archive` may never be sent. Orphan
    *threads* have no reaper anywhere — not here and not in codex.
 5. **`CODEX_HOME` is resolved twice**: the desktop resolves the app-server socket from the Electron
    process's environment, the pane resolves `--remote unix://` from its own. Identical unless a user
