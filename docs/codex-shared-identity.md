@@ -128,8 +128,9 @@ If secure storage is unavailable the whole feature stays off — `codexIdentityC
 `turn/start`, `turn/interrupt`, `thread/fork` before that turn, `thread/archive` of the seed).
 `thread/start` alone creates only app-server metadata and does **not** materialize the rollout file
 — a second client's `thread/resume` then fails with "no rollout found", which is precisely what the
-launcher does one line later. The fork-and-delete dance produces a thread with zero user turns and
-a valid rollout without the deprecated rollback API.
+launcher does one line later. The fork-and-archive sequence produces a thread with zero user turns
+and a valid rollout without the deprecated rollback API. Each fresh launch leaves one archived seed
+of about 30 KB in `archived_sessions`, and nothing prunes those seeds.
 
 That conversation runs against a server that is typically **cold** (the first Codex node after
 boot). Three budgets have to stay ordered, and the ordering is the whole point:
