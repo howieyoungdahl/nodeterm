@@ -38,9 +38,8 @@ const SOCKET_WAIT_ATTEMPTS = 3
 const SOCKET_WAIT_MS = 200
 
 /**
- * How long a started thread's connection stays open to finish deleting its seed after the caller
- * already has its answer. Measured on a busy shared daemon at 28 s and 49 s, so well above that;
- * the timer is unref'd and never holds the process open.
+ * How long a started thread's connection stays open to archive its seed after the caller
+ * already has its answer. The timer is unref'd and never holds the process open.
  */
 export const CODEX_THREAD_SEED_CLEANUP_MS = 120_000
 
@@ -421,7 +420,7 @@ export function parseCodexThreadPermissions(form: {
  * rollout file, and a second client's `thread/resume` then fails with "no rollout found" — which
  * is precisely what the launcher does one line later. So the rollout is materialized by running
  * one empty turn, interrupting it the moment the server announces it, forking immediately BEFORE
- * that turn, and deleting the seed. The result is a thread with zero user turns and a valid
+ * that turn, and archiving the seed. The result is a thread with zero user turns and a valid
  * rollout, without the deprecated rollback API.
  */
 export async function startCodexThreadAt(
@@ -610,16 +609,12 @@ function startCodexThreadOnce(
         }
         const seedThreadId = threadId
         threadId = readyThreadId
-        // The fork is the thread the node resumes, and it is complete NOW. Removing the seed is
-        // cleanup, and on a busy shared daemon it is slow: the seed is still "active" from its
-        // interrupted turn, so `thread/delete` shuts it down first. On the live canvas that took
-        // 28 s and 49 s, past this whole call's budget, so every start timed out after a good fork
-        // and every Codex node fell back to plain codex. Answer with the fork first and let the
-        // delete finish on this same connection, bounded by its own timer. A seed whose delete
-        // fails or outlives that timer is an orphan thread with no record and no node: wasted
-        // disk, never a wrong card.
+        // Answer with the fork first. Deleting the seed scans the store and blocks resume.
+        // Archiving retires the seed cheaply on the same connection, bounded by the cleanup timer.
+        // Each fresh launch leaves one small archived seed. A failed or slow archive leaves an
+        // orphan seed, never a wrong card.
         finish(null, threadId, { keepOpenMs: CODEX_THREAD_SEED_CLEANUP_MS })
-        ws.send(JSON.stringify({ id: 6, method: 'thread/delete', params: { threadId: seedThreadId } }))
+        ws.send(JSON.stringify({ id: 6, method: 'thread/archive', params: { threadId: seedThreadId } }))
       } else if (message.id === 6) {
         closeAfterCleanup()
       }

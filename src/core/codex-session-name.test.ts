@@ -45,11 +45,10 @@ threads.set('thread-preview', null)
 let initializeFails = false
 /** Every `thread/start` and `thread/fork` the fake daemon saw, with the params as sent. */
 let threadBirths: Array<{ method: string; params: Record<string, unknown> }> = []
-/** When set, the seed `thread/delete` is recorded but never answered (a busy daemon shutting it down). */
-let deleteHangs = false
-let deletesSeen: string[] = []
-/** Deletes held while `deleteHangs` is set. */
-let heldDeletes: Array<{ ws: WebSocket; id: unknown }> = []
+/** When set, hold the seed archive response until the test releases it. */
+let archiveHangs = false
+let seedCleanupRequests: Array<{ method: string; threadId: string }> = []
+let heldArchives: Array<{ ws: WebSocket; id: unknown }> = []
 
 async function waitFor(cond: () => boolean, ms = 2000): Promise<void> {
   const until = Date.now() + ms
@@ -63,7 +62,7 @@ function handle(ws: WebSocket): void {
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString()) as Record<string, any>
     // The materialization dance `startCodexThreadAt` runs: start → empty turn → interrupt → fork
-    // before that turn → delete the seed. Answered in order, with the two notifications the client
+    // before that turn → archive the seed. Answered in order, with the two notifications the client
     // waits for; only the params it SENT are under test here.
     if (msg.method === 'thread/start') {
       threadBirths.push({ method: msg.method, params: msg.params })
@@ -76,14 +75,14 @@ function handle(ws: WebSocket): void {
       ws.send(JSON.stringify({ method: 'turn/completed', params: { turn: { id: 'turn-boot' } } }))
       return
     }
-    if (msg.method === 'thread/delete') {
-      deletesSeen.push(msg.params?.threadId)
-      if (deleteHangs) {
-        heldDeletes.push({ ws, id: msg.id })
-        return
-      }
+    if (msg.method === 'thread/archive' || msg.method === 'thread/delete') {
+      seedCleanupRequests.push({ method: msg.method, threadId: msg.params?.threadId })
     }
-    if (msg.method === 'turn/interrupt' || msg.method === 'thread/delete') {
+    if (msg.method === 'thread/archive' && archiveHangs) {
+      heldArchives.push({ ws, id: msg.id })
+      return
+    }
+    if (msg.method === 'turn/interrupt' || msg.method === 'thread/archive') {
       ws.send(JSON.stringify({ id: msg.id, result: {} }))
       return
     }
@@ -158,29 +157,26 @@ describe('startCodexThreadAt', () => {
     }
   })
 
-  // On the live canvas the seed delete took 28 s and 49 s, so a start that waited for it timed out
-  // after a good fork and every Codex node fell back to plain codex, whose hooks never reach a card.
-  it('answers with the fork without waiting for the seed delete, and still sends that delete', async () => {
-    // A previous test's seed delete travels AFTER its start resolved; let it finish first so the
-    // only delete held here is this test's own.
+  it('returns the fork while the seed archive is pending', async () => {
+    // Drain the previous test's connection before holding archive responses.
     await waitFor(() => wss.clients.size === 0)
-    deleteHangs = true
-    deletesSeen = []
+    archiveHangs = true
+    seedCleanupRequests = []
     try {
       const id = await startCodexThreadAt(sock, dir, 1000)
       expect(id).toBe('thread-final')
-      await waitFor(() => heldDeletes.length > 0)
-      expect(deletesSeen).toEqual(['thread-seed'])
+      await waitFor(() => heldArchives.length > 0)
       // The late answer still arrives on the connection the client kept open, and ends it.
-      const held = heldDeletes
+      const held = heldArchives
       const closed = held.map(
         (h) => new Promise<void>((resolve) => h.ws.once('close', () => resolve()))
       )
       for (const h of held) h.ws.send(JSON.stringify({ id: h.id, result: {} }))
       await Promise.all(closed)
+      expect(seedCleanupRequests).toEqual([{ method: 'thread/archive', threadId: 'thread-seed' }])
     } finally {
-      deleteHangs = false
-      heldDeletes = []
+      archiveHangs = false
+      heldArchives = []
     }
   })
 
