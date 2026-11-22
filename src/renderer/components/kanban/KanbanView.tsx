@@ -3,7 +3,7 @@ import type { KanbanLabel, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
-import { useExternalBoard } from '../../state/externalTaskBoard'
+import { taskBoardHref, useExternalBoard } from '../../state/externalTaskBoard'
 import { useSettings } from '../../state/settings'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
@@ -542,10 +542,7 @@ export const KanbanView = memo(function KanbanView({
         ? ([{ type: 'submenu', label: 'Move to', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
         : []),
       workflowBoard ? { label: 'Open workflow board', icon: <IconExternal />, onClick: () => {
-        const url = new URL(workflowBoard)
-        const linked = externalTasks.get(nodeId)
-        if (linked) url.searchParams.set('task', linked.task)
-        window.open(url.toString(), '_blank', 'noopener,noreferrer')
+        window.open(taskBoardHref(workflowBoard, externalTasks.get(nodeId)?.task), '_blank', 'noopener,noreferrer')
       }} : { type: 'submenu', label: 'Priority', children: [
         ...PRIORITIES.map(priority => ({
           label: priority.label,

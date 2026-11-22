@@ -438,7 +438,7 @@ of surviving successors, including group children, so legacy saves preserve canv
 
 ## Testing
 
-The optional Server Edition task board reads an operator-configured feed. Keep
+The compact card and its detail view share task fields from the configured board. Distinguish physical columns from workflows and keep the workflow and stage readable at card width. The optional Server Edition task board reads an operator-configured feed. Keep
 its read credential in the server data plane and its card bindings scoped to
 the active project. See [creation-time work planning](docs/task-planning.md).
 

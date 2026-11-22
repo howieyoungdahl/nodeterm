@@ -1,20 +1,28 @@
 import { assessTaskUrgency, parseTaskPlanning } from '@shared/task-planning'
 import type { TaskPlanning } from '@shared/task-planning'
 import { useProjects } from '../state/projects'
-import { useExternalBoard } from '../state/externalTaskBoard'
+import { useProjectTaskLink } from '../state/externalTaskBoard'
 
 export function TaskPlanningBadge({ planning, nodeId }: { planning?: TaskPlanning; nodeId?: string }): JSX.Element {
-  const project = useProjects(s => s.projects.find(p => p.nodes.some(n => n.id === nodeId)))
-  const meta = project?.kanban?.meta?.find(m => m.nodeId === nodeId)
-  const linked = useExternalBoard(s => nodeId ? s.tasks.get(nodeId) : undefined)
-  const boardUrl = useExternalBoard(s => s.project === project?.id ? s.url : null)
-  const available = useExternalBoard(s => s.available)
-  if (boardUrl && linked) return <span className="node-account-chip" title={[linked.task,linked.reason].filter(Boolean).join(' · ')}>
-    {[linked.workflow ?? 'Unassigned workflow', linked.stage, linked.urgency, linked.priority].filter(Boolean).join(' / ')}
-  </span>
-  if (boardUrl) return <span className="node-account-chip">
-    {[meta?.category && meta.category !== 'needs-classification' ? meta.category.replaceAll('-', ' ') : undefined, available ? 'No verified task link' : 'Work board unavailable'].filter(Boolean).join(' / ')}
-  </span>
+  const external = useProjectTaskLink(nodeId)
+  const meta = useProjects(s => s.projects.find(p => p.nodes.some(n => n.id === nodeId))?.kanban?.meta?.find(m => m.nodeId === nodeId))
+  if (external) {
+    const task = external.task
+    if (!task) return <span className="task-planning-facts">
+      {meta?.category && meta.category !== 'needs-classification' && <span className="task-planning-chip"
+        title="Local category">{meta.category.replaceAll('-', ' ')}</span>}
+      <span className="task-planning-note">{external.available ? 'No verified task link' : 'Work board unavailable'}</span>
+    </span>
+    return <span className="task-planning-facts" aria-label="Task details">
+      <span className="task-planning-chip task-planning-chip--workflow" title={`Workflow for ${task.task}`}>
+        {task.workflow ?? 'Unassigned workflow'}
+      </span>
+      <span className="task-planning-chip" title="Work Board stage">{task.stage}</span>
+      {task.urgency && <span className="task-planning-timing" data-urgent={task.urgent || undefined}
+        title={task.reason ?? 'Work Board urgency'}>{task.urgency}</span>}
+      {task.priority && <span className="task-planning-rank" title="Assigned priority">{task.priority}</span>}
+    </span>
+  }
   const value = parseTaskPlanning(planning)
   if (!value) return <span className="node-account-chip" title={meta?.categoryReason ?? 'No verified creation-time category or urgency assessment is recorded.'}>
     {meta?.category?.replaceAll('-', ' ') ?? 'Needs classification'}

@@ -1380,6 +1380,35 @@ body,
   border-radius: 6px;
 }
 
+.task-planning-facts {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.task-planning-chip {
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: rgba(var(--tint-rgb), 0.09);
+  color: var(--text);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.task-planning-chip--workflow {
+  color: var(--accent-text);
+  background: rgba(10, 132, 255, 0.14);
+}
+.task-planning-timing, .task-planning-rank, .task-planning-note {
+  font-size: 11px;
+  color: var(--muted);
+}
+.task-planning-timing[data-urgent] { color: var(--warn); }
+
 /* Account folder missing at spawn → session fell back to the system account (orange warning). */
 .node-account-chip--warning {
   color: var(--warn);
@@ -9314,6 +9343,15 @@ button.group-node__setup:disabled {
   min-width: 0;
 }
 .kanban-modal__toolbar { flex-wrap: wrap; }
+.kanban-modal__location {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+}
+.kanban-modal__location .kanban-modal__column { margin-right: 0; }
+.kanban-modal__task-link { color: var(--accent-text); font-size: 12px; }
 .kanban-modal__title {
   flex: 1;
   min-width: 0;
@@ -9983,6 +10021,23 @@ button.group-node__setup:disabled {
   padding: 10px 16px;
   border-bottom: 1px solid rgba(var(--tint-rgb), 0.08);
 }
+.kanban-meta--workflow { flex-wrap: wrap; gap: 10px 24px; }
+.kanban-meta__task {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 18px;
+  margin: 0;
+  max-width: 100%;
+}
+.kanban-meta__task dt {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.kanban-meta__task dd { margin: 0; font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
+.kanban-meta__task .kanban-meta__urgency-reason { max-width: 42ch; color: var(--muted); font-size: 11px; }
 .kanban-meta__group {
   display: flex;
   flex-direction: column;

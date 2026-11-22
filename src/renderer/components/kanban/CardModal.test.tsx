@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectKanban } from '@shared/types'
 import { pushDialog, popDialog, resetDialogStack } from '../dialog-stack'
 import { CardModal } from './CardModal'
+import { useProjects } from '../../state/projects'
+import { useExternalBoard } from '../../state/externalTaskBoard'
 import type { KanbanSession } from './KanbanView'
 
 vi.mock('../../session/session', () => ({
@@ -19,10 +21,6 @@ vi.mock('../../session/session', () => ({
 // Stub non-terminal/non-browser child panels so CardModal tests run in isolation without store/context dependencies
 vi.mock('./BoardLogPanel', () => ({
   BoardLogPanel: () => null
-}))
-
-vi.mock('./CardMetaBar', () => ({
-  CardMetaBar: () => null
 }))
 
 vi.mock('../ContextMeter', () => ({
@@ -65,6 +63,49 @@ describe('CardModal', () => {
   afterEach(() => {
     resetDialogStack()
     document.body.innerHTML = ''
+  })
+
+  it('shows the linked task fields instead of the local planning defaults in the opened card', () => {
+    const session: KanbanSession = { id: 'term-1', kind: 'terminal', title: 'Terminal', color: '#fff', spawn: {} }
+    const localBoard: ProjectKanban = { ...board, meta: [{ nodeId:session.id, category:'research' }] }
+    const onChangeBoard = vi.fn()
+    const projectState = useProjects.getState()
+    const externalState = useExternalBoard.getState()
+    const root = createRoot(host)
+    const task = { nodeId: session.id, task: 'T-12', workflow: 'Agent tooling', stage: 'In progress',
+      urgency: 'This week', reason: 'Work is active', priority: null }
+    const fields = () => Object.fromEntries([...document.querySelectorAll('.kanban-meta__task dt')]
+      .map(label => [label.textContent, label.nextElementSibling?.textContent]))
+    try {
+      act(() => {
+        useProjects.setState({activeProjectId: 'p', projects: [{ ...projectState.projects[0], id: 'p',
+          nodes: [{ id: session.id, kind: 'terminal', title: session.title, position: { x: 0, y: 0 },
+            size: { width: 600, height: 400 }, color: session.color, group: null }] }]})
+        useExternalBoard.setState({ project: 'p', url: 'https://board.example/view', available: true,
+          tasks: new Map([[session.id, task]]) })
+        root.render(<CardModal session={session} board={localBoard} columnTitle="Release queue" onChangeBoard={onChangeBoard}
+          onClose={vi.fn()} onOpenCanvas={vi.fn()} onRename={vi.fn()} onEditSticky={vi.fn()} onBrowserNav={vi.fn()} />)
+      })
+      expect(fields()).toEqual({Workflow:'Agent tooling', Stage:'In progress', Urgency:'This week', Priority:'Unranked'})
+      expect(document.querySelector('.kanban-meta__urgency-reason')?.textContent).toBe('Work is active')
+      expect(document.querySelector('.kanban-modal__column')?.textContent).toBe('Column · Release queue')
+      expect(document.querySelector('.kanban-modal__task-link')?.getAttribute('href')).toBe('https://board.example/view?task=T-12')
+      expect(document.querySelector('.kanban-meta select, .kanban-meta .kanban-prio')).toBeNull()
+      act(() => useExternalBoard.setState({ tasks: new Map([[session.id, { ...task, stage:'Waiting', urgency:'Now', priority:'P2' }]]) }))
+      expect(fields()).toEqual({Workflow:'Agent tooling', Stage:'Waiting', Urgency:'Now', Priority:'P2'})
+      act(() => useExternalBoard.setState({available:false, tasks:new Map()}))
+      expect(fields()).toEqual({'Work board':'Work board unavailable'})
+      const localCategory = document.querySelector<HTMLSelectElement>('.kanban-meta select')!
+      expect(localCategory.labels?.[0].textContent).toBe('Local category')
+      expect(localCategory.value).toBe('research')
+      const high = [...document.querySelectorAll<HTMLButtonElement>('.kanban-meta .kanban-prio')].find(b => b.textContent === 'High')!
+      act(() => high.click())
+      expect(onChangeBoard.mock.lastCall?.[0].meta[0].priority).toBe('high')
+      act(() => useExternalBoard.setState({url:null}))
+      expect(document.querySelector<HTMLSelectElement>('.kanban-meta select')?.labels?.[0].textContent).toBe('Category')
+    } finally {
+      act(() => { root.unmount(); useExternalBoard.setState(externalState); useProjects.setState(projectState) })
+    }
   })
 
   it('writes through raw textarea value on sticky note edit (including whitespace and newlines)', () => {
