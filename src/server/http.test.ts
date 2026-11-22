@@ -76,6 +76,15 @@ async function setupAndLogin(): Promise<string> {
   return cookie.split(';')[0]
 }
 
+it('requires the browser session for the optional task board feed', async () => {
+  expect((await fetch(base + '/task-board?project=one')).status).toBe(401)
+  const cookie = await setupAndLogin()
+  const response = await fetch(base + '/task-board?project=one',{headers:{Cookie:cookie}})
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({board:null})
+  expect(response.headers.get('cache-control')).toContain('no-store')
+})
+
 describe('http layer', () => {
   it('routes ops before browser auth, so only the dedicated bearer works', async () => {
     const cookie = await setupAndLogin()

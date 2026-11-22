@@ -11,6 +11,7 @@ import type { Auth } from './auth'
 import { proxyAuthAllowed, type TrustProxyConfig } from './proxy-trust'
 import { handleDownload } from './download'
 import type { DownloadTickets } from '../core/download-tickets'
+import type { ExternalTaskBoard } from '../shared/external-task-board'
 
 export const SESSION_COOKIE = 'nt_session'
 
@@ -56,6 +57,7 @@ export interface HttpHandlerOpts {
   downloadTickets?: DownloadTickets
   /** Dedicated bearer-authenticated loopback management plane. It owns all `/opsapi/*` auth. */
   opsApi?: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
+  taskBoard?: (projectId: string) => Promise<ExternalTaskBoard | null>
 }
 
 /** Parse the `nt_session=` value out of a Cookie header. Exported for the WS upgrade (Task 5). */
@@ -375,7 +377,7 @@ async function serveStatic(
 export function createHttpHandler(
   opts: HttpHandlerOpts
 ): (req: http.IncomingMessage, res: http.ServerResponse) => void {
-  const { auth, rendererDir, trustProxy, downloadTickets, opsApi } = opts
+  const { auth, rendererDir, trustProxy, downloadTickets, opsApi, taskBoard } = opts
 
   return function handler(req: http.IncomingMessage, res: http.ServerResponse): void {
     void handle(req, res).catch(() => {
@@ -502,6 +504,12 @@ export function createHttpHandler(
     }
 
     // Authenticated: an Explorer download redeems its one-shot ticket here (see download.ts).
+    if (pathname === '/task-board' && method === 'GET') {
+      res.setHeader('Cache-Control','private, no-store')
+      const board = await taskBoard?.(url.searchParams.get('project') ?? '')
+      sendJson(res, 200, { board: board ?? null })
+      return
+    }
     if (downloadTickets && (await handleDownload(req, res, url, downloadTickets))) return
 
     // Authenticated: serve static renderer files (index.html fallback for '/').
