@@ -74,7 +74,7 @@ export const SessionCard = memo(function SessionCard({
   // follow-up. It is no longer ranked against the live state: Eco is a fact about the CLI process,
   // not a state, and the two now sit side by side exactly as they do on the node header. A live
   // state still clears the flag in the store, so RUNNING+SLEEPING cannot both stand.
-  const badge = session.kind !== 'sticky' && status?.hibernated ? 'sleeping' : null
+  const sleeping = session.kind !== 'sticky' && status?.hibernated === true
   // The board is the canvas's other view of the same node, so it shows the SAME status badge from
   // the same model — glyph, word, freshness and the stale mark (CONTRIBUTING: a session seen twice
   // must not speak in two voices). It replaces the card's own RUNNING / NEEDS YOU pair, which
@@ -154,12 +154,12 @@ export const SessionCard = memo(function SessionCard({
         <TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} />
       </div>}
       {session.organization && <div className="kanban-card__metarow"><OrganizationBadge organization={session.organization} nodeId={session.id} /></div>}
-      {(showStatus || badge) && <div className="kanban-card__status">
+      {(showStatus || sleeping) && <div className="kanban-card__status">
         <span>Session</span>
         {showStatus && (
           <NodeStatusBadge nodeId={session.id} agentId={session.agentId as AgentId} compact />
         )}
-        {badge === 'sleeping' && (
+        {sleeping && (
           <span
             className="kanban-badge kanban-badge--sleeping"
             title="Agent hibernated to save memory — resumes when you open the session"
