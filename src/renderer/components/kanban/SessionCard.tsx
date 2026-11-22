@@ -14,7 +14,7 @@ import { assessTaskUrgency, parseTaskPlanning } from '@shared/task-planning'
 
 import { effectivePriority } from '../../lib/kanbanPriority'
 import { useProjects } from '../../state/projects'
-import { useExternalBoard } from '../../state/externalTaskBoard'
+import { taskDisplayTitle, useExternalBoard } from '../../state/externalTaskBoard'
 
 const PRIO_COLOR: Record<KanbanPriority, string> = {
   low: '#8e8e93',
@@ -89,6 +89,8 @@ export const SessionCard = memo(function SessionCard({
   const automaticUrgency = planning ? assessTaskUrgency(planning, priorityNow) : undefined
   const project = useProjects(s => s.activeProjectId)
   const externalBoard = useExternalBoard(s => s.project === project ? s.url : null)
+  const linkedTasks = useExternalBoard(s => s.project === project ? s.tasks : null)
+  const titleFor = (card: KanbanSession) => taskDisplayTitle(card.title, card.titleAuto, linkedTasks?.get(card.id))
   const priority = externalBoard ? undefined : effectivePriority(meta, session.taskPlanning, priorityNow)
   // The account chip counts as detail in its own right: a card whose only thing to say is "this
   // one is on the other Claude login" is exactly the card that must say it.
@@ -136,7 +138,7 @@ export const SessionCard = memo(function SessionCard({
     >
       <div className="kanban-card__row">
         <span className="kanban-card__nodedot" style={{ background: session.color }} />
-        <span className="kanban-card__title">{session.title}</span>
+        <span className="kanban-card__title">{titleFor(session)}</span>
         {session.kind === 'sticky' && <span className="kanban-card__kind">note</span>}
         {session.kind === 'browser' && <span className="kanban-card__kind">web</span>}
         {showStatus && (
@@ -161,7 +163,7 @@ export const SessionCard = memo(function SessionCard({
           {urgentSupportingCount > 0 ? ` · ${urgentSupportingCount} urgent` : ''}
         </button>
         {supportsExpanded && <ul>{supportingSessions.map(child => <li key={child.id}>
-          <button type="button" draggable={false} onClick={() => onOpen(child.id)}>{child.title}</button>
+          <button type="button" draggable={false} onClick={() => onOpen(child.id)}>{titleFor(child)}</button>
           <TaskPlanningBadge planning={child.taskPlanning} nodeId={child.id} />
         </li>)}</ul>}
       </div>}

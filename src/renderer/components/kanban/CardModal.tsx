@@ -4,7 +4,7 @@ import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stac
 import { IconChat, IconMic, IconSearch } from '../icons'
 import { ContextMeter } from '../ContextMeter'
 import { OrganizationBadge } from '../OrganizationBadge'
-import { useProjectTaskLink, taskBoardHref } from '../../state/externalTaskBoard'
+import { useProjectTaskLink, taskBoardHref, taskDisplayTitle } from '../../state/externalTaskBoard'
 import { TaskPlanningBadge } from '../TaskPlanningBadge'
 import { AccountChip, useAccountChip } from '../AccountChip'
 import { useAgentStatus } from '../../state/agentStatus'
@@ -71,6 +71,8 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   const panelOpen = useCardPanel((s) => s.open)
   const togglePanel = useCardPanel((s) => s.toggle)
   const external = useProjectTaskLink(session.id)
+  const displayTitle = taskDisplayTitle(session.title, session.titleAuto, external?.task)
+  const titleBeforeEdit = useRef(session.title)
   const isTerminal = session.kind === 'terminal'
   const isBrowser = session.kind === 'browser'
 
@@ -202,7 +204,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
 
   const commitTitle = () => {
     const t = title.trim()
-    if (t && t !== session.title) onRename(t)
+    if (t && t !== titleBeforeEdit.current) onRename(t)
     setEditingTitle(false)
   }
 
@@ -249,14 +251,15 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           ) : (
             <span
               className="kanban-modal__title"
-              title={session.title}
+              title={displayTitle}
               onClick={() => {
                 if (session.kind === 'sticky') return // a note's label IS its first line
-                setTitle(session.title)
+                titleBeforeEdit.current = displayTitle
+                setTitle(displayTitle)
                 setEditingTitle(true)
               }}
             >
-              {session.title}
+              {displayTitle}
             </span>
           )}
           <button className="kanban-modal__action" title="Close" onClick={onClose}>
@@ -266,8 +269,12 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           <div className="kanban-modal__toolbar">
           {external ? <div className="kanban-modal__location">
             <span className="kanban-modal__column">Column · {columnTitle ?? 'Ungrouped'}</span>
+            {external.task?.displayName && external.task.displayName !== displayTitle &&
+              <span className="kanban-modal__column">Lane · {external.task.displayName}</span>}
             <a className="kanban-modal__task-link" href={taskBoardHref(external.url, external.task?.task)}
-              target="_blank" rel="noreferrer">{external.task ? `Open task ${external.task.task}` : 'Open workflow board'} ↗</a>
+              target="_blank" rel="noreferrer">{external.task
+                ? `Open task ${[external.task.task, external.task.taskTitle].filter(Boolean).join(' · ')}`
+                : 'Open workflow board'} ↗</a>
           </div> : <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>}
           <OrganizationBadge organization={session.organization} nodeId={session.id} />
           {!external && <TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} />}

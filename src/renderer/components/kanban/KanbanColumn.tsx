@@ -18,22 +18,6 @@ export interface KanbanLane {
   count: number
 }
 
-/** Column membership supplied by a task board is a view of the sessions. Only the
- *  stored canvas columns below accept drops, renames, and column-scoped creation. */
-export function TaskBoardColumn({ title, count, children }: {
-  title: string; count: number; children: React.ReactNode
-}) {
-  return (
-    <section className="kanban-col kanban-col--task-board" aria-label={title}>
-      <div className="kanban-col__header">
-        <h2 className="kanban-col__title">{title}</h2>
-        <span className="kanban-col__count">{count}</span>
-      </div>
-      <div className="kanban-col__cards">{children}</div>
-    </section>
-  )
-}
-
 interface KanbanColumnProps {
   /** null = the virtual Ungrouped column: fixed label, no rename/recolor/delete, header not draggable. */
   column: KanbanColumnT | null
@@ -55,20 +39,14 @@ interface KanbanColumnProps {
   onDropOnColumn: (columnId: string | null) => void
 }
 
-export const KanbanColumn = memo(function KanbanColumn({
-  column, lanes, onRename, onRecolor, onDelete,
-  createOptions, onCreate, onColumnDragStart, onDragEnd, onDropOnColumn
-}: KanbanColumnProps) {
-  const [editingTitle, setEditingTitle] = useState(false)
-  const [title, setTitle] = useState(column?.title ?? '')
-  const [swatchesOpen, setSwatchesOpen] = useState(false)
+export function NewSessionMenu({ columnId, createOptions, onCreate }: Pick<KanbanColumnProps, 'createOptions' | 'onCreate'> & {
+  columnId: string | null
+}) {
   const [newMenuOpen, setNewMenuOpen] = useState(false)
   // The "+ New session" menu normally drops DOWN (top:100%); a column near the window's bottom edge
   // would push it off-screen, so we flip it UP when it doesn't fit below. Measured on open.
   const [menuUp, setMenuUp] = useState(false)
   const newMenuRef = useRef<HTMLDivElement>(null)
-  // Trello-style drop highlight: counted enter/leave (dragleave fires when crossing children).
-  const [dragOverCount, setDragOverCount] = useState(0)
 
   useLayoutEffect(() => {
     if (!newMenuOpen) {
@@ -85,6 +63,41 @@ export const KanbanColumn = memo(function KanbanColumn({
     const spaceBelow = window.innerHeight - rect.top
     if (overflowsBelow && spaceAbove > spaceBelow) setMenuUp(true)
   }, [newMenuOpen])
+
+  return (
+    <div className="kanban-col__footer">
+      {newMenuOpen && (
+        <div ref={newMenuRef} className={menuUp ? 'kanban-col__newmenu kanban-col__newmenu--up' : 'kanban-col__newmenu'}>
+          {createOptions.map((o) => (
+            <button
+              key={o.key}
+              onClick={() => {
+                setNewMenuOpen(false)
+                onCreate(o.choice, columnId)
+              }}
+            >
+              <span className="kanban-col__newicon">{o.icon}</span>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <button className="kanban-col__new" onClick={() => setNewMenuOpen((v) => !v)}>
+        + New session
+      </button>
+    </div>
+  )
+}
+
+export const KanbanColumn = memo(function KanbanColumn({
+  column, lanes, onRename, onRecolor, onDelete,
+  createOptions, onCreate, onColumnDragStart, onDragEnd, onDropOnColumn
+}: KanbanColumnProps) {
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [title, setTitle] = useState(column?.title ?? '')
+  const [swatchesOpen, setSwatchesOpen] = useState(false)
+  // Trello-style drop highlight: counted enter/leave (dragleave fires when crossing children).
+  const [dragOverCount, setDragOverCount] = useState(0)
 
   const colId = column?.id ?? null
   const orderedLanes = byLane(lanes)
@@ -186,27 +199,7 @@ export const KanbanColumn = memo(function KanbanColumn({
           </Fragment>
         ))}
       </div>
-      <div className="kanban-col__footer">
-        {newMenuOpen && (
-          <div ref={newMenuRef} className={menuUp ? 'kanban-col__newmenu kanban-col__newmenu--up' : 'kanban-col__newmenu'}>
-            {createOptions.map((o) => (
-              <button
-                key={o.key}
-                onClick={() => {
-                  setNewMenuOpen(false)
-                  onCreate(o.choice, colId)
-                }}
-              >
-                <span className="kanban-col__newicon">{o.icon}</span>
-                {o.label}
-              </button>
-            ))}
-          </div>
-        )}
-        <button className="kanban-col__new" onClick={() => setNewMenuOpen((v) => !v)}>
-          + New session
-        </button>
-      </div>
+      <NewSessionMenu columnId={colId} createOptions={createOptions} onCreate={onCreate} />
     </div>
   )
 })

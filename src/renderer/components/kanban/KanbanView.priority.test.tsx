@@ -87,6 +87,7 @@ it('keeps provider lane and pagination order while changing only session order',
 it('groups native cards by the live task field and preserves saved canvas assignments', () => {
   const project = 'task-columns-test'
   const previous = useExternalBoard.getState()
+  const previousProject = useProjects.getState().activeProjectId
   const parentPlan = defaultTaskPlanning('parent-outcome', 'implementation')
   const sessions = [
     { ...session('parent'), taskPlanning: parentPlan },
@@ -101,8 +102,10 @@ it('groups native cards by the live task field and preserves saved canvas assign
   const child = { ...parent, nodeId: 'child', task: 'two', workflow: 'Tools', stage: 'Waiting' }
   const onChange = vi.fn()
   const headings = () => Array.from(host.querySelectorAll('.kanban-col__title'), el => el.textContent)
-  const cardsIn = (name: string) => Array.from(host.querySelectorAll(
-    `section[aria-label="${name}"] .kanban-card`), el => el.getAttribute('data-node-id'))
+  const cardsIn = (column: string, row: string) => {
+    const tr = Array.from(host.querySelectorAll('tbody tr')).find(tr => tr.querySelector('th')?.textContent === row)
+    return Array.from(tr!.querySelectorAll(`td[data-column="${column}"] .kanban-card`), el => el.getAttribute('data-node-id'))
+  }
   const changeColumns = (value: string) => act(() => {
     const select = host.querySelector<HTMLSelectElement>('select[aria-label="Columns"]')!
     select.value = value
@@ -114,19 +117,19 @@ it('groups native cards by the live task field and preserves saved canvas assign
       columns: { workflows: ['Product', 'Tools', 'Empty workflow'], stages: ['Ready', 'Working', 'Waiting'] },
       tasks: new Map([['parent', parent], ['child', child]]) })
     act(() => root.render(<KanbanView {...props} board={board} sessions={sessions} onChange={onChange} />))
-    expect(headings()).toEqual(['Product', 'Tools', 'Empty workflow', 'No linked task'])
-    expect(cardsIn('Tools')).toEqual(['child'])
-    expect(cardsIn('No linked task')).toEqual(['unlinked'])
+    expect(headings()).toEqual(['Product', 'Tools', 'Empty workflow'])
+    expect(cardsIn('Tools', 'Waiting')).toEqual(['child'])
+    expect(host.querySelector('section[aria-label="No linked task"] .kanban-card')?.getAttribute('data-node-id')).toBe('unlinked')
     changeColumns('stage')
-    expect(headings()).toEqual(['Ready', 'Working', 'Waiting', 'No linked task'])
-    expect(cardsIn('Waiting')).toEqual(['child'])
+    expect(headings()).toEqual(['Ready', 'Working', 'Waiting'])
+    expect(cardsIn('Waiting', 'Tools')).toEqual(['child'])
     act(() => useExternalBoard.setState({ tasks: new Map([['parent', parent], ['child', { ...child, stage: 'Ready' }]]) }))
-    expect(cardsIn('Ready')).toEqual(['child'])
-    expect(cardsIn('Waiting')).toEqual([])
+    expect(cardsIn('Ready', 'Tools')).toEqual(['child'])
+    expect(cardsIn('Waiting', 'Tools')).toEqual([])
     changeColumns('canvas')
     expect(headings()).toEqual(['Ungrouped', 'Ops'])
     expect(onChange).not.toHaveBeenCalled()
   } finally {
-    act(() => useExternalBoard.setState(previous))
+    act(() => { useExternalBoard.setState(previous); useProjects.setState({ activeProjectId: previousProject }) })
   }
 })

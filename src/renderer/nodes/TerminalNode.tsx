@@ -2,6 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import { OrganizationBadge } from '../components/OrganizationBadge'
 import { TaskPlanningBadge } from '../components/TaskPlanningBadge'
+import { taskDisplayTitle, useProjectTaskLink } from '../state/externalTaskBoard'
 import {
   Handle,
   NodeResizer,
@@ -1461,6 +1462,8 @@ export function TerminalNode({
     !remoteSession &&
     (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
+  const linkedTask = useProjectTaskLink(id)?.task
+  const displayTitle = taskDisplayTitle(data.title || '', data.titleAuto, linkedTask) || 'Untitled'
   // The node's own glow (`working` / `attention`), off the same derivation the badge shows. No
   // clock subscription here on purpose: the class is a coarse cue and this component already
   // re-renders on every status change, so the one transition a clock would add — a stale
@@ -4580,10 +4583,9 @@ export function TerminalNode({
         {editingTitle ? (
           <input
             className="term-node__title nodrag"
-            value={data.title}
+            defaultValue={titleEditStartRef.current}
             spellCheck={false}
             autoFocus
-            onChange={(e) => updateNodeData(id, { title: e.target.value })}
             // Enter commits, Escape reverts to the value editing started with. The blur that
             // follows either keypress is skipped (skipBlurRef) so we don't commit twice; a plain
             // focus-loss blur still commits.
@@ -4600,7 +4602,6 @@ export function TerminalNode({
                 commitTitleEdit(e.currentTarget.value)
               } else if (e.key === 'Escape') {
                 skipBlurRef.current = true
-                updateNodeData(id, { title: titleEditStartRef.current })
                 setEditingTitle(false)
               }
             }}
@@ -4608,13 +4609,13 @@ export function TerminalNode({
         ) : (
           <span
             className="term-node__title-text nodrag"
-            title={`${data.title || 'Untitled'} — Click to rename`}
+            title={`${displayTitle} · Click to rename`}
             onClick={() => {
-              titleEditStartRef.current = data.title as string
+              titleEditStartRef.current = displayTitle
               setEditingTitle(true)
             }}
           >
-            {data.title || 'Untitled'}
+            {displayTitle}
           </span>
         )}
         <button

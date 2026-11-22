@@ -23,6 +23,8 @@ function validCard(c: ExternalTask) {
     c &&
     isSafeNodeId(c.nodeId) &&
     bounded(c.task, 100) &&
+    (c.displayName === undefined || optional(c.displayName, 240)) &&
+    (c.taskTitle === undefined || optional(c.taskTitle, 500)) &&
     bounded(c.stage, 100) &&
     optional(c.workflow, 160) &&
     optional(c.urgency, 100) &&
@@ -106,6 +108,8 @@ export function createExternalTaskBoard(
         .map((c) => ({
           nodeId: c.nodeId,
           task: c.task,
+          ...(c.displayName ? { displayName: c.displayName } : {}),
+          ...(c.taskTitle ? { taskTitle: c.taskTitle } : {}),
           workflow: c.workflow,
           stage: c.stage,
           urgency: c.urgency,

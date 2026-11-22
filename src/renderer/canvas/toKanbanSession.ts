@@ -48,6 +48,7 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
   return {
     id: n.id,
     title: (n.data.title as string) ?? '',
+    titleAuto: n.data.titleAuto,
     color: (n.data.color as string) ?? NODE_COLORS[0],
     kind: 'terminal',
     organization: n.data.organization,
