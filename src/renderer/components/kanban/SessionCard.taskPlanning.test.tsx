@@ -53,8 +53,10 @@ it('shows the linked workflow and urgency and clears the badge if the task becom
       root.render(<SessionCard session={session} onOpen={vi.fn()} onContext={vi.fn()}
         onDragStart={vi.fn()} onDragEnd={vi.fn()} onDropAt={vi.fn()} />)
     })
-    expect(host.textContent).toContain('Product / In progress / Now / P2')
-    expect(host.querySelector('.node-account-chip')?.getAttribute('title')).toContain('Due tomorrow')
+    expect([...host.querySelectorAll('.task-planning-chip')].map(e => e.textContent?.trim())).toEqual(['Product', 'In progress'])
+    expect(host.querySelector('.task-planning-timing')?.textContent).toBe('Now')
+    expect(host.querySelector('.task-planning-timing')?.getAttribute('title')).toBe('Due tomorrow')
+    expect(host.querySelector('.task-planning-rank')?.textContent).toBe('P2')
     act(() => useExternalBoard.setState({ tasks: new Map() }))
     expect(host.textContent).toContain('No verified task link')
     expect(host.textContent).not.toMatch(/needs classification|medium/i)

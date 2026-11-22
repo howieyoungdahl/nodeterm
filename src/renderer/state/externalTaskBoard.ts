@@ -13,6 +13,28 @@ interface BoardView {
 const empty = { project: '', url: null, available: false, tasks: new Map<string, ExternalTask>() }
 export const useExternalBoard = create<BoardView>(() => empty)
 
+export interface ProjectTaskLink {
+  url: string
+  available: boolean
+  task?: ExternalTask
+}
+
+/** The compact badge and the open card use the same project-scoped reading. */
+export function useProjectTaskLink(nodeId?: string): ProjectTaskLink | null {
+  const projectId = useProjects(s => s.projects.find(p =>
+    p.nodes.some(n => n.id === nodeId && n.kind === 'terminal'))?.id)
+  const url = useExternalBoard(s => s.project === projectId ? s.url : null)
+  const task = useExternalBoard(s => nodeId && s.project === projectId ? s.tasks.get(nodeId) : undefined)
+  const available = useExternalBoard(s => s.available)
+  return url ? { url, task, available } : null
+}
+
+export function taskBoardHref(board: string, task?: string): string {
+  const url = new URL(board)
+  if (task) url.searchParams.set('task', task)
+  return url.toString()
+}
+
 /** Poll once for the active project, shared by the canvas and all its Kanban cards. */
 export function useExternalBoardSync() {
   const project = useProjects((s) => s.activeProjectId)

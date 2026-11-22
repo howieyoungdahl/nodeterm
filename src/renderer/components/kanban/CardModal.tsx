@@ -4,6 +4,7 @@ import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stac
 import { IconChat, IconMic, IconSearch } from '../icons'
 import { ContextMeter } from '../ContextMeter'
 import { OrganizationBadge } from '../OrganizationBadge'
+import { useProjectTaskLink, taskBoardHref } from '../../state/externalTaskBoard'
 import { TaskPlanningBadge } from '../TaskPlanningBadge'
 import { AccountChip, useAccountChip } from '../AccountChip'
 import { useAgentStatus } from '../../state/agentStatus'
@@ -69,6 +70,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   // choice is remembered (localStorage) — once collapsed, later cards open collapsed too.
   const panelOpen = useCardPanel((s) => s.open)
   const togglePanel = useCardPanel((s) => s.toggle)
+  const external = useProjectTaskLink(session.id)
   const isTerminal = session.kind === 'terminal'
   const isBrowser = session.kind === 'browser'
 
@@ -262,9 +264,13 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           </button>
           </div>
           <div className="kanban-modal__toolbar">
-          <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>
+          {external ? <div className="kanban-modal__location">
+            <span className="kanban-modal__column">Column · {columnTitle ?? 'Ungrouped'}</span>
+            <a className="kanban-modal__task-link" href={taskBoardHref(external.url, external.task?.task)}
+              target="_blank" rel="noreferrer">{external.task ? `Open task ${external.task.task}` : 'Open workflow board'} ↗</a>
+          </div> : <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>}
           <OrganizationBadge organization={session.organization} nodeId={session.id} />
-          <TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} />
+          {!external && <TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} />}
           {isTerminal && <AccountChip chip={accountChip} />}
           {/* The driving chip, so a user watching a browser card THROUGH the modal is not
               driving-blind. The lease is keyed by node id (not by webview object), so this shows
@@ -323,7 +329,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           </button>
           </div>
         </div>
-        <CardMetaBar nodeId={session.id} board={board} onChange={onChangeBoard} />
+        <CardMetaBar nodeId={session.id} board={board} onChange={onChangeBoard} external={external} />
         <div className="kanban-modal__body">
           {/* Body is a flex row: the card's own pane (2/3) + the board-log panel (1/3, all kinds). */}
           <div className="kanban-modal__main">

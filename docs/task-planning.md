@@ -75,7 +75,7 @@ and adds its host name to the feed query. Return cards in the order the board us
 and `cards` with `nodeId`, `task`, `workflow`, `stage`, `urgency`, `reason` and
 `priority`. Unassigned fields are null. Only confirmed bindings from the selected
 project reach its signed-in browser. Badges use the task's recorded urgency and
-priority through a handoff. The link opens the operator dashboard for edits.
+priority through a handoff. Workflow and stage have separate, wrapping chips. The open card shows the same workflow, stage, urgency reason and assigned priority in its metadata. Its column label names the physical location. The task link opens the operator dashboard for edits.
 
 Only an explicit supporting relationship with exactly one present independent parent on
 the same board folds by default. The parent's expandable list opens each child's existing

@@ -8,6 +8,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { loadIdentity, selectFaces, usePresence } from '../../state/presence'
 import { useBoardLog } from '../../state/boardLog'
 import { useProjects } from '../../state/projects'
+import type { ProjectTaskLink } from '../../state/externalTaskBoard'
 
 const initialOf = (name: string): string => (name.trim()[0] ?? '?').toUpperCase()
 
@@ -27,6 +28,7 @@ function toLocalInput(ts: number): string {
 
 interface CardMetaBarProps {
   nodeId: string
+  external?: ProjectTaskLink | null
   board: ProjectKanban
   onChange: (next: ProjectKanban) => void
 }
@@ -34,7 +36,7 @@ interface CardMetaBarProps {
 /** Trello-style Members / Due date strip under the modal header. The assignable pool is
  *  everyone the session can NAME: me (presence identity), live presence peers, and every
  *  author already seen in the board log — no separate membership system. */
-export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
+export function CardMetaBar({ nodeId, board, onChange, external }: CardMetaBarProps) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [labelsOpen, setLabelsOpen] = useState(false)
   const meta = cardMeta(board, nodeId)
@@ -63,15 +65,25 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
   const overdue = due !== undefined && due < Date.now()
   const priority = meta?.priority
 
+  const task = external?.task
   return (
-    <div className="kanban-meta">
-      <div className="kanban-meta__group">
+    <div className={external ? "kanban-meta kanban-meta--workflow" : "kanban-meta"}>
+      {external ? <dl className="kanban-meta__task" aria-label="Work Board task details">
+        <div><dt>Workflow</dt><dd>{task ? task.workflow ?? 'Unassigned workflow' :
+          external.available ? 'No verified task link' : 'Work board unavailable'}</dd></div>
+        {task && <>
+          <div><dt>Stage</dt><dd>{task.stage}</dd></div>
+          <div><dt>Urgency</dt><dd>{task.urgency ?? 'Unassigned'}</dd>
+            {task.reason && <dd className="kanban-meta__urgency-reason">{task.reason}</dd>}</div>
+          <div><dt>Priority</dt><dd>{task.priority ?? 'Unranked'}</dd></div>
+        </>}
+      </dl> : <div className="kanban-meta__group">
         <label className="kanban-meta__label" htmlFor={`work-category-${nodeId}`}>Category</label>
         <select id={`work-category-${nodeId}`} value={meta?.category ?? plannedCategory ?? 'needs-classification'}
           onChange={e => onChange(setCardCategory(board, nodeId, e.target.value as TaskCategory))}>
           {TASK_CATEGORIES.map(category => <option key={category} value={category}>{category.replaceAll('-', ' ')}</option>)}
         </select>
-      </div>
+      </div>}
       <div className="kanban-meta__group">
         <span className="kanban-meta__label">Members</span>
         <div className="kanban-meta__row">
@@ -157,7 +169,7 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
           )}
         </div>
       </div>
-      <div className="kanban-meta__group">
+      {!external && <div className="kanban-meta__group">
         <span className="kanban-meta__label">Priority</span>
         <div className="kanban-meta__row">
           {PRIORITIES.map((pr) => (
@@ -172,7 +184,7 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
             </button>
           ))}
         </div>
-      </div>
+      </div>}
     </div>
   )
 }
