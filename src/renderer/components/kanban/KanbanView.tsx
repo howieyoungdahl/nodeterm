@@ -90,8 +90,8 @@ export interface KanbanViewProps {
   onChange: (next: ProjectKanban) => void
   /** Open a session from its card: switch back to canvas view and focus the node. */
   onOpenNode: (nodeId: string) => void
-  /** Create a node from a column's "+ New" menu (columnId null = Ungrouped: no assignment). */
-  onCreateNode: (choice: KanbanCreateChoice, columnId: string | null) => void
+  /** Create in the selected column and return the ID when the node can be opened immediately. */
+  onCreateNode: (choice: KanbanCreateChoice, columnId: string | null) => string | void
   /** Rename a node (same funnel as the sessions sidebar). */
   onRenameNode: (nodeId: string, title: string) => void
   /** Write-through a sticky node's body text (only fired for kind 'sticky'). */
@@ -589,6 +589,11 @@ export const KanbanView = memo(function KanbanView({
       <div className="kanban-header">
         <span className="kanban-header__dot" style={{ background: projectColor }} />
         <span className="kanban-header__name">{projectName}</span>
+        <button type="button" className="kanban-header__new-terminal" onClick={() => {
+          const id = onCreateNode({ kind: 'terminal' }, null)
+          if (id) setModalNodeId(id)
+        }}>+ New terminal</button>
+        <NewSessionMenu columnId={null} createOptions={createOptions} onCreate={onCreateNode} label="Agents & more" />
         {workflowBoard && <a className="kanban-github-status" href={workflowBoard} target="_blank" rel="noreferrer">Workflow board ↗</a>}
         {workflowBoard && catalog && <label className="kanban-column-mode">Columns
           <select aria-label="Columns" value={columnMode} disabled={source === 'github' || !feedAvailable}
@@ -601,7 +606,6 @@ export const KanbanView = memo(function KanbanView({
             <option value="canvas">Canvas groups</option>
           </select>
         </label>}
-        {columnMode !== 'canvas' && <NewSessionMenu createOptions={createOptions} onCreate={onCreateNode} columnId={null} />}
         {workflowBoard && !feedAvailable && <span className="kanban-github-status" role="status">Task board unavailable</span>}
         {columnMode === 'canvas' && <select aria-label="Card order" value={sortMode} title="Priority view uses derived order. Choose Manual order to drag cards; Move to remains available in the card menu."
           onChange={e => { const mode = e.target.value; if (mode === 'manual' || mode === 'priority') setKanbanSort(projectId, mode) }}>

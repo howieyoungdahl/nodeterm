@@ -8118,6 +8118,7 @@ export function Canvas() {
         nodeId: node.id,
         event: { type: 'card-created', to: toName, title }
       })
+      return node.id
     },
     [emptyNodePos, setNodes, markDirty, requestSaveFlush, seedBoard, api]
   )
