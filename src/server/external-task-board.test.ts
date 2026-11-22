@@ -38,6 +38,10 @@ describe('configured task board', () => {
       expect(await get('one')).toEqual({ url: config.url, available: true, cards: [card] })
       expect(await get('one')).toEqual({ url: config.url, available: true, cards: [card] })
       expect(request).toHaveBeenCalledTimes(1)
+      const columns = { workflows: ['Product', 'Operations'], stages: ['In progress', 'Done'] }
+      const withColumns = createExternalTaskBoard(dir, () => new Set(), async () =>
+        Response.json({ ...payload, ...columns }))
+      expect(await withColumns('one')).toEqual({ url: config.url, available: true, cards: [], columns })
       payload.cards.push({...card, task: 'conflicting-task'})
       const conflicting = createExternalTaskBoard(dir, () => new Set(['node-one']), request)
       expect(await conflicting('one')).toEqual({ url: config.url, available: true, cards: [] })

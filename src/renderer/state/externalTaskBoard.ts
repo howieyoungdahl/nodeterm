@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import type { ExternalTask, ExternalTaskBoard } from '../../shared/external-task-board'
+import type { ExternalTask, ExternalTaskBoard, ExternalTaskColumns } from '../../shared/external-task-board'
 import { isBrowserRuntime } from '../bridge/runtime'
 import { useProjects } from './projects'
 
@@ -8,9 +8,10 @@ interface BoardView {
   project: string
   url: string | null
   available: boolean
+  columns: ExternalTaskColumns | null
   tasks: Map<string, ExternalTask>
 }
-const empty = { project: '', url: null, available: false, tasks: new Map<string, ExternalTask>() }
+const empty = { project: '', url: null, available: false, columns: null, tasks: new Map<string, ExternalTask>() }
 export const useExternalBoard = create<BoardView>(() => empty)
 
 export interface ProjectTaskLink {
@@ -52,12 +53,14 @@ export function useExternalBoardSync() {
         if (!res.ok) throw new Error('Task board unavailable')
         const { board }: { board: ExternalTaskBoard | null } = await res.json()
         if (!controller.signal.aborted)
-          useExternalBoard.setState({
+          useExternalBoard.setState(previous => ({
             project,
             url: board?.url ?? null,
             available: board?.available ?? false,
+            columns: board && !board.available && previous.project === project && previous.url === board.url
+              ? previous.columns : board?.columns ?? null,
             tasks: new Map(board?.cards.map((card) => [card.nodeId, card]))
-          })
+          }))
       } catch {
         if (!controller.signal.aborted) useExternalBoard.setState({ available: false, tasks: new Map() })
       } finally {

@@ -18,6 +18,22 @@ export interface KanbanLane {
   count: number
 }
 
+/** Column membership supplied by a task board is a view of the sessions. Only the
+ *  stored canvas columns below accept drops, renames, and column-scoped creation. */
+export function TaskBoardColumn({ title, count, children }: {
+  title: string; count: number; children: React.ReactNode
+}) {
+  return (
+    <section className="kanban-col kanban-col--task-board" aria-label={title}>
+      <div className="kanban-col__header">
+        <h2 className="kanban-col__title">{title}</h2>
+        <span className="kanban-col__count">{count}</span>
+      </div>
+      <div className="kanban-col__cards">{children}</div>
+    </section>
+  )
+}
+
 interface KanbanColumnProps {
   /** null = the virtual Ungrouped column: fixed label, no rename/recolor/delete, header not draggable. */
   column: KanbanColumnT | null

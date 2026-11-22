@@ -14,9 +14,10 @@ import { effectivePriority, sortByPriority } from '../../lib/kanbanPriority'
 import { labelSwatch } from '../../lib/kanbanLabelColors'
 import { CardModal } from './CardModal'
 import { PRIORITIES } from './CardMetaBar'
-import { KanbanColumn, type KanbanLane } from './KanbanColumn'
+import { KanbanColumn, TaskBoardColumn, type KanbanLane } from './KanbanColumn'
 import { SessionCard } from './SessionCard'
 import { taskBoardVisibility } from '../../lib/taskBoardVisibility'
+import { taskBoardColumns } from '../../lib/taskBoardColumns'
 import { parseTaskPlanning, TASK_CATEGORIES, type TaskCategory } from '@shared/task-planning'
 import { GitHubIssueCard } from './GitHubIssueCard'
 import { kanbanSource, sourceVisible } from '../../lib/kanbanSources'
@@ -155,11 +156,18 @@ export const KanbanView = memo(function KanbanView({
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectId = useProjects((s) => s.activeProjectId)
   const workflowBoard = useExternalBoard(s => s.project === projectId ? s.url : null)
+  const catalog = useExternalBoard(s => s.project === projectId ? s.columns : null)
+  const feedAvailable = useExternalBoard(s => s.project === projectId && s.available)
   const externalTasks = useExternalBoard(s => s.tasks)
-  const workflowOptions = useMemo(() => Array.from(new Set(
-    Array.from(externalTasks.values(), t => t.workflow).filter((w): w is string => Boolean(w))
-  )).sort(), [externalTasks])
-  const sortMode = useViewMode(s => s.kanbanSortByProject[projectId] ?? 'manual')
+  const workflowOptions = useMemo(() => Array.from(new Set([
+    ...(catalog?.workflows ?? []),
+    ...Array.from(externalTasks.values(), t => t.workflow).filter((w): w is string => Boolean(w)).sort()
+  ])), [catalog, externalTasks])
+  const preferredColumns = useViewMode(s => s.kanbanColumnsByProject[projectId] ?? 'workflow')
+  const setKanbanColumns = useViewMode(s => s.setKanbanColumns)
+  const columnMode = workflowBoard && catalog && source !== 'github' ? preferredColumns : 'canvas'
+  const canvasSort = useViewMode(s => s.kanbanSortByProject[projectId] ?? 'manual')
+  const sortMode = columnMode === 'canvas' ? canvasSort : 'priority'
   const setKanbanSort = useViewMode(s => s.setKanbanSort)
   // One sampled clock for badges, sorting and supporting-session urgency, without a timer.
   const priorityNow = useMemo(() => Date.now(), [board, sessions, sortMode])
@@ -273,7 +281,8 @@ export const KanbanView = memo(function KanbanView({
   )
   const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
   const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
-  const taskVisibility = useMemo(() => taskBoardVisibility(sessions, board), [sessions, board])
+  const groupingTasks = columnMode === 'canvas' ? undefined : externalTasks
+  const taskVisibility = useMemo(() => taskBoardVisibility(sessions, board, groupingTasks), [sessions, board, groupingTasks])
 
   // Stable per-card label arrays: labelsForCard allocates a fresh array per call, and that
   // identity churn alone would defeat SessionCard's memo. Recomputed only on a board change.
@@ -394,10 +403,15 @@ export const KanbanView = memo(function KanbanView({
       return sortByPriority(cards, card => effectivePriority(cardMeta(board, card.id), card.taskPlanning, priorityNow))
     }
     return {
-      ungrouped: toCards(vis(unassigned(board, sessionIds))),
-      byColumn: new Map(board.columns.map((c) => [c.id, toCards(vis(assignedTo(board, c.id)))]))
+      groups: catalog && columnMode !== 'canvas' ? taskBoardColumns(
+        toCards(vis(sessionIds)), externalTasks, columnMode,
+        columnMode === 'stage' ? catalog.stages : workflow ? [workflow] : catalog.workflows,
+        feedAvailable
+      ) : [],
+      ungrouped: columnMode === 'canvas' ? toCards(vis(unassigned(board, sessionIds))) : NO_CARDS,
+      byColumn: new Map(columnMode === 'canvas' ? board.columns.map((c) => [c.id, toCards(vis(assignedTo(board, c.id)))]) : [])
     }
-  }, [board, byId, sessionIds, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow, workflowBoard, externalTasks, workflowOptions, workflowFilter])
+  }, [board, byId, sessionIds, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow, workflowBoard, externalTasks, workflowOptions, workflowFilter, catalog, columnMode, feedAvailable])
 
   // Stable column/card plumbing — every handler the memoized columns receive is identity-stable
   // across renders (the column binds its own id; cards bind theirs).
@@ -449,77 +463,80 @@ export const KanbanView = memo(function KanbanView({
     }
   }, [dropAtCard])
 
-  // A column's lanes: one per source that is both configured for this board and visible under
-  // the current filter. Each source builds its own leaf here; the column only places them (in
-  // registry lane order) and sums their counts. A new source is one more branch in this list.
+  function sessionCards(cards: KanbanSession[], columnId: string | null) {
+    const onDropAt = dropAtCardFor(columnId)
+    return cards.map((s) => (
+      <SessionCard
+        key={s.id}
+        session={s}
+        reorderEnabled={sortMode === 'manual'}
+        priorityNow={priorityNow}
+        meta={metaOf(s.id)}
+        labels={labelsOf(s.id)}
+        supportingSessions={taskVisibility.supports.get(s.id)}
+        urgentSupportingCount={(taskVisibility.supports.get(s.id) ?? []).filter(child => {
+          if (workflowBoard) return externalTasks.get(child.id)?.urgent === true
+          return effectivePriority(metaOf(child.id), child.taskPlanning, priorityNow) === 'urgent'
+        }).length}
+        supportsExpanded={expandedSupport.has(s.id)}
+        onToggleSupport={toggleSupport}
+        onOpen={setModalNodeId}
+        onContext={handleCardContext}
+        onDragStart={handleCardDragStart}
+        onDragEnd={handleDragEnd}
+        onDropAt={onDropAt}
+      />
+    ))
+  }
+
+  const githubLane = (columnId: string | null): KanbanLane => {
+    const page = githubPage(columnId)
+    return {
+      sourceId: 'github',
+      // The provider's own total for the column, which can exceed the page fetched so far.
+      count: (columnId === null ? page?.counts.ungrouped : page?.counts[columnId]) ?? 0,
+      cards: (page?.items ?? []).map((issue) => (
+        <GitHubIssueCard
+          key={`github:${issue.id}`}
+          issue={issue}
+          columns={board.columns}
+          moving={!!github?.moving[issue.number]}
+          readOnly={githubReadOnly}
+          status={github?.issueStatus[issue.number]}
+          onOpen={setModalIssue}
+          onMove={handleMoveGitHub}
+          onDragStart={handleGitHubDragStart}
+          onDragEnd={handleDragEnd}
+        />
+      )),
+      footer: page?.nextCursor
+        ? (
+          <button
+            className="kanban-github-more"
+            onClick={() => void loadMoreGitHub(api.githubIssues, projectId, columnId)}
+          >
+            Show more issues
+          </button>
+        )
+        : undefined
+    }
+  }
+
+  const showGitHub = sourceVisible(source, 'github') && kanbanSource('github').configured(board)
   const lanesFor = (columnId: string | null): KanbanLane[] => {
     const lanes: KanbanLane[] = []
     if (sourceVisible(source, 'sessions')) {
-      const cards = columnId === null
-        ? columnCards.ungrouped
-        : columnCards.byColumn.get(columnId) ?? NO_CARDS
-      const onDropAt = dropAtCardFor(columnId)
-      lanes.push({
-        sourceId: 'sessions',
-        count: cards.length,
-        cards: cards.map((s) => (
-          <SessionCard
-            key={s.id}
-            session={s}
-            reorderEnabled={sortMode === 'manual'}
-            priorityNow={priorityNow}
-            meta={metaOf(s.id)}
-            labels={labelsOf(s.id)}
-            supportingSessions={taskVisibility.supports.get(s.id)}
-            urgentSupportingCount={(taskVisibility.supports.get(s.id) ?? []).filter(child => {
-              if (workflowBoard) return externalTasks.get(child.id)?.urgent === true
-              return effectivePriority(metaOf(child.id), child.taskPlanning, priorityNow) === 'urgent'
-            }).length}
-            supportsExpanded={expandedSupport.has(s.id)}
-            onToggleSupport={toggleSupport}
-            onOpen={setModalNodeId}
-            onContext={handleCardContext}
-            onDragStart={handleCardDragStart}
-            onDragEnd={handleDragEnd}
-            onDropAt={onDropAt}
-          />
-        ))
-      })
+      const cards = columnId === null ? columnCards.ungrouped : columnCards.byColumn.get(columnId) ?? NO_CARDS
+      lanes.push({ sourceId: 'sessions', count: cards.length, cards: sessionCards(cards, columnId) })
     }
-    if (sourceVisible(source, 'github') && kanbanSource('github').configured(board)) {
-      const page = githubPage(columnId)
-      lanes.push({
-        sourceId: 'github',
-        // The provider's own total for the column, which can exceed the page fetched so far.
-        count: (columnId === null ? page?.counts.ungrouped : page?.counts[columnId]) ?? 0,
-        cards: (page?.items ?? []).map((issue) => (
-          <GitHubIssueCard
-            key={`github:${issue.id}`}
-            issue={issue}
-            columns={board.columns}
-            moving={!!github?.moving[issue.number]}
-            readOnly={githubReadOnly}
-            status={github?.issueStatus[issue.number]}
-            onOpen={setModalIssue}
-            onMove={handleMoveGitHub}
-            onDragStart={handleGitHubDragStart}
-            onDragEnd={handleDragEnd}
-          />
-        )),
-        footer: page?.nextCursor
-          ? (
-            <button
-              className="kanban-github-more"
-              onClick={() => void loadMoreGitHub(api.githubIssues, projectId, columnId)}
-            >
-              Show more issues
-            </button>
-          )
-          : undefined
-      })
-    }
+    if (showGitHub) lanes.push(githubLane(columnId))
     return lanes
   }
+  // Provider pagination and moves remain attached to the original provider column.
+  const issueGroups = columnMode !== 'canvas' && showGitHub
+    ? [null, ...board.columns].map(col => ({ col, lane: githubLane(col?.id ?? null) }))
+        .filter(({ lane }) => lane.count || lane.footer || (Array.isArray(lane.cards) && lane.cards.length))
+    : []
 
   // Right-click menu for a card: open on canvas, move to another column, delete.
   const cardMenuItems = (nodeId: string): MenuItem[] => {
@@ -539,7 +556,7 @@ export const KanbanView = memo(function KanbanView({
       { label: 'Open card', icon: <IconExternal />, onClick: () => setModalNodeId(nodeId) },
       { label: 'Open on canvas', icon: <IconExternal />, onClick: () => onOpenNode(nodeId) },
       ...(moveTargets.length
-        ? ([{ type: 'submenu', label: 'Move to', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
+        ? ([{ type: 'submenu', label: columnMode === 'canvas' ? 'Move to' : 'Move to canvas group', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
         : []),
       workflowBoard ? { label: 'Open workflow board', icon: <IconExternal />, onClick: () => {
         window.open(taskBoardHref(workflowBoard, externalTasks.get(nodeId)?.task), '_blank', 'noopener,noreferrer')
@@ -564,11 +581,23 @@ export const KanbanView = memo(function KanbanView({
         <span className="kanban-header__dot" style={{ background: projectColor }} />
         <span className="kanban-header__name">{projectName}</span>
         {workflowBoard && <a className="kanban-github-status" href={workflowBoard} target="_blank" rel="noreferrer">Workflow board ↗</a>}
-        <select aria-label="Card order" value={sortMode} title="Priority view uses derived order. Choose Manual order to drag cards; Move to remains available in the card menu."
+        {workflowBoard && catalog && <label className="kanban-column-mode">Columns
+          <select aria-label="Columns" value={columnMode} disabled={source === 'github'}
+            onChange={e => {
+              const mode = e.target.value
+              if (mode === 'workflow' || mode === 'stage' || mode === 'canvas') setKanbanColumns(projectId, mode)
+            }}>
+            <option value="workflow">Workflow</option>
+            <option value="stage">Stage</option>
+            <option value="canvas">Canvas groups</option>
+          </select>
+        </label>}
+        {workflowBoard && !feedAvailable && <span className="kanban-github-status" role="status">Task board unavailable</span>}
+        {columnMode === 'canvas' && <select aria-label="Card order" value={sortMode} title="Priority view uses derived order. Choose Manual order to drag cards; Move to remains available in the card menu."
           onChange={e => { const mode = e.target.value; if (mode === 'manual' || mode === 'priority') setKanbanSort(projectId, mode) }}>
           <option value="manual">Manual order</option>
           <option value="priority">{workflowBoard ? 'Work Board urgency' : 'Priority'}</option>
-        </select>
+        </select>}
         {board.github && <KanbanSourceFilter value={source} onChange={setSource} />}
         {workflowBoard ? <select aria-label="Workflow" value={workflowOptions.includes(workflowFilter) ? workflowFilter : ''}
           onChange={e => setWorkflowFilter(e.target.value)}>
@@ -646,35 +675,48 @@ export const KanbanView = memo(function KanbanView({
       </div>
       <div className="kanban-board">
         <div className="kanban-board__columns">
-          <KanbanColumn
-            column={null}
-            lanes={lanesFor(null)}
-            createOptions={createOptions}
-            onCreate={onCreateNode}
-            onDragEnd={handleDragEnd}
-            onDropOnColumn={dropOnColumn}
-          />
-          {board.columns.map((col) => (
+          {columnMode !== 'canvas' ? <>
+            {columnCards.groups.map(group => (
+              <TaskBoardColumn key={group.id} title={group.title} count={group.cards.length}>
+                {sessionCards(group.cards, null)}
+              </TaskBoardColumn>
+            ))}
+            {issueGroups.length > 0 && <TaskBoardColumn title="GitHub issues" count={issueGroups.reduce((sum, { lane }) => sum + lane.count, 0)}>
+              {issueGroups.map(({ col, lane }) => <div className="kanban-col__issue-group" key={col?.id ?? ''}>
+                <h3>{col?.title ?? 'Ungrouped'}</h3>{lane.cards}{lane.footer}
+              </div>)}
+            </TaskBoardColumn>}
+          </> : <>
             <KanbanColumn
-              key={col.id}
-              column={col}
-              lanes={lanesFor(col.id)}
-              onRename={handleRenameColumn}
-              onRecolor={handleRecolorColumn}
-              onDelete={handleDeleteColumn}
+              column={null}
+              lanes={lanesFor(null)}
               createOptions={createOptions}
               onCreate={onCreateNode}
-              onColumnDragStart={handleColumnDragStart}
               onDragEnd={handleDragEnd}
               onDropOnColumn={dropOnColumn}
             />
-          ))}
-          <button
-            className="kanban-add-col"
-            onClick={() => commit(addColumn(board, 'New column', nextColumnColor(board)))}
-          >
-            + Add column
-          </button>
+            {board.columns.map((col) => (
+              <KanbanColumn
+                key={col.id}
+                column={col}
+                lanes={lanesFor(col.id)}
+                onRename={handleRenameColumn}
+                onRecolor={handleRecolorColumn}
+                onDelete={handleDeleteColumn}
+                createOptions={createOptions}
+                onCreate={onCreateNode}
+                onColumnDragStart={handleColumnDragStart}
+                onDragEnd={handleDragEnd}
+                onDropOnColumn={dropOnColumn}
+              />
+            ))}
+            <button
+              className="kanban-add-col"
+              onClick={() => commit(addColumn(board, 'New column', nextColumnColor(board)))}
+            >
+              + Add column
+            </button>
+          </>}
         </div>
       </div>
       {cardMenu && byId.has(cardMenu.nodeId) && (

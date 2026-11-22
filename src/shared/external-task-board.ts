@@ -9,8 +9,14 @@ export interface ExternalTask {
   priority: string | null
 }
 
+export interface ExternalTaskColumns {
+  workflows: string[]
+  stages: string[]
+}
+
 export interface ExternalTaskBoard {
   url: string
   available: boolean
   cards: ExternalTask[]
+  columns?: ExternalTaskColumns
 }
