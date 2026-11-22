@@ -5,15 +5,14 @@ import { readLocal, writeLocal } from '../lib/localStore'
 // per machine: persisted in localStorage, deliberately never in the git-shared
 // .nodeterm/project.json (same rule as the view mode).
 //
-// Open is the default, so a fresh install still shows the feed the first time. Only an explicit
-// close/open is remembered: once the user collapses the panel, every card they open afterwards
-// (this session and after a restart) comes up collapsed until they expand it again.
+// An untouched preference leaves the default to the card kind.
 
 export const CARD_PANEL_KEY = 'nodeterm.cardCommentsOpen'
 
-/** Parses the persisted flag. Anything missing or unparseable means open (the default). */
-export function parseCardPanelOpen(raw: string | null): boolean {
-  return raw !== 'false'
+export function parseCardPanelOpen(raw: string | null): boolean | null {
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  return null
 }
 
 function save(open: boolean): void {
@@ -25,16 +24,14 @@ function save(open: boolean): void {
 }
 
 interface CardPanelState {
-  open: boolean
+  open: boolean | null
   setOpen(open: boolean): void
-  toggle(): void
 }
 
-export const useCardPanel = create<CardPanelState>((set, get) => ({
+export const useCardPanel = create<CardPanelState>((set) => ({
   open: parseCardPanelOpen(readLocal(CARD_PANEL_KEY)),
   setOpen: (open) => {
     save(open)
     set({ open })
-  },
-  toggle: () => get().setOpen(!get().open)
+  }
 }))

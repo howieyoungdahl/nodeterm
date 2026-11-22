@@ -38,6 +38,41 @@ describe('configured task board', () => {
     }
   })
 
+  it('resolves background helpers from exact local fields, including while the feed is offline', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'nt-background-'))
+    try {
+      const file = join(dir, 'helper.json')
+      const text = join(dir, 'primary')
+      const pointer = { nodeIdFile: file, nodeIdField: 'helper' }
+      const primary = { nodeIdFile: text, label: 'Coordinator' }
+      await writeFile(text, 'lead')
+      await writeFile(join(dir, 'external-task-boards.json'), JSON.stringify({ one: {
+        url: 'https://board.example/view', feed: 'https://board.example/feed', tokenFile: join(dir, 'absent'),
+        featuredSession: primary, backgroundSessions: [pointer, pointer, primary]
+      } }))
+      const nodes = new Set(['lead', 'job-one', 'job-two'])
+      const read = createExternalTaskBoard(dir, () => nodes)
+      const readings: Array<[string, string[]]> = [
+        [JSON.stringify({ primary: 'lead', helper: 'job-one' }), ['job-one']],
+        [JSON.stringify({ primary: 'lead', helper: 'job-two' }), ['job-two']],
+        [JSON.stringify({ primary: 'lead', helper: 'foreign' }), []],
+        [JSON.stringify({ primary: 'lead', helper: 'lead' }), []],
+        [JSON.stringify({ primary: 'lead' }), []],
+        [JSON.stringify({ helper: ['job-one'] }), []],
+        ['broken', []], [' '.repeat(4096) + '{"helper":"job-one"}', []]
+      ]
+      for (const [receipt, expected] of readings) {
+        await writeFile(file, receipt)
+        expect(await read('one')).toEqual({
+          url: 'https://board.example/view', available: false, cards: [],
+          featuredSession: { label: 'Coordinator', nodeId: 'lead' }, backgroundNodeIds: expected
+        })
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('keeps the credential on the server, returns only this project’s bindings, and drops stale readings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nt-task-board-'))
     try {

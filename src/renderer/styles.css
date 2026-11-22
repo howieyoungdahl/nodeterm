@@ -8758,32 +8758,30 @@ button.group-node__setup:disabled {
 .kanban-header > .kanban-col__footer { padding: 0; }
 .kanban-header .kanban-col__new { font-size: 13px; color: var(--text); white-space: nowrap; }
 .kanban-header .kanban-col__newmenu { min-width: 180px; z-index: 6; }
-.kanban-featured {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
+.kanban-featured, .kanban-background {
+  display: inline-flex;
   align-items: center;
-  gap: 6px 16px;
-  margin: 8px 16px 0;
-  padding: 10px 14px;
-  border-left: 3px solid var(--accent);
-  border-radius: 6px;
+  gap: 6px;
+  min-height: 30px;
+  max-width: 100%;
+  padding: 4px 9px;
   background: var(--surface-deep);
   color: var(--text);
-}
-.kanban-featured h2 { margin: 0; font-size: 18px; color: var(--text-strong); }
-.kanban-featured h2, .kanban-featured__name { overflow-wrap: anywhere; min-width: 0; }
-.kanban-featured__name { font-size: 14px; }
-.kanban-featured button {
-  padding: 5px 12px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: transparent;
-  color: var(--accent-text);
-  font-size: 14px;
+  font: inherit;
+  font-size: 13px;
   cursor: pointer;
 }
-.kanban-featured button:hover { background: rgba(var(--tint-rgb), 0.08); }
+.kanban-featured {
+  border-left: 3px solid var(--accent);
+  color: var(--text-strong);
+  font-weight: 650;
+}
+.canvas-background-session { visibility: hidden !important; pointer-events: none !important; }
+.controls-cluster > .canvas-background-toggle { width: auto; padding-inline: 8px; font-size: 13px; }
+.kanban-featured:disabled { color: var(--muted); cursor: default; }
+.kanban-featured:not(:disabled):hover, .kanban-background:hover { border-color: var(--accent); }
 .kanban-board--matrix {
   --kanban-row-width: 9rem;
   --kanban-column-width: 18rem;
@@ -8842,8 +8840,8 @@ button.group-node__setup:disabled {
   align-items: start;
 }
 @media (max-width: 600px) {
-  .kanban-board--matrix { --kanban-row-width: 6rem; --kanban-column-width: 15rem; padding-inline: 6px; }
-  .kanban-featured { margin: 6px 8px 0; padding: 6px 10px; gap: 4px 10px; }
+  .kanban-board--matrix { --kanban-row-width: 7rem; --kanban-column-width: 15rem; padding-inline: 6px; }
+  .canvas-background-toggle { position: absolute; top: calc(100% + 6px); right: 0; }
 }
 @media (max-width: 900px) {
   .kanban-header {
@@ -9168,9 +9166,8 @@ button.group-node__setup:disabled {
 }
 @media (max-width: 520px) {
   .kanban-header {
-    gap: 6px;
-    padding-left: 10px;
-    padding-right: 112px;
+    gap: 4px 8px;
+    padding-inline: 10px;
   }
   .kanban-header__name {
     max-width: 84px;
@@ -9473,6 +9470,13 @@ button.group-node__setup:disabled {
   border-radius: 12px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, calc(0.6 * var(--shadow-k)));
   overflow: hidden;
+}
+.kanban-modal[data-maximized] {
+  max-width: 100%;
+  max-height: 100%;
+  border: 0;
+  border-radius: 0;
+  animation: none;
 }
 /* Resize handles (issue #389): thin strips just inside each edge, larger squares at the corners.
    Inset (not outset) so the sheet's overflow:hidden / border-radius doesn't clip them. */

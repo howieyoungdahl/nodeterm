@@ -66,10 +66,9 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   const observedAccount = useAgentStatus((st) => st.byId[session.id]?.account)
   const accountChip = useAccountChip(session.spawn.accountId, observedAccount)
   const [naming, setNaming] = useState(false)
-  // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it. The
-  // choice is remembered (localStorage) — once collapsed, later cards open collapsed too.
-  const panelOpen = useCardPanel((s) => s.open)
-  const togglePanel = useCardPanel((s) => s.toggle)
+  // Use the workspace for the live terminal until the user chooses their own layout.
+  const panelOpen = useCardPanel((s) => s.open) ?? (session.kind !== 'terminal')
+  const setPanelOpen = useCardPanel((s) => s.setOpen)
   const external = useProjectTaskLink(session.id)
   const displayTitle = taskDisplayTitle(session.title, session.titleAuto, external?.task)
   const titleBeforeEdit = useRef(session.title)
@@ -82,7 +81,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   // maximized flag) is remembered per machine in localStorage — see cardModalSize.ts.
   const savedWidth = useCardModalSize((s) => s.width)
   const savedHeight = useCardModalSize((s) => s.height)
-  const maximized = useCardModalSize((s) => s.maximized)
+  const maximized = useCardModalSize((s) => s.maximized) ?? (session.kind === 'terminal')
   const rememberSize = useCardModalSize((s) => s.remember)
   const setMaximized = useCardModalSize((s) => s.setMaximized)
   const [viewport, setViewport] = useState(() => ({
@@ -319,7 +318,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
             className="kanban-modal__action"
             title={panelOpen ? 'Hide comments & activity' : 'Show comments & activity'}
             aria-pressed={panelOpen}
-            onClick={togglePanel}
+            onClick={() => setPanelOpen(!panelOpen)}
           >
             <IconChat />
           </button>
