@@ -5,6 +5,39 @@ import { join } from 'node:path'
 import { createExternalTaskBoard } from './external-task-board'
 
 describe('configured task board', () => {
+  it('follows the local featured terminal through handoffs and omits pointers outside the project', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'nt-featured-'))
+    try {
+      const nodeIdFile = join(dir, 'current-node')
+      const tokenFile = join(dir, 'token')
+      const url = 'https://board.example/view'
+      const featuredSession = { label: 'Coordinator', nodeIdFile }
+      await writeFile(tokenFile, 'test-token')
+      await writeFile(join(dir, 'external-task-boards.json'), JSON.stringify({
+        one: { url, feed: 'https://board.example/feed', tokenFile, featuredSession }
+      }))
+      const nodes = new Set(['first', 'second'])
+      const feed = vi.fn(async () => Response.json({ asOf: new Date().toISOString(), cards: [] }))
+      const board = createExternalTaskBoard(dir, () => nodes, feed)
+      const handoffs = [['first\n', 'first'], ['second\n', 'second'], ['another-project', null], ['first\nsecond', null]] as const
+      for (const [content, expected] of handoffs) {
+        await writeFile(nodeIdFile, content)
+        expect((await board('one'))?.featuredSession).toEqual({ label: 'Coordinator', nodeId: expected })
+      }
+      expect(feed).toHaveBeenCalledTimes(1)
+      await rm(nodeIdFile)
+      expect((await board('one'))?.featuredSession).toEqual({ label: 'Coordinator', nodeId: null })
+      await writeFile(nodeIdFile, 'second')
+      const offline = createExternalTaskBoard(dir, () => nodes, async () => Response.error())
+      expect(await offline('one')).toEqual({
+        url, available: false, cards: [], featuredSession: { label: 'Coordinator', nodeId: 'second' }
+      })
+      expect(await board('unconfigured')).toBeNull()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('keeps the credential on the server, returns only this project’s bindings, and drops stale readings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nt-task-board-'))
     try {

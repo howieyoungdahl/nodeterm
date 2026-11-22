@@ -1,13 +1,15 @@
-import { readFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { open, readFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import { isSafeNodeId } from '../shared/safe-id'
+import { isSafeNodeId, NODE_ID_MAX } from '../shared/safe-id'
 import type { ExternalTask, ExternalTaskBoard, ExternalTaskColumns } from '../shared/external-task-board'
 
 interface BoardConfig {
   url: string
   feed: string
   tokenFile: string
+  featuredSession?: { label: string; nodeIdFile: string }
 }
 interface Feed extends Partial<ExternalTaskColumns> {
   asOf: string
@@ -37,6 +39,28 @@ function secureUrl(value: string) {
   const url = new URL(value)
   if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Invalid task board URL')
   return url
+}
+
+/** The host publishes one current terminal ID. Only the resolved project member goes on the wire. */
+async function readFeaturedSession(config: BoardConfig['featuredSession'], nodes: Set<string>) {
+  if (!config || !bounded(config.label, 80) || !bounded(config.nodeIdFile, 4096) || !isAbsolute(config.nodeIdFile)) return
+  const feature: NonNullable<ExternalTaskBoard['featuredSession']> = { label: config.label, nodeId: null }
+  try {
+    const file = await open(config.nodeIdFile, constants.O_RDONLY | constants.O_NONBLOCK)
+    try {
+      const stat = await file.stat()
+      if (!stat.isFile() || stat.size > NODE_ID_MAX + 2) return feature
+      const bytes = Buffer.alloc(NODE_ID_MAX + 3)
+      const { bytesRead } = await file.read(bytes, 0, bytes.length, 0)
+      const id = bytes.toString('utf8', 0, bytesRead).trim()
+      if (bytesRead < bytes.length && isSafeNodeId(id) && nodes.has(id)) feature.nodeId = id
+    } finally {
+      await file.close()
+    }
+  } catch {
+    // A missing or unreadable pointer keeps the reserved spot empty through a handoff.
+  }
+  return feature
 }
 
 /** Only the operator's server config can supply a destination or a credential path. */
@@ -93,9 +117,11 @@ export function createExternalTaskBoard(
     } catch {
       return null
     }
+    let featuredSession: ExternalTaskBoard['featuredSession']
     try {
       const ids = nodesFor(projectId)
       if (!ids) return null
+      featuredSession = await readFeaturedSession(config.featuredSession, ids)
       const signature = JSON.stringify(config)
       let entry = cache.get(projectId)
       if (!entry || entry.signature !== signature || Date.now() >= entry.until) {
@@ -117,9 +143,9 @@ export function createExternalTaskBoard(
           reason: c.reason,
           priority: c.priority
         }))
-      return { ...snapshot, url: config.url, available: true, cards }
+      return { ...snapshot, url: config.url, available: true, cards, featuredSession }
     } catch {
-      return { url: config.url, available: false, cards: [] }
+      return { url: config.url, available: false, cards: [], featuredSession }
     }
   }
 }

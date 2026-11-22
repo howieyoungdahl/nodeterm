@@ -14,7 +14,7 @@ import { assessTaskUrgency, parseTaskPlanning } from '@shared/task-planning'
 
 import { effectivePriority } from '../../lib/kanbanPriority'
 import { useProjects } from '../../state/projects'
-import { taskDisplayTitle, useExternalBoard } from '../../state/externalTaskBoard'
+import { taskBoardHref, taskDisplayTitle, useExternalBoard } from '../../state/externalTaskBoard'
 
 const PRIO_COLOR: Record<KanbanPriority, string> = {
   low: '#8e8e93',
@@ -90,6 +90,7 @@ export const SessionCard = memo(function SessionCard({
   const project = useProjects(s => s.activeProjectId)
   const externalBoard = useExternalBoard(s => s.project === project ? s.url : null)
   const linkedTasks = useExternalBoard(s => s.project === project ? s.tasks : null)
+  const linkedTask = linkedTasks?.get(session.id)
   const titleFor = (card: KanbanSession) => taskDisplayTitle(card.title, card.titleAuto, linkedTasks?.get(card.id))
   const priority = externalBoard ? undefined : effectivePriority(meta, session.taskPlanning, priorityNow)
   // The account chip counts as detail in its own right: a card whose only thing to say is "this
@@ -138,9 +139,23 @@ export const SessionCard = memo(function SessionCard({
     >
       <div className="kanban-card__row">
         <span className="kanban-card__nodedot" style={{ background: session.color }} />
-        <span className="kanban-card__title">{titleFor(session)}</span>
+        <button type="button" className="kanban-card__title" onClick={e => {
+          e.stopPropagation()
+          onOpen(session.id)
+        }}>{titleFor(session)}</button>
         {session.kind === 'sticky' && <span className="kanban-card__kind">note</span>}
         {session.kind === 'browser' && <span className="kanban-card__kind">web</span>}
+        {status?.unread && <span className="kanban-card__unread" title="Unread" />}
+      </div>
+      {session.kind === 'terminal' && <div className="kanban-card__metarow">
+        {externalBoard && linkedTask && <a className="kanban-card__task" href={taskBoardHref(externalBoard, linkedTask.task)}
+          target="_blank" rel="noreferrer" draggable={false} onClick={e => e.stopPropagation()}
+          title={linkedTask.taskTitle ?? linkedTask.task}>Task {linkedTask.task}</a>}
+        <TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} />
+      </div>}
+      {session.organization && <div className="kanban-card__metarow"><OrganizationBadge organization={session.organization} nodeId={session.id} /></div>}
+      {(showStatus || badge) && <div className="kanban-card__status">
+        <span>Session</span>
         {showStatus && (
           <NodeStatusBadge nodeId={session.id} agentId={session.agentId as AgentId} compact />
         )}
@@ -152,10 +167,7 @@ export const SessionCard = memo(function SessionCard({
             SLEEPING
           </span>
         )}
-        {status?.unread && <span className="kanban-card__unread" />}
-      </div>
-      {session.organization && <div className="kanban-card__metarow"><OrganizationBadge organization={session.organization} nodeId={session.id} /></div>}
-      {session.kind === 'terminal' && <div className="kanban-card__metarow"><TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} /></div>}
+      </div>}
       {supportingSessions.length > 0 && <div className="kanban-card__detail" onClick={e => e.stopPropagation()}>
         <button type="button" draggable={false} aria-expanded={supportsExpanded}
           onClick={() => onToggleSupport?.(session.id)}>

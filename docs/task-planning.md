@@ -79,6 +79,13 @@ priority through a handoff. Workflow and stage have separate, wrapping chips. Th
 
 Feeds can supply ordered `workflows` and `stages` arrays of display names. Kanban then opens with workflows across the top and stages down the side, including empty cells. Choose Stage under Columns to swap the axes. Each cell follows the feed's urgency order. Unlinked cards appear beneath the table. Canvas groups restores the manually arranged board. The browser remembers the choice per project.
 
+To reserve a spot above the board for a coordinating session, add `featuredSession`
+to that project's server configuration, for example
+`{"label":"Coordinator","nodeIdFile":"/path/to/current-node"}`. The host places the
+current terminal ID in this small plain-text file and replaces it at handoff. The
+board rereads the ID on refresh and opens the terminal's usual card. If the file
+is missing or names a terminal outside the project, the spot shows its unavailable state.
+
 A verified card may include a registered lane `displayName` and its owning `taskTitle`. The canvas and Kanban display the registered name on automatically named terminals. A numbered terminal can also use its task title. A manually set canvas name takes precedence, and opening the card identifies the linked task and physical canvas group.
 
 Only an explicit supporting relationship with exactly one present independent parent on
