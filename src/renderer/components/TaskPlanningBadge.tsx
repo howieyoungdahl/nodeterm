@@ -8,8 +8,10 @@ export function TaskPlanningBadge({ planning, nodeId }: { planning?: TaskPlannin
   const meta = useProjects(s => s.projects.find(p => p.nodes.some(n => n.id === nodeId))?.kanban?.meta?.find(m => m.nodeId === nodeId))
   if (external) {
     const task = external.task
-    if (!task) return <span className="task-planning-note">
-      {external.available ? 'No verified task link' : 'Work board unavailable'}
+    if (!task) return <span className="task-planning-facts">
+      {meta?.category && meta.category !== 'needs-classification' && <span className="task-planning-chip"
+        title="Local category">{meta.category.replaceAll('-', ' ')}</span>}
+      <span className="task-planning-note">{external.available ? 'No verified task link' : 'Work board unavailable'}</span>
     </span>
     return <span className="task-planning-facts" aria-label="Task details">
       <span className="task-planning-chip task-planning-chip--workflow" title={`Workflow for ${task.task}`}>

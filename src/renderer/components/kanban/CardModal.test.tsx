@@ -67,6 +67,8 @@ describe('CardModal', () => {
 
   it('shows the linked task fields instead of the local planning defaults in the opened card', () => {
     const session: KanbanSession = { id: 'term-1', kind: 'terminal', title: 'Terminal', color: '#fff', spawn: {} }
+    const localBoard: ProjectKanban = { ...board, meta: [{ nodeId:session.id, category:'research' }] }
+    const onChangeBoard = vi.fn()
     const projectState = useProjects.getState()
     const externalState = useExternalBoard.getState()
     const root = createRoot(host)
@@ -81,7 +83,7 @@ describe('CardModal', () => {
             size: { width: 600, height: 400 }, color: session.color, group: null }] }]})
         useExternalBoard.setState({ project: 'p', url: 'https://board.example/view', available: true,
           tasks: new Map([[session.id, task]]) })
-        root.render(<CardModal session={session} board={board} columnTitle="Release queue" onChangeBoard={vi.fn()}
+        root.render(<CardModal session={session} board={localBoard} columnTitle="Release queue" onChangeBoard={onChangeBoard}
           onClose={vi.fn()} onOpenCanvas={vi.fn()} onRename={vi.fn()} onEditSticky={vi.fn()} onBrowserNav={vi.fn()} />)
       })
       expect(fields()).toEqual({Workflow:'Agent tooling', Stage:'In progress', Urgency:'This week', Priority:'Unranked'})
@@ -92,9 +94,15 @@ describe('CardModal', () => {
       act(() => useExternalBoard.setState({ tasks: new Map([[session.id, { ...task, stage:'Waiting', urgency:'Now', priority:'P2' }]]) }))
       expect(fields()).toEqual({Workflow:'Agent tooling', Stage:'Waiting', Urgency:'Now', Priority:'P2'})
       act(() => useExternalBoard.setState({available:false, tasks:new Map()}))
-      expect(fields()).toEqual({Workflow:'Work board unavailable'})
+      expect(fields()).toEqual({'Work board':'Work board unavailable'})
+      const localCategory = document.querySelector<HTMLSelectElement>('.kanban-meta select')!
+      expect(localCategory.labels?.[0].textContent).toBe('Local category')
+      expect(localCategory.value).toBe('research')
+      const high = [...document.querySelectorAll<HTMLButtonElement>('.kanban-meta .kanban-prio')].find(b => b.textContent === 'High')!
+      act(() => high.click())
+      expect(onChangeBoard.mock.lastCall?.[0].meta[0].priority).toBe('high')
       act(() => useExternalBoard.setState({url:null}))
-      expect(document.querySelector<HTMLSelectElement>('.kanban-meta select')?.value).toBe('needs-classification')
+      expect(document.querySelector<HTMLSelectElement>('.kanban-meta select')?.labels?.[0].textContent).toBe('Category')
     } finally {
       act(() => { root.unmount(); useExternalBoard.setState(externalState); useProjects.setState(projectState) })
     }

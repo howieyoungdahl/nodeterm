@@ -68,8 +68,8 @@ export function CardMetaBar({ nodeId, board, onChange, external }: CardMetaBarPr
   const task = external?.task
   return (
     <div className={external ? "kanban-meta kanban-meta--workflow" : "kanban-meta"}>
-      {external ? <dl className="kanban-meta__task" aria-label="Work Board task details">
-        <div><dt>Workflow</dt><dd>{task ? task.workflow ?? 'Unassigned workflow' :
+      {external && <dl className="kanban-meta__task" aria-label="Work Board task details">
+        <div><dt>{task ? 'Workflow' : 'Work board'}</dt><dd>{task ? task.workflow ?? 'Unassigned workflow' :
           external.available ? 'No verified task link' : 'Work board unavailable'}</dd></div>
         {task && <>
           <div><dt>Stage</dt><dd>{task.stage}</dd></div>
@@ -77,11 +77,12 @@ export function CardMetaBar({ nodeId, board, onChange, external }: CardMetaBarPr
             {task.reason && <dd className="kanban-meta__urgency-reason">{task.reason}</dd>}</div>
           <div><dt>Priority</dt><dd>{task.priority ?? 'Unranked'}</dd></div>
         </>}
-      </dl> : <div className="kanban-meta__group">
-        <label className="kanban-meta__label" htmlFor={`work-category-${nodeId}`}>Category</label>
+      </dl>}
+      {!task && <div className="kanban-meta__group">
+        <label className="kanban-meta__label" htmlFor={`work-category-${nodeId}`}>{external ? 'Local category' : 'Category'}</label>
         <select id={`work-category-${nodeId}`} value={meta?.category ?? plannedCategory ?? 'needs-classification'}
           onChange={e => onChange(setCardCategory(board, nodeId, e.target.value as TaskCategory))}>
-          {TASK_CATEGORIES.map(category => <option key={category} value={category}>{category.replaceAll('-', ' ')}</option>)}
+          {TASK_CATEGORIES.map(category => <option key={category} value={category}>{external && category === 'needs-classification' ? 'Unassigned' : category.replaceAll('-', ' ')}</option>)}
         </select>
       </div>}
       <div className="kanban-meta__group">
@@ -169,8 +170,8 @@ export function CardMetaBar({ nodeId, board, onChange, external }: CardMetaBarPr
           )}
         </div>
       </div>
-      {!external && <div className="kanban-meta__group">
-        <span className="kanban-meta__label">Priority</span>
+      {!task && <div className="kanban-meta__group">
+        <span className="kanban-meta__label">{external ? 'Local priority' : 'Priority'}</span>
         <div className="kanban-meta__row">
           {PRIORITIES.map((pr) => (
             <button
