@@ -11,13 +11,19 @@ import { readLocal, writeLocal } from '../lib/localStore'
 export const PROJECT_VIEW_KEY = 'nodeterm.projectView'
 
 export const PROJECT_KANBAN_SORT_KEY = 'nodeterm.projectKanbanSort'
+const PROJECT_KANBAN_COLUMNS_KEY = 'nodeterm.projectKanbanColumns'
+const COLUMN_MODES = ['workflow', 'stage', 'canvas'] as const
+export type KanbanColumns = typeof COLUMN_MODES[number]
 export type KanbanSort = 'manual' | 'priority'
-export function parseKanbanSortMap(raw: string | null): Record<string, KanbanSort> {
+function parseOptions<T extends string>(raw: string | null, allowed: readonly T[]): Record<string, T> {
   try {
     const parsed: unknown = raw ? JSON.parse(raw) : {}
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-    return Object.fromEntries(Object.entries(parsed).filter(([, value]) => value === 'manual' || value === 'priority'))
+    return Object.fromEntries(Object.entries(parsed).filter(([, value]) => allowed.includes(value)))
   } catch { return {} }
+}
+export function parseKanbanSortMap(raw: string | null): Record<string, KanbanSort> {
+  return parseOptions(raw, ['manual', 'priority'])
 }
 
 export type ProjectView = 'canvas' | 'kanban'
@@ -44,6 +50,8 @@ function save(v: Record<string, ProjectView>): void {
 }
 
 interface ViewModeState {
+  kanbanColumnsByProject: Record<string, KanbanColumns>
+  setKanbanColumns(projectId: string, mode: KanbanColumns): void
   kanbanSortByProject: Record<string, KanbanSort>
   setKanbanSort(projectId: string, mode: KanbanSort): void
   viewByProject: Record<string, ProjectView>
@@ -71,6 +79,13 @@ export function viewFor(s: Pick<ViewModeState, 'viewByProject' | 'defaultView'>,
 }
 
 export const useViewMode = create<ViewModeState>((set) => ({
+  kanbanColumnsByProject: parseOptions(readLocal(PROJECT_KANBAN_COLUMNS_KEY), COLUMN_MODES),
+  setKanbanColumns: (projectId, mode) => set(s => {
+    if (!COLUMN_MODES.includes(mode)) return s
+    const next = { ...s.kanbanColumnsByProject, [projectId]: mode }
+    writeLocal(PROJECT_KANBAN_COLUMNS_KEY, JSON.stringify(next))
+    return { kanbanColumnsByProject: next }
+  }),
   kanbanSortByProject: parseKanbanSortMap(readLocal(PROJECT_KANBAN_SORT_KEY)),
   setKanbanSort: (projectId, mode) => set(s => {
     if (mode !== 'manual' && mode !== 'priority') return s

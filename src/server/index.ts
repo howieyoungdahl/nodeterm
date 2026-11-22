@@ -1041,7 +1041,7 @@ export async function startServer(
       downloadTickets,
       taskBoard: createExternalTaskBoard(config.dataDir, (id) => {
         const project = workspaceStore.persistedCanvases().find(p => p.id === id)
-        return project ? new Set(project.nodes.map(n => n.id)) : null
+        return project ? new Set(project.nodes.filter(n => n.kind === 'terminal').map(n => n.id)) : null
       }),
       opsApi
     })

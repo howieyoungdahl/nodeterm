@@ -2,25 +2,29 @@ import { readFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { isSafeNodeId } from '../shared/safe-id'
-import type { ExternalTask, ExternalTaskBoard } from '../shared/external-task-board'
+import type { ExternalTask, ExternalTaskBoard, ExternalTaskColumns } from '../shared/external-task-board'
 
 interface BoardConfig {
   url: string
   feed: string
   tokenFile: string
 }
-interface Feed {
+interface Feed extends Partial<ExternalTaskColumns> {
   asOf: string
   cards: ExternalTask[]
 }
 const bounded = (v: unknown, max: number): v is string =>
   typeof v === 'string' && v.length > 0 && v.length <= max
 const optional = (v: unknown, max: number) => v === null || bounded(v, max)
+const validNames = (names: unknown): names is string[] =>
+  Array.isArray(names) && names.length > 0 && names.length <= 100 && names.every(name => bounded(name, 160))
 function validCard(c: ExternalTask) {
   return (
     c &&
     isSafeNodeId(c.nodeId) &&
     bounded(c.task, 100) &&
+    (c.displayName === undefined || optional(c.displayName, 240)) &&
+    (c.taskTitle === undefined || optional(c.taskTitle, 500)) &&
     bounded(c.stage, 100) &&
     optional(c.workflow, 160) &&
     optional(c.urgency, 100) &&
@@ -41,8 +45,9 @@ export function createExternalTaskBoard(
   nodesFor: (projectId: string) => Set<string> | null,
   fetchFeed: typeof fetch = fetch
 ) {
-  const cache = new Map<string, { signature: string; until: number; feed: Promise<ExternalTask[]> }>()
-  async function load(config: BoardConfig): Promise<ExternalTask[]> {
+  type Snapshot = Pick<ExternalTaskBoard, 'cards' | 'columns'>
+  const cache = new Map<string, { signature: string; until: number; feed: Promise<Snapshot> }>()
+  async function load(config: BoardConfig): Promise<Snapshot> {
     const endpoint = secureUrl(config.feed)
     if (endpoint.origin !== secureUrl(config.url).origin || !isAbsolute(config.tokenFile))
       throw new Error('Invalid task board feed')
@@ -72,7 +77,10 @@ export function createExternalTaskBoard(
       if (seen.has(card.nodeId)) ambiguous.add(card.nodeId)
       seen.add(card.nodeId)
     }
-    return feed.cards.filter(card => !ambiguous.has(card.nodeId))
+    const cards = feed.cards.filter(card => !ambiguous.has(card.nodeId))
+    if (validNames(feed.workflows) && validNames(feed.stages))
+      return { cards, columns: { workflows: [...new Set(feed.workflows)], stages: [...new Set(feed.stages)] } }
+    return { cards }
   }
   return async function read(projectId: string): Promise<ExternalTaskBoard | null> {
     if (!isSafeNodeId(projectId)) return null
@@ -94,11 +102,14 @@ export function createExternalTaskBoard(
         entry = { signature, until: Date.now() + 15000, feed: load(config) }
         cache.set(projectId, entry)
       }
-      const cards = (await entry.feed)
+      const snapshot = await entry.feed
+      const cards = snapshot.cards
         .filter((card) => ids.has(card.nodeId))
         .map((c) => ({
           nodeId: c.nodeId,
           task: c.task,
+          ...(c.displayName ? { displayName: c.displayName } : {}),
+          ...(c.taskTitle ? { taskTitle: c.taskTitle } : {}),
           workflow: c.workflow,
           stage: c.stage,
           urgency: c.urgency,
@@ -106,7 +117,7 @@ export function createExternalTaskBoard(
           reason: c.reason,
           priority: c.priority
         }))
-      return { url: config.url, available: true, cards }
+      return { ...snapshot, url: config.url, available: true, cards }
     } catch {
       return { url: config.url, available: false, cards: [] }
     }

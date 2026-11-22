@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import type { ExternalTask, ExternalTaskBoard } from '../../shared/external-task-board'
+import type { ExternalTask, ExternalTaskBoard, ExternalTaskColumns } from '../../shared/external-task-board'
 import { isBrowserRuntime } from '../bridge/runtime'
 import { useProjects } from './projects'
 
@@ -8,9 +8,10 @@ interface BoardView {
   project: string
   url: string | null
   available: boolean
+  columns: ExternalTaskColumns | null
   tasks: Map<string, ExternalTask>
 }
-const empty = { project: '', url: null, available: false, tasks: new Map<string, ExternalTask>() }
+const empty = { project: '', url: null, available: false, columns: null, tasks: new Map<string, ExternalTask>() }
 export const useExternalBoard = create<BoardView>(() => empty)
 
 export interface ProjectTaskLink {
@@ -35,6 +36,13 @@ export function taskBoardHref(board: string, task?: string): string {
   return url.toString()
 }
 
+/** A manual canvas title wins. A verified outcome can also name a fresh numbered terminal. */
+export function taskDisplayTitle(title: string, titleAuto: boolean | undefined, task?: ExternalTask): string {
+  if (titleAuto === false || !task) return title
+  if (task.displayName) return task.displayName
+  return task.taskTitle && (!title || /^Terminal(?: \d+)?$/i.test(title)) ? task.taskTitle : title
+}
+
 /** Poll once for the active project, shared by the canvas and all its Kanban cards. */
 export function useExternalBoardSync() {
   const project = useProjects((s) => s.activeProjectId)
@@ -52,14 +60,17 @@ export function useExternalBoardSync() {
         if (!res.ok) throw new Error('Task board unavailable')
         const { board }: { board: ExternalTaskBoard | null } = await res.json()
         if (!controller.signal.aborted)
-          useExternalBoard.setState({
+          useExternalBoard.setState(previous => ({
             project,
             url: board?.url ?? null,
             available: board?.available ?? false,
+            columns: board && !board.available && previous.project === project && previous.url === board.url
+              ? previous.columns : board?.columns ?? null,
             tasks: new Map(board?.cards.map((card) => [card.nodeId, card]))
-          })
+          }))
       } catch {
-        if (!controller.signal.aborted) useExternalBoard.setState({ available: false, tasks: new Map() })
+        if (!controller.signal.aborted)
+          useExternalBoard.setState(previous => previous.project === project ? { available: false, tasks: new Map() } : previous)
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(refresh, 30000)
       }

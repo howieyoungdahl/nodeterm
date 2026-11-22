@@ -77,6 +77,10 @@ and `cards` with `nodeId`, `task`, `workflow`, `stage`, `urgency`, `reason` and
 project reach its signed-in browser. Badges use the task's recorded urgency and
 priority through a handoff. Workflow and stage have separate, wrapping chips. The open card shows the same workflow, stage, urgency reason and assigned priority in its metadata. An unverified terminal keeps its local category and priority editors, labelled as local alongside the link status. Its column label names the physical location. The task link opens the operator dashboard for edits.
 
+Feeds can supply ordered `workflows` and `stages` arrays of display names. Kanban then opens with workflows across the top and stages down the side, including empty cells. Choose Stage under Columns to swap the axes. Each cell follows the feed's urgency order. Unlinked cards appear beneath the table. Canvas groups restores the manually arranged board. The browser remembers the choice per project.
+
+A verified card may include a registered lane `displayName` and its owning `taskTitle`. The canvas and Kanban display the registered name on automatically named terminals. A numbered terminal can also use its task title. A manually set canvas name takes precedence, and opening the card identifies the linked task and physical canvas group.
+
 Only an explicit supporting relationship with exactly one present independent parent on
 the same board folds by default. The parent's expandable list opens each child's existing
 card/session. The complete session collection, saved nodes and history remain available;
