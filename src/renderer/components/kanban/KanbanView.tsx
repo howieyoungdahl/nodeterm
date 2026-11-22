@@ -368,6 +368,12 @@ export const KanbanView = memo(function KanbanView({
   // the sessions, nor the filter, which is what lets the memoized columns skip.
   const columnCards = useMemo(() => {
     const externalOrder = new Map(Array.from(externalTasks.keys(), (id, index) => [id, index]))
+    function groupOrder(card: KanbanSession) {
+      let earliest = externalOrder.get(card.id) ?? Infinity
+      for (const child of taskVisibility.supports.get(card.id) ?? [])
+        earliest = Math.min(earliest, externalOrder.get(child.id) ?? Infinity)
+      return earliest
+    }
     const workflow = workflowOptions.includes(workflowFilter) ? workflowFilter : ''
     const vis = (ids: string[]): string[] =>
       activeLocalFilter.length ? ids.filter((id) => cardMatchesLabelFilter(board, id, activeLocalFilter)) : ids
@@ -384,8 +390,7 @@ export const KanbanView = memo(function KanbanView({
       })
       if (!cards.length) return NO_CARDS
       if (sortMode !== 'priority') return cards
-      if (workflowBoard) return cards.sort((a, b) =>
-        (externalOrder.get(a.id) ?? Infinity) - (externalOrder.get(b.id) ?? Infinity))
+      if (workflowBoard) return cards.sort((a, b) => groupOrder(a) - groupOrder(b))
       return sortByPriority(cards, card => effectivePriority(cardMeta(board, card.id), card.taskPlanning, priorityNow))
     }
     return {

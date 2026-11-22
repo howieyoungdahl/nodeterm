@@ -13,6 +13,7 @@ import { TaskPlanningBadge } from '../TaskPlanningBadge'
 import { assessTaskUrgency, parseTaskPlanning } from '@shared/task-planning'
 
 import { effectivePriority } from '../../lib/kanbanPriority'
+import { useProjects } from '../../state/projects'
 import { useExternalBoard } from '../../state/externalTaskBoard'
 
 const PRIO_COLOR: Record<KanbanPriority, string> = {
@@ -86,7 +87,8 @@ export const SessionCard = memo(function SessionCard({
   const overdue = due !== undefined && due < Date.now()
   const planning = parseTaskPlanning(session.taskPlanning)
   const automaticUrgency = planning ? assessTaskUrgency(planning, priorityNow) : undefined
-  const externalBoard = useExternalBoard(s => s.url)
+  const project = useProjects(s => s.activeProjectId)
+  const externalBoard = useExternalBoard(s => s.project === project ? s.url : null)
   const priority = externalBoard ? undefined : effectivePriority(meta, session.taskPlanning, priorityNow)
   // The account chip counts as detail in its own right: a card whose only thing to say is "this
   // one is on the other Claude login" is exactly the card that must say it.

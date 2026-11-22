@@ -66,7 +66,13 @@ export function createExternalTaskBoard(
       !feed.cards.every(validCard)
     )
       throw new Error('Invalid task board snapshot')
-    return feed.cards
+    const seen = new Set<string>()
+    const ambiguous = new Set<string>()
+    for (const card of feed.cards) {
+      if (seen.has(card.nodeId)) ambiguous.add(card.nodeId)
+      seen.add(card.nodeId)
+    }
+    return feed.cards.filter(card => !ambiguous.has(card.nodeId))
   }
   return async function read(projectId: string): Promise<ExternalTaskBoard | null> {
     if (!isSafeNodeId(projectId)) return null

@@ -24,7 +24,7 @@ export function useExternalBoardSync() {
     async function refresh() {
       try {
         const res = await fetch('/task-board?project=' + encodeURIComponent(project), {
-          signal: controller.signal,
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]),
           cache: 'no-store'
         })
         if (!res.ok) throw new Error('Task board unavailable')

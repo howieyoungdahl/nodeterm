@@ -3,6 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
 import { defaultTaskPlanning } from '@shared/task-planning'
+import { useProjects } from '../../state/projects'
 import { useExternalBoard } from '../../state/externalTaskBoard'
 import { SessionCard } from './SessionCard'
 import type { KanbanSession } from './KanbanView'
@@ -42,8 +43,12 @@ it('shows the linked workflow and urgency and clears the badge if the task becom
   const task = { nodeId: 'one', task: 'example-12', workflow: 'Product', stage: 'In progress',
     urgency: 'Now', reason: 'Due tomorrow', priority: 'P2' }
   const original = useExternalBoard.getState()
+  const projectState = useProjects.getState()
   try {
     act(() => {
+      useProjects.setState({activeProjectId:'project', projects:[{...projectState.projects[0],id:'project',
+        nodes:[{id:'one',kind:'terminal',position:{x:0,y:0},size:{width:600,height:400},color:'#fff',
+          group:null,title:'Work session'}]}]})
       useExternalBoard.setState({ project: 'project', url: 'https://board.example', available: true, tasks: new Map([['one', task]]) })
       root.render(<SessionCard session={session} onOpen={vi.fn()} onContext={vi.fn()}
         onDragStart={vi.fn()} onDragEnd={vi.fn()} onDropAt={vi.fn()} />)
@@ -54,6 +59,6 @@ it('shows the linked workflow and urgency and clears the badge if the task becom
     expect(host.textContent).toContain('No verified task link')
     expect(host.textContent).not.toMatch(/needs classification|medium/i)
   } finally {
-    act(() => useExternalBoard.setState(original))
+    act(() => { useExternalBoard.setState(original); useProjects.setState(projectState) })
   }
 })
