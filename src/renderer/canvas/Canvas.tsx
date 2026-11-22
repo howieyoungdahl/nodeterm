@@ -1346,7 +1346,7 @@ export function Canvas() {
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const backgroundIds = useExternalBoard(s => s.project === activeProjectId ? s.backgroundNodeIds : NO_BACKGROUND)
   const [showBackgroundFor, setShowBackgroundFor] = useState<string | null>(null)
-  const backgroundShown = showBackgroundFor === activeProjectId
+  const backgroundShown = !!activeProjectId && showBackgroundFor === activeProjectId
   const hiddenBackground = useMemo(() => new Set(backgroundShown ? [] : backgroundIds), [backgroundIds, backgroundShown])
   // A selection predating a handoff must not become an invisible delete target.
   useEffect(() => {
@@ -1369,7 +1369,7 @@ export function Canvas() {
     if (!fitNodes.length) return
     const bounds = getNodesBounds(fitNodes)
     const padding = wrap ? solveFitPadding(wrap, bounds.width, bounds.height) : null
-    // Nothing to fit, or chrome swallowing the viewport: let fitView use its own framing.
+    // Fall back to the standard padding if chrome occupies the viewport.
     void fitView({
       duration: 300,
       padding: padding ?? 0.1,
@@ -3370,7 +3370,7 @@ export function Canvas() {
     // vanish on their own — see useAgentNodes).
     const ephemeral = new Set(Object.keys(useAgentNodes.getState().byId))
     const boxes = nodesRef.current
-      .filter((n) => !ephemeral.has(n.id))
+      .filter((n) => !ephemeral.has(n.id) && !hiddenBackground.has(n.id))
       .map((n) => ({
         x: n.position.x,
         y: n.position.y,
@@ -3378,7 +3378,7 @@ export function Canvas() {
         h: (n.measured?.height as number | undefined) ?? (n.height as number | undefined) ?? h
       }))
     return freeSpot(boxes, preferred, { w, h })
-  }, [viewCenter])
+  }, [viewCenter, hiddenBackground])
 
   /** The checkout a Source Control action refers to. The panel hands its ACTIVE SCOPE's cwd
    *  (main checkout or a bound worktree) with every relative path, so the diff/agent node it opens
@@ -6108,12 +6108,12 @@ export function Canvas() {
     const on = settings.autoAlignGrid
     if (on && !prevAutoAlignRef.current) {
       const ids = nodesRef.current
-        .filter((n) => n.type !== 'subagent' && n.type !== 'loop')
+        .filter(n => n.type !== 'subagent' && n.type !== 'loop' && !hiddenBackground.has(n.id))
         .map((n) => n.id)
       if (ids.length) alignToGrid(ids)
     }
     prevAutoAlignRef.current = on
-  }, [settings.autoAlignGrid, alignToGrid])
+  }, [settings.autoAlignGrid, alignToGrid, hiddenBackground])
 
   const selectAll = useCallback(() => {
     setNodes((ns) => ns.map((n) => ({ ...n, selected: !hiddenBackground.has(n.id) })))
@@ -6128,12 +6128,12 @@ export function Canvas() {
   // roughly preserves the canvas's existing reading order instead of falling back to array/
   // persistence order (which puts every group frame first).
   const hasArrangeableNodes = useCallback((): boolean => {
-    return nodesRef.current.filter((n) => !n.parentId).length >= 2
-  }, [])
+    return nodesRef.current.filter(n => !n.parentId && !hiddenBackground.has(n.id)).length >= 2
+  }, [hiddenBackground])
   const arrangeAllNodes = useCallback(() => {
     if (isKanbanOpen(useProjects.getState().activeProjectId)) return
     const targets = nodesRef.current
-      .filter((n) => !n.parentId)
+      .filter(n => !n.parentId && !hiddenBackground.has(n.id))
       .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
     // Fewer than 2 nodes: nothing to tidy — and running arrangeNodes anyway would still emit a
     // fresh node array (a no-op position rewrite), triggering an undo entry + markDirty + a
@@ -6143,7 +6143,7 @@ export function Canvas() {
     setNodes((ns) => arrangeNodes(ns, ids, { layout: 'grid' }))
     markDirty()
     fitAll()
-  }, [setNodes, markDirty, fitAll])
+  }, [setNodes, markDirty, fitAll, hiddenBackground])
 
 
   // ---- explicit worker layout (core/canvas-layout) -----------------------------------------
@@ -12073,12 +12073,6 @@ export function Canvas() {
         </button>
       </div>
 
-      {!kanbanOpen && backgroundIds.length > 0 && <button type="button"
-        className="canvas-background-toggle kanban-background" aria-pressed={backgroundShown}
-        onClick={() => setShowBackgroundFor(backgroundShown ? null : activeProjectId)}>
-        {backgroundShown ? 'Hide background' : 'Background'} ({backgroundIds.length})
-      </button>}
-
       <div className="controls-cluster">
         {/* First in the cluster so the "who's connected" faces sit to the LEFT of the toolbar on the
             SAME row (flex, no hardcoded width) instead of colliding with it / hiding under the tab
@@ -12086,6 +12080,12 @@ export function Canvas() {
             no peers — taking no space — but must stay mounted to prune the presence face cache
             (state/presence.ts → selectFaces). */}
         <Facepile onJump={travelToNode} onSwitchProject={travelToProject} />
+        {!kanbanOpen && backgroundIds.length > 0 && (
+          <button type="button" className="canvas-background-toggle" aria-pressed={backgroundShown}
+            onClick={() => setShowBackgroundFor(backgroundShown ? null : activeProjectId)}>
+            {backgroundShown ? 'Hide background' : 'Background'} ({backgroundIds.length})
+          </button>
+        )}
         <button
           className="cluster-search"
           title="Command palette"

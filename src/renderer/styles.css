@@ -8779,7 +8779,7 @@ button.group-node__setup:disabled {
   font-weight: 650;
 }
 .canvas-background-session { visibility: hidden !important; pointer-events: none !important; }
-.canvas-background-toggle { position: absolute; top: 54px; left: 54px; z-index: 11; }
+.controls-cluster > .canvas-background-toggle { width: auto; padding-inline: 8px; font-size: 13px; }
 .kanban-featured:disabled { color: var(--muted); cursor: default; }
 .kanban-featured:not(:disabled):hover, .kanban-background:hover { border-color: var(--accent); }
 .kanban-board--matrix {
@@ -8840,9 +8840,8 @@ button.group-node__setup:disabled {
   align-items: start;
 }
 @media (max-width: 600px) {
-  .kanban-board--matrix { --kanban-row-width: 6rem; --kanban-column-width: 15rem; padding-inline: 6px; }
-  .kanban-header { gap: 4px 8px; }
-  .canvas-background-toggle { top: 96px; left: 14px; }
+  .kanban-board--matrix { --kanban-row-width: 7rem; --kanban-column-width: 15rem; padding-inline: 6px; }
+  .canvas-background-toggle { position: absolute; top: calc(100% + 6px); right: 0; }
 }
 @media (max-width: 900px) {
   .kanban-header {
@@ -9167,9 +9166,8 @@ button.group-node__setup:disabled {
 }
 @media (max-width: 520px) {
   .kanban-header {
-    gap: 6px;
-    padding-left: 10px;
-    padding-right: 112px;
+    gap: 4px 8px;
+    padding-inline: 10px;
   }
   .kanban-header__name {
     max-width: 84px;
