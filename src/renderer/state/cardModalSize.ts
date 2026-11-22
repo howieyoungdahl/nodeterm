@@ -24,7 +24,7 @@ export const CARD_MODAL_PREF_H = 940
 export interface CardModalSize {
   width: number | null
   height: number | null
-  maximized: boolean
+  maximized: boolean | null
 }
 
 /** value clamped into [min, max]; when the viewport is so small that max < min, max (fit the
@@ -33,11 +33,11 @@ export function clampAxis(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
-/** The largest the modal may be in a given viewport (also the maximized size). */
+/** The largest freehand size, leaving room for its resize handles. */
 export function maxModalSize(vw: number, vh: number): { width: number; height: number } {
   return {
-    width: Math.max(CARD_MODAL_MIN_W, vw - CARD_MODAL_MARGIN_X),
-    height: Math.max(CARD_MODAL_MIN_H, vh - CARD_MODAL_MARGIN_Y)
+    width: Math.max(1, vw - CARD_MODAL_MARGIN_X),
+    height: Math.max(1, vh - CARD_MODAL_MARGIN_Y)
   }
 }
 
@@ -57,8 +57,8 @@ export function resolveModalSize(
   vw: number,
   vh: number
 ): { width: number; height: number } {
+  if (saved.maximized) return { width: vw, height: vh }
   const max = maxModalSize(vw, vh)
-  if (saved.maximized) return max
   if (saved.width != null && saved.height != null) {
     return {
       width: clampAxis(saved.width, CARD_MODAL_MIN_W, max.width),
@@ -70,14 +70,15 @@ export function resolveModalSize(
 
 /** Parse the persisted blob; anything missing/unparseable means "no memory" (use the default). */
 export function parseCardModalSize(raw: string | null): CardModalSize {
-  if (!raw) return { width: null, height: null, maximized: false }
+  if (!raw) return { width: null, height: null, maximized: null }
   try {
     const v = JSON.parse(raw) as Partial<CardModalSize>
     const width = typeof v.width === 'number' && v.width > 0 ? v.width : null
     const height = typeof v.height === 'number' && v.height > 0 ? v.height : null
-    return { width, height, maximized: v.maximized === true }
+    const maximized = typeof v.maximized === 'boolean' ? v.maximized : width && height ? false : null
+    return { width, height, maximized }
   } catch {
-    return { width: null, height: null, maximized: false }
+    return { width: null, height: null, maximized: null }
   }
 }
 

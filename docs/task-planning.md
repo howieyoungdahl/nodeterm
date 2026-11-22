@@ -83,12 +83,23 @@ The Kanban header's **+ New terminal** button creates and opens a shell in the a
 project. **Agents & more** opens the session-type menu. Both controls stay visible while
 the board scrolls, including in the Canvas groups view.
 
-To reserve a spot above the board for a coordinating session, add `featuredSession`
+To reserve a toolbar button for a coordinating session, add `featuredSession`
 to that project's server configuration, for example
 `{"label":"Coordinator","nodeIdFile":"/path/to/current-node"}`. The host places the
 current terminal ID in this small plain-text file and replaces it at handoff. The
 board rereads the ID on refresh and opens the terminal's usual card. If the file
 is missing or names a terminal outside the project, the spot shows its unavailable state.
+
+To place service terminals in **Background**, configure a project's `backgroundSessions`
+array. Each entry takes an absolute `nodeIdFile`. A plain-text file holds the
+terminal ID directly. For a JSON file, specify its top-level string field, for
+example `{"nodeIdFile":"/path/to/job.json","nodeIdField":"worker"}`. The button
+opens a list on Kanban and shows or hides the terminals in place on the canvas.
+The featured terminal keeps its own button if both roles point to it.
+
+Terminal cards open full size with comments collapsed until you choose a layout.
+**Restore size** returns to a resizable window. The comments button opens the activity panel.
+The browser remembers explicit size and panel choices.
 
 A verified card may include a registered lane `displayName` and its owning `taskTitle`. The canvas and Kanban display the registered name on automatically named terminals. A numbered terminal can also use its task title. A manually set canvas name takes precedence, and opening the card identifies the linked task and physical canvas group.
 

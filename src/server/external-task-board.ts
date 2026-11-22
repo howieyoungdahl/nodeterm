@@ -5,11 +5,16 @@ import { isAbsolute, join } from 'node:path'
 import { isSafeNodeId, NODE_ID_MAX } from '../shared/safe-id'
 import type { ExternalTask, ExternalTaskBoard, ExternalTaskColumns } from '../shared/external-task-board'
 
+interface NodePointer {
+  nodeIdFile: string
+  nodeIdField?: string
+}
 interface BoardConfig {
   url: string
   feed: string
   tokenFile: string
-  featuredSession?: { label: string; nodeIdFile: string }
+  featuredSession?: NodePointer & { label: string }
+  backgroundSessions?: NodePointer[]
 }
 interface Feed extends Partial<ExternalTaskColumns> {
   asOf: string
@@ -41,26 +46,45 @@ function secureUrl(value: string) {
   return url
 }
 
-/** The host publishes one current terminal ID. Only the resolved project member goes on the wire. */
-async function readFeaturedSession(config: BoardConfig['featuredSession'], nodes: Set<string>) {
-  if (!config || !bounded(config.label, 80) || !bounded(config.nodeIdFile, 4096) || !isAbsolute(config.nodeIdFile)) return
-  const feature: NonNullable<ExternalTaskBoard['featuredSession']> = { label: config.label, nodeId: null }
+/** Resolve a host-published identity against this project's terminals before exposing it. */
+async function readProjectNode(pointer: NodePointer, nodes: Set<string>): Promise<string | null> {
+  if (!pointer || !bounded(pointer.nodeIdFile, 4096) || !isAbsolute(pointer.nodeIdFile)) return null
+  const field = pointer.nodeIdField
+  if (field !== undefined && !bounded(field, 64)) return null
+  const limit = field ? 4096 : NODE_ID_MAX + 2
   try {
-    const file = await open(config.nodeIdFile, constants.O_RDONLY | constants.O_NONBLOCK)
+    const file = await open(pointer.nodeIdFile, constants.O_RDONLY | constants.O_NONBLOCK)
     try {
       const stat = await file.stat()
-      if (!stat.isFile() || stat.size > NODE_ID_MAX + 2) return feature
-      const bytes = Buffer.alloc(NODE_ID_MAX + 3)
+      if (!stat.isFile() || stat.size > limit) return null
+      const bytes = Buffer.alloc(limit + 1)
       const { bytesRead } = await file.read(bytes, 0, bytes.length, 0)
-      const id = bytes.toString('utf8', 0, bytesRead).trim()
-      if (bytesRead < bytes.length && isSafeNodeId(id) && nodes.has(id)) feature.nodeId = id
+      if (bytesRead > limit) return null
+      const value = bytes.toString('utf8', 0, bytesRead).trim()
+      let id: unknown = value
+      if (field) {
+        const record = JSON.parse(value)
+        if (!record || typeof record !== 'object' || Array.isArray(record) || !Object.hasOwn(record, field)) return null
+        id = record[field]
+      }
+      return typeof id === 'string' && isSafeNodeId(id) && nodes.has(id) ? id : null
     } finally {
       await file.close()
     }
   } catch {
-    // A missing or unreadable pointer keeps the reserved spot empty through a handoff.
+    return null
   }
-  return feature
+}
+
+async function readSessionRoles(config: BoardConfig, nodes: Set<string>) {
+  const featured = config.featuredSession
+  const featuredSession = featured && bounded(featured.label, 80) && bounded(featured.nodeIdFile, 4096) && isAbsolute(featured.nodeIdFile)
+    ? { label: featured.label, nodeId: await readProjectNode(featured, nodes) } : undefined
+  const pointers = config.backgroundSessions
+  if (!Array.isArray(pointers) || pointers.length > 32) return { featuredSession }
+  const ids = await Promise.all(pointers.map(pointer => readProjectNode(pointer, nodes)))
+  const verified = ids.filter((id): id is string => id !== null && id !== featuredSession?.nodeId)
+  return { featuredSession, backgroundNodeIds: [...new Set(verified)] }
 }
 
 /** Only the operator's server config can supply a destination or a credential path. */
@@ -117,11 +141,11 @@ export function createExternalTaskBoard(
     } catch {
       return null
     }
-    let featuredSession: ExternalTaskBoard['featuredSession']
+    let roles: Pick<ExternalTaskBoard, 'featuredSession' | 'backgroundNodeIds'> = {}
     try {
       const ids = nodesFor(projectId)
       if (!ids) return null
-      featuredSession = await readFeaturedSession(config.featuredSession, ids)
+      roles = await readSessionRoles(config, ids)
       const signature = JSON.stringify(config)
       let entry = cache.get(projectId)
       if (!entry || entry.signature !== signature || Date.now() >= entry.until) {
@@ -143,9 +167,9 @@ export function createExternalTaskBoard(
           reason: c.reason,
           priority: c.priority
         }))
-      return { ...snapshot, url: config.url, available: true, cards, featuredSession }
+      return { ...snapshot, url: config.url, available: true, cards, ...roles }
     } catch {
-      return { url: config.url, available: false, cards: [], featuredSession }
+      return { url: config.url, available: false, cards: [], ...roles }
     }
   }
 }

@@ -63,14 +63,14 @@ describe('resolveModalSize', () => {
 
   it('maximized fills the viewport regardless of the remembered size', () => {
     expect(resolveModalSize({ width: 700, height: 500, maximized: true }, big.vw, big.vh))
-      .toEqual(maxModalSize(big.vw, big.vh))
+      .toEqual({ width: big.vw, height: big.vh })
   })
 })
 
 describe('parseCardModalSize', () => {
   it('treats missing / garbage as no memory', () => {
-    expect(parseCardModalSize(null)).toEqual({ width: null, height: null, maximized: false })
-    expect(parseCardModalSize('not json')).toEqual({ width: null, height: null, maximized: false })
+    expect(parseCardModalSize(null)).toEqual({ width: null, height: null, maximized: null })
+    expect(parseCardModalSize('not json')).toEqual({ width: null, height: null, maximized: null })
   })
   it('rejects non-positive dimensions but keeps the flag', () => {
     expect(parseCardModalSize(JSON.stringify({ width: 0, height: -5, maximized: true })))

@@ -314,6 +314,7 @@ import {
   writeSeenExplorerPinHint
 } from '../lib/explorerPinHint'
 import { useProjects } from '../state/projects'
+import { NO_BACKGROUND, useExternalBoard } from '../state/externalTaskBoard'
 import { useAgentStatus } from '../state/agentStatus'
 import { seedAgentStatusFromHost } from '../lib/seedAgentStatus'
 import { runFailureProbe } from '../lib/failureProbe'
@@ -805,6 +806,7 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
   )
   const nodeClassName = useCallback(
     (n: Node): string => {
+      if (n.className?.split(' ').includes('canvas-background-session')) return 'canvas-background-session'
       const st = statusById[n.id]
       if (st?.state === 'working') return 'mm-working'
       if (st?.state === 'waiting' || st?.state === 'blocked') return 'mm-attention'
@@ -1341,6 +1343,17 @@ export function Canvas() {
     getNodesBounds
   } = useReactFlow()
 
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const backgroundIds = useExternalBoard(s => s.project === activeProjectId ? s.backgroundNodeIds : NO_BACKGROUND)
+  const [showBackgroundFor, setShowBackgroundFor] = useState<string | null>(null)
+  const backgroundShown = showBackgroundFor === activeProjectId
+  const hiddenBackground = useMemo(() => new Set(backgroundShown ? [] : backgroundIds), [backgroundIds, backgroundShown])
+  // A selection predating a handoff must not become an invisible delete target.
+  useEffect(() => {
+    if (nodesRef.current.some(n => n.selected && hiddenBackground.has(n.id)))
+      setNodes(ns => ns.map(n => n.selected && hiddenBackground.has(n.id) ? { ...n, selected: false } : n))
+  }, [hiddenBackground, setNodes])
+
   // Single "fit everything" path for every fit-view entry point (dock button, the built-in
   // Controls button, the ⌘K palette and the context menu) so they behave identically and there's
   // one place to tune. Solved per click against the CURRENT chrome layout and the CURRENT content
@@ -1352,17 +1365,17 @@ export function Canvas() {
     // every fit toward 0,0. Excluded from BOTH halves: the padding solve's bounds and fitView's
     // own fit set (the explicit `nodes` list; a real node unmeasured this early is dropped by
     // React Flow's measured filter, which at a user-gesture fit means nothing in practice).
-    const fitNodes = getNodes().filter((n) => (n as CanvasNode).data?.ghost !== true)
+    const fitNodes = getNodes().filter(n => (n as CanvasNode).data?.ghost !== true && !hiddenBackground.has(n.id))
+    if (!fitNodes.length) return
     const bounds = getNodesBounds(fitNodes)
     const padding = wrap ? solveFitPadding(wrap, bounds.width, bounds.height) : null
     // Nothing to fit, or chrome swallowing the viewport: let fitView use its own framing.
     void fitView({
       duration: 300,
       padding: padding ?? 0.1,
-      // Empty canvas: fall back to the bare call (its no-op), never an empty fit set (origin jump).
-      ...(fitNodes.length ? { nodes: fitNodes.map((n) => ({ id: n.id })) } : {})
+      nodes: fitNodes.map(n => ({ id: n.id }))
     })
-  }, [fitView, getNodes, getNodesBounds])
+  }, [fitView, getNodes, getNodesBounds, hiddenBackground])
 
   /**
    * Back to 100%, keeping whatever is in the middle of the screen in the middle.
@@ -1388,7 +1401,6 @@ export function Canvas() {
     void setViewport(next, { duration: 200 })
   }, [getViewport, setViewport])
 
-  const activeProjectId = useProjects((s) => s.activeProjectId)
   // Project-level worktree defaults (basePath/baseRef) for the active project, read from the warmed
   // launch-info cache. Fed to the "New worktree" dialog defaults below; the open-worktree verb reads
   // its own project's entry separately. Absent (project never warmed, or it sets neither) → the
@@ -1658,7 +1670,7 @@ export function Canvas() {
       // lives here, in the render layer, and nowhere else.
       if (!st.loop || st.loop.dismissed) continue
       const parent = nodes.find((n) => n.id === pid)
-      if (!parent || parent.data.hideFanout) continue
+      if (!parent || parent.data.hideFanout || hiddenBackground.has(pid)) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
       const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const lid = `loop-${pid}`
@@ -1707,7 +1719,7 @@ export function Canvas() {
     }
     for (const [pid, childIds] of Object.entries(byParent)) {
       const parent = nodes.find((n) => n.id === pid)
-      if (!parent || parent.data.hideFanout) continue
+      if (!parent || parent.data.hideFanout || hiddenBackground.has(pid)) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
       const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const COLS = 4
@@ -1754,7 +1766,7 @@ export function Canvas() {
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loopSig stands in for the byId read
-  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSelId, nodes])
+  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSelId, nodes, hiddenBackground])
 
   // Merge the persisted nodes with the ephemeral ones and the webview keep-alive pool once per
   // change (not per render), so React Flow's array-identity short-circuit holds while
@@ -1762,14 +1774,17 @@ export function Canvas() {
   // ghosts) is what keeps a `<webview>`'s DOM element stationary across project switches — see
   // lib/webviewKeepAlive.ts for the order invariant this merge must never break.
   const keepAliveEntries = useWebviewKeepAlive((s) => s.entries)
-  const allNodes = useMemo(
-    // Keyed on the MOUNTED project (whose nodes `nodes` holds — see mergeWithKeepAlive's doc for
-    // the one-commit window where that is not the active project). The ref only moves inside the
-    // load effect, which also replaces `nodes`, so the deps below always cover it.
-    () => mergeWithKeepAlive(nodes, ephemeralNodes, keepAliveEntries, keepAliveFromRef.current),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodes, ephemeralNodes, keepAliveEntries]
-  )
+  const allNodes = useMemo(() => {
+    // Apply visibility only to React Flow's rendered copy. The terminal stays mounted and
+    // measured so a background process keeps its original session, size and subscriptions.
+    const mounted = keepAliveFromRef.current
+    const displayed = mounted === activeProjectId && hiddenBackground.size ? nodes.map(node =>
+      node.type === 'terminal' && hiddenBackground.has(node.id) ? {
+        ...node, className: [node.className, 'canvas-background-session'].filter(Boolean).join(' '),
+        selected: false, selectable: false, draggable: false, focusable: false, connectable: false
+      } : node) : nodes
+    return mergeWithKeepAlive(displayed, ephemeralNodes, keepAliveEntries, mounted)
+  }, [nodes, ephemeralNodes, keepAliveEntries, activeProjectId, hiddenBackground])
 
   // Context-link edges, statically styled (no per-message activity in the pull model).
   const accent = settings.accent
@@ -1900,6 +1915,9 @@ export function Canvas() {
         : []
     return extra.length ? [...decorated, ...extra] : decorated
   }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges, drivenLeaseEntries])
+  const visibleEdges = useMemo(() => hiddenBackground.size
+    ? displayEdges.filter(e => !hiddenBackground.has(e.source) && !hiddenBackground.has(e.target))
+    : displayEdges, [displayEdges, hiddenBackground])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -6098,8 +6116,8 @@ export function Canvas() {
   }, [settings.autoAlignGrid, alignToGrid])
 
   const selectAll = useCallback(() => {
-    setNodes((ns) => ns.map((n) => ({ ...n, selected: true })))
-  }, [setNodes])
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: !hiddenBackground.has(n.id) })))
+  }, [setNodes, hiddenBackground])
 
   // Pane-level "Tidy canvas": packs every top-level node (terminal, agent, sticky, editor, diff,
   // group frame — a frame moves as one unit, its children ride along untouched) into a
@@ -6367,6 +6385,7 @@ export function Canvas() {
    */
   const frameNode = useCallback(
     (node: Node) => {
+      if (hiddenBackground.has(node.id)) setShowBackgroundFor(activeProjectId)
       const internal = getInternalNode(node.id)
       if (isMeasured(internal)) {
         const wrap = flowWrapRef.current
@@ -6388,7 +6407,7 @@ export function Canvas() {
       // teleporting the user to the origin, which is the bug this branch exists for.
       if (viewport) void setViewport(viewport, { duration: 300 })
     },
-    [fitView, setViewport, getInternalNode]
+    [fitView, setViewport, getInternalNode, hiddenBackground, activeProjectId]
   )
 
   const goToNode = useCallback(
@@ -6709,7 +6728,7 @@ export function Canvas() {
    */
   const moveNodeFocus = useCallback(
     (dir: FocusDirection): boolean => {
-      const nodes = nodesRef.current
+      const nodes = hiddenBackground.size ? nodesRef.current.filter(n => !hiddenBackground.has(n.id)) : nodesRef.current
       const from =
         document.activeElement?.closest(`.${FLOW_NODE_CLASS}`)?.getAttribute('data-id') ??
         nodes.find((n) => n.selected && isFocusTarget(n))?.id ??
@@ -6732,7 +6751,7 @@ export function Canvas() {
       // else.
       return true
     },
-    [viewCenter]
+    [viewCenter, hiddenBackground]
   )
 
   /**
@@ -7920,8 +7939,10 @@ export function Canvas() {
     // The focused node rides the set too (issue #78): it is reparented out of the viewport, so
     // the shared layer must not consider it paintable — same commit, not one pass later, which
     // is why it joins here rather than in a separate effect.
-    const withFocus = (ids: string[]): string[] =>
-      focusedId && !ids.includes(focusedId) ? [...ids, focusedId] : ids
+    const withFocus = (ids: string[]): string[] => {
+      const opaque = hiddenBackground.size ? [...new Set([...ids, ...hiddenBackground])] : ids
+      return focusedId && !opaque.includes(focusedId) ? [...opaque, focusedId] : opaque
+    }
     if (!glyphLayerActive) {
       glyphSettledOpaqueRef.current = EMPTY_OPAQUE
       return primeOpaqueNodeIds(EMPTY_OPAQUE)
@@ -7936,7 +7957,7 @@ export function Canvas() {
     const next = opaqueNodeIds(nodes)
     glyphSettledOpaqueRef.current = next
     return primeOpaqueNodeIds(withFocus(next))
-  }, [glyphLayerActive, nodes, focusedId])
+  }, [glyphLayerActive, nodes, focusedId, hiddenBackground])
   // The notification the render above could not send. It reaches the ONE case a render-time read
   // cannot: a terminal whose own node object did not change (so it never re-rendered) but which
   // something else slid underneath. Keyed on the signature, so it fires only on a real change.
@@ -12052,6 +12073,12 @@ export function Canvas() {
         </button>
       </div>
 
+      {!kanbanOpen && backgroundIds.length > 0 && <button type="button"
+        className="canvas-background-toggle kanban-background" aria-pressed={backgroundShown}
+        onClick={() => setShowBackgroundFor(backgroundShown ? null : activeProjectId)}>
+        {backgroundShown ? 'Hide background' : 'Background'} ({backgroundIds.length})
+      </button>}
+
       <div className="controls-cluster">
         {/* First in the cluster so the "who's connected" faces sit to the LEFT of the toolbar on the
             SAME row (flex, no hardcoded width) instead of colliding with it / hiding under the tab
@@ -12144,7 +12171,7 @@ export function Canvas() {
         <SessionProvider session={sessionForProject(activeProjectId || '')} key={sessionForProject(activeProjectId || '').id}>
         <ReactFlow
           nodes={allNodes}
-          edges={displayEdges}
+          edges={visibleEdges}
           nodeTypes={nodeTypes}
           onNodesChange={handleNodesChange}
           onEdgesChange={handleEdgesChange}

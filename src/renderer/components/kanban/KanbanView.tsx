@@ -3,7 +3,7 @@ import type { KanbanLabel, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
-import { taskBoardHref, taskDisplayTitle, useExternalBoard } from '../../state/externalTaskBoard'
+import { NO_BACKGROUND, taskBoardHref, taskDisplayTitle, useExternalBoard } from '../../state/externalTaskBoard'
 import { useSettings } from '../../state/settings'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
@@ -151,6 +151,7 @@ export const KanbanView = memo(function KanbanView({
   const [labelFilter, setLabelFilter] = useState<string[]>([])
   const [categoryFilter, setCategoryFilter] = useState<TaskCategory | 'all'>('all')
   const [workflowFilter, setWorkflowFilter] = useState('')
+  const [backgroundMenu, setBackgroundMenu] = useState<{ x: number; y: number } | null>(null)
   const [filterOpen, setFilterOpen] = useState(false)
   const [source, setSource] = useState<KanbanSource>('all')
   const [modalIssue, setModalIssue] = useState<GitHubIssueCardView | null>(null)
@@ -164,6 +165,7 @@ export const KanbanView = memo(function KanbanView({
   const workflowBoard = useExternalBoard(s => s.project === projectId ? s.url : null)
   const catalog = useExternalBoard(s => s.project === projectId ? s.columns : null)
   const feedAvailable = useExternalBoard(s => s.project === projectId && s.available)
+  const backgroundIds = useExternalBoard(s => s.project === projectId ? s.backgroundNodeIds : NO_BACKGROUND)
   const featured = useExternalBoard(s => s.project === projectId ? s.featuredSession : undefined)
   const externalTasks = useExternalBoard(s => s.project === projectId ? s.tasks : NO_TASKS)
   const workflowOptions = useMemo(() => Array.from(new Set([
@@ -290,10 +292,17 @@ export const KanbanView = memo(function KanbanView({
   const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
   const candidate = featured?.nodeId ? byId.get(featured.nodeId) : undefined
   const featuredCard = candidate?.kind === 'terminal' ? candidate : undefined
+  const backgroundCards = useMemo(() => backgroundIds.flatMap(id => {
+    const card = byId.get(id)
+    return card?.kind === 'terminal' && card !== featuredCard ? [card] : []
+  }), [backgroundIds, byId, featuredCard])
+  const reserved = useMemo(() => new Set([
+    ...backgroundCards.map(card => card.id), ...(featuredCard ? [featuredCard.id] : [])
+  ]), [backgroundCards, featuredCard])
   const groupingTasks = columnMode === 'canvas' ? undefined : externalTasks
   const taskVisibility = useMemo(() => taskBoardVisibility(
-    featuredCard ? sessions.filter(s => s.id !== featuredCard.id) : sessions, board, groupingTasks
-  ), [sessions, featuredCard, board, groupingTasks])
+    reserved.size ? sessions.filter(s => !reserved.has(s.id)) : sessions, board, groupingTasks
+  ), [sessions, reserved, board, groupingTasks])
 
   // Stable per-card label arrays: labelsForCard allocates a fresh array per call, and that
   // identity churn alone would defeat SessionCard's memo. Recomputed only on a board change.
@@ -400,7 +409,7 @@ export const KanbanView = memo(function KanbanView({
     const toCards = (ids: string[]): KanbanSession[] => {
       const cards = ids.flatMap((id) => {
         const card = byId.get(id)
-        if (!card || card === featuredCard || taskVisibility.hidden.has(id)) return []
+        if (!card || reserved.has(id) || taskVisibility.hidden.has(id)) return []
         if (workflowBoard) {
           const matchesWorkflow = (entry: KanbanSession) => externalTasks.get(entry.id)?.workflow === workflow
           const matchesSupport = columnMode === 'canvas' && taskVisibility.supports.get(id)?.some(matchesWorkflow)
@@ -420,7 +429,7 @@ export const KanbanView = memo(function KanbanView({
     }
     return { matrix: null, ungrouped: toCards(vis(unassigned(board, sessionIds))),
       byColumn: new Map(board.columns.map(c => [c.id, toCards(vis(assignedTo(board, c.id)))])) }
-  }, [board, byId, sessionIds, featuredCard, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow, workflowBoard, externalTasks, workflowOptions, workflowFilter, catalog, columnMode])
+  }, [board, byId, sessionIds, reserved, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow, workflowBoard, externalTasks, workflowOptions, workflowFilter, catalog, columnMode])
 
   // Stable column/card plumbing — every handler the memoized columns receive is identity-stable
   // across renders (the column binds its own id; cards bind theirs).
@@ -593,6 +602,29 @@ export const KanbanView = memo(function KanbanView({
           const id = onCreateNode({ kind: 'terminal' }, null)
           if (id) setModalNodeId(id)
         }}>+ New terminal</button>
+        {featured && sourceVisible(source, 'sessions') && (
+          <button type="button" className="kanban-featured" disabled={!featuredCard}
+            title={featuredCard ? taskDisplayTitle(featuredCard.title, featuredCard.titleAuto, externalTasks.get(featuredCard.id)) : 'Current session unavailable'}
+            onClick={() => featuredCard && setModalNodeId(featuredCard.id)}>
+            {featured.label}
+            {featuredCard && showsStatus({ type: featuredCard.kind, agentId: featuredCard.agentId as AgentId }) &&
+              <NodeStatusBadge nodeId={featuredCard.id} agentId={featuredCard.agentId as AgentId} compact />}
+            {!featuredCard && <small>Unavailable</small>}
+          </button>
+        )}
+        {backgroundCards.length > 0 && sourceVisible(source, 'sessions') && <>
+          <button type="button" className="kanban-background" aria-expanded={!!backgroundMenu}
+            onClick={e => {
+              const rect = e.currentTarget.getBoundingClientRect()
+              setBackgroundMenu({ x: rect.left, y: rect.bottom + 4 })
+            }}>Background ({backgroundCards.length})</button>
+          {backgroundMenu && <ContextMenu {...backgroundMenu} scroll
+            items={backgroundCards.map(card => ({
+              label: taskDisplayTitle(card.title, card.titleAuto, externalTasks.get(card.id)),
+              onClick: () => setModalNodeId(card.id)
+            }))}
+            onClose={() => setBackgroundMenu(null)} />}
+        </>}
         <NewSessionMenu columnId={null} createOptions={createOptions} onCreate={onCreateNode} label="Agents & more" />
         {workflowBoard && <a className="kanban-github-status" href={workflowBoard} target="_blank" rel="noreferrer">Workflow board ↗</a>}
         {workflowBoard && catalog && <label className="kanban-column-mode">Columns
@@ -687,17 +719,6 @@ export const KanbanView = memo(function KanbanView({
           </div>
         )}
       </div>
-      {featured && sourceVisible(source, 'sessions') && (
-        <section className="kanban-featured" aria-label={featured.label}>
-          <h2>{featured.label}</h2>
-          {featuredCard ? <>
-            <span className="kanban-featured__name">{taskDisplayTitle(featuredCard.title, featuredCard.titleAuto, externalTasks.get(featuredCard.id))}</span>
-            {showsStatus({ type: featuredCard.kind, agentId: featuredCard.agentId as AgentId }) &&
-              <NodeStatusBadge nodeId={featuredCard.id} agentId={featuredCard.agentId as AgentId} compact />}
-            <button type="button" onClick={() => setModalNodeId(featuredCard.id)}>Open session</button>
-          </> : <span className="kanban-featured__name">Current session unavailable</span>}
-        </section>
-      )}
       <div className={columnCards.matrix ? 'kanban-board kanban-board--matrix' : 'kanban-board'}>
           {columnCards.matrix && columnMode !== 'canvas' ? <>
             <TaskBoardMatrix matrix={columnCards.matrix} columnField={columnMode} renderCards={cards => sessionCards(cards, null)} />
