@@ -9,9 +9,10 @@ interface BoardView {
   url: string | null
   available: boolean
   columns: ExternalTaskColumns | null
+  featuredSession: ExternalTaskBoard['featuredSession']
   tasks: Map<string, ExternalTask>
 }
-const empty = { project: '', url: null, available: false, columns: null, tasks: new Map<string, ExternalTask>() }
+const empty = { project: '', url: null, available: false, columns: null, featuredSession: undefined, tasks: new Map<string, ExternalTask>() }
 export const useExternalBoard = create<BoardView>(() => empty)
 
 export interface ProjectTaskLink {
@@ -64,13 +65,17 @@ export function useExternalBoardSync() {
             project,
             url: board?.url ?? null,
             available: board?.available ?? false,
+            featuredSession: board?.featuredSession,
             columns: board && !board.available && previous.project === project && previous.url === board.url
               ? previous.columns : board?.columns ?? null,
             tasks: new Map(board?.cards.map((card) => [card.nodeId, card]))
           }))
       } catch {
         if (!controller.signal.aborted)
-          useExternalBoard.setState(previous => previous.project === project ? { available: false, tasks: new Map() } : previous)
+          useExternalBoard.setState(previous => previous.project === project ? {
+            available: false, tasks: new Map(),
+            featuredSession: previous.featuredSession && { ...previous.featuredSession, nodeId: null }
+          } : previous)
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(refresh, 30000)
       }

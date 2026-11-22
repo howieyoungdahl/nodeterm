@@ -39,8 +39,9 @@ interface KanbanColumnProps {
   onDropOnColumn: (columnId: string | null) => void
 }
 
-export function NewSessionMenu({ columnId, createOptions, onCreate }: Pick<KanbanColumnProps, 'createOptions' | 'onCreate'> & {
+export function NewSessionMenu({ columnId, createOptions, onCreate, label = '+ New session' }: Pick<KanbanColumnProps, 'createOptions' | 'onCreate'> & {
   columnId: string | null
+  label?: string
 }) {
   const [newMenuOpen, setNewMenuOpen] = useState(false)
   // The "+ New session" menu normally drops DOWN (top:100%); a column near the window's bottom edge
@@ -82,8 +83,8 @@ export function NewSessionMenu({ columnId, createOptions, onCreate }: Pick<Kanba
           ))}
         </div>
       )}
-      <button className="kanban-col__new" onClick={() => setNewMenuOpen((v) => !v)}>
-        + New session
+      <button className="kanban-col__new" aria-expanded={newMenuOpen} onClick={() => setNewMenuOpen((v) => !v)}>
+        {label}
       </button>
     </div>
   )

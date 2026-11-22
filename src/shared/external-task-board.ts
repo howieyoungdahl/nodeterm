@@ -21,4 +21,5 @@ export interface ExternalTaskBoard {
   available: boolean
   cards: ExternalTask[]
   columns?: ExternalTaskColumns
+  featuredSession?: { label: string; nodeId: string | null }
 }

@@ -3,7 +3,7 @@ import type { KanbanLabel, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
-import { taskBoardHref, useExternalBoard } from '../../state/externalTaskBoard'
+import { taskBoardHref, taskDisplayTitle, useExternalBoard } from '../../state/externalTaskBoard'
 import { useSettings } from '../../state/settings'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
@@ -17,6 +17,8 @@ import { PRIORITIES } from './CardMetaBar'
 import { KanbanColumn, NewSessionMenu, type KanbanLane } from './KanbanColumn'
 import { TaskBoardMatrix } from './TaskBoardMatrix'
 import { SessionCard } from './SessionCard'
+import { NodeStatusBadge } from '../../nodes/NodeStatusBadge'
+import { showsStatus } from '../../lib/nodeStatusView'
 import { taskBoardVisibility } from '../../lib/taskBoardVisibility'
 import { taskBoardMatrix } from '../../lib/taskBoardColumns'
 import type { ExternalTask } from '@shared/external-task-board'
@@ -88,8 +90,8 @@ export interface KanbanViewProps {
   onChange: (next: ProjectKanban) => void
   /** Open a session from its card: switch back to canvas view and focus the node. */
   onOpenNode: (nodeId: string) => void
-  /** Create a node from a column's "+ New" menu (columnId null = Ungrouped: no assignment). */
-  onCreateNode: (choice: KanbanCreateChoice, columnId: string | null) => void
+  /** Create in the selected column and return the ID when the node can be opened immediately. */
+  onCreateNode: (choice: KanbanCreateChoice, columnId: string | null) => string | void
   /** Rename a node (same funnel as the sessions sidebar). */
   onRenameNode: (nodeId: string, title: string) => void
   /** Write-through a sticky node's body text (only fired for kind 'sticky'). */
@@ -162,6 +164,7 @@ export const KanbanView = memo(function KanbanView({
   const workflowBoard = useExternalBoard(s => s.project === projectId ? s.url : null)
   const catalog = useExternalBoard(s => s.project === projectId ? s.columns : null)
   const feedAvailable = useExternalBoard(s => s.project === projectId && s.available)
+  const featured = useExternalBoard(s => s.project === projectId ? s.featuredSession : undefined)
   const externalTasks = useExternalBoard(s => s.project === projectId ? s.tasks : NO_TASKS)
   const workflowOptions = useMemo(() => Array.from(new Set([
     ...(catalog?.workflows ?? []),
@@ -285,8 +288,12 @@ export const KanbanView = memo(function KanbanView({
   )
   const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
   const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
+  const candidate = featured?.nodeId ? byId.get(featured.nodeId) : undefined
+  const featuredCard = candidate?.kind === 'terminal' ? candidate : undefined
   const groupingTasks = columnMode === 'canvas' ? undefined : externalTasks
-  const taskVisibility = useMemo(() => taskBoardVisibility(sessions, board, groupingTasks), [sessions, board, groupingTasks])
+  const taskVisibility = useMemo(() => taskBoardVisibility(
+    featuredCard ? sessions.filter(s => s.id !== featuredCard.id) : sessions, board, groupingTasks
+  ), [sessions, featuredCard, board, groupingTasks])
 
   // Stable per-card label arrays: labelsForCard allocates a fresh array per call, and that
   // identity churn alone would defeat SessionCard's memo. Recomputed only on a board change.
@@ -393,7 +400,7 @@ export const KanbanView = memo(function KanbanView({
     const toCards = (ids: string[]): KanbanSession[] => {
       const cards = ids.flatMap((id) => {
         const card = byId.get(id)
-        if (!card || taskVisibility.hidden.has(id)) return []
+        if (!card || card === featuredCard || taskVisibility.hidden.has(id)) return []
         if (workflowBoard) {
           const matchesWorkflow = (entry: KanbanSession) => externalTasks.get(entry.id)?.workflow === workflow
           const matchesSupport = columnMode === 'canvas' && taskVisibility.supports.get(id)?.some(matchesWorkflow)
@@ -413,7 +420,7 @@ export const KanbanView = memo(function KanbanView({
     }
     return { matrix: null, ungrouped: toCards(vis(unassigned(board, sessionIds))),
       byColumn: new Map(board.columns.map(c => [c.id, toCards(vis(assignedTo(board, c.id)))])) }
-  }, [board, byId, sessionIds, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow, workflowBoard, externalTasks, workflowOptions, workflowFilter, catalog, columnMode])
+  }, [board, byId, sessionIds, featuredCard, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow, workflowBoard, externalTasks, workflowOptions, workflowFilter, catalog, columnMode])
 
   // Stable column/card plumbing — every handler the memoized columns receive is identity-stable
   // across renders (the column binds its own id; cards bind theirs).
@@ -582,6 +589,11 @@ export const KanbanView = memo(function KanbanView({
       <div className="kanban-header">
         <span className="kanban-header__dot" style={{ background: projectColor }} />
         <span className="kanban-header__name">{projectName}</span>
+        <button type="button" className="kanban-header__new-terminal" onClick={() => {
+          const id = onCreateNode({ kind: 'terminal' }, null)
+          if (id) setModalNodeId(id)
+        }}>+ New terminal</button>
+        <NewSessionMenu columnId={null} createOptions={createOptions} onCreate={onCreateNode} label="Agents & more" />
         {workflowBoard && <a className="kanban-github-status" href={workflowBoard} target="_blank" rel="noreferrer">Workflow board ↗</a>}
         {workflowBoard && catalog && <label className="kanban-column-mode">Columns
           <select aria-label="Columns" value={columnMode} disabled={source === 'github' || !feedAvailable}
@@ -594,7 +606,6 @@ export const KanbanView = memo(function KanbanView({
             <option value="canvas">Canvas groups</option>
           </select>
         </label>}
-        {columnMode !== 'canvas' && <NewSessionMenu createOptions={createOptions} onCreate={onCreateNode} columnId={null} />}
         {workflowBoard && !feedAvailable && <span className="kanban-github-status" role="status">Task board unavailable</span>}
         {columnMode === 'canvas' && <select aria-label="Card order" value={sortMode} title="Priority view uses derived order. Choose Manual order to drag cards; Move to remains available in the card menu."
           onChange={e => { const mode = e.target.value; if (mode === 'manual' || mode === 'priority') setKanbanSort(projectId, mode) }}>
@@ -676,6 +687,17 @@ export const KanbanView = memo(function KanbanView({
           </div>
         )}
       </div>
+      {featured && sourceVisible(source, 'sessions') && (
+        <section className="kanban-featured" aria-label={featured.label}>
+          <h2>{featured.label}</h2>
+          {featuredCard ? <>
+            <span className="kanban-featured__name">{taskDisplayTitle(featuredCard.title, featuredCard.titleAuto, externalTasks.get(featuredCard.id))}</span>
+            {showsStatus({ type: featuredCard.kind, agentId: featuredCard.agentId as AgentId }) &&
+              <NodeStatusBadge nodeId={featuredCard.id} agentId={featuredCard.agentId as AgentId} compact />}
+            <button type="button" onClick={() => setModalNodeId(featuredCard.id)}>Open session</button>
+          </> : <span className="kanban-featured__name">Current session unavailable</span>}
+        </section>
+      )}
       <div className={columnCards.matrix ? 'kanban-board kanban-board--matrix' : 'kanban-board'}>
           {columnCards.matrix && columnMode !== 'canvas' ? <>
             <TaskBoardMatrix matrix={columnCards.matrix} columnField={columnMode} renderCards={cards => sessionCards(cards, null)} />

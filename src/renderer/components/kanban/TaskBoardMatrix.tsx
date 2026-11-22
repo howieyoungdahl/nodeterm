@@ -9,7 +9,7 @@ export function TaskBoardMatrix({ matrix, columnField, renderCards }: {
 }) {
   return (
     <table className="kanban-matrix" aria-label="Workflows and stages"
-      style={{ minWidth: 112 + 202 * matrix.columns.length }}>
+      style={{ minWidth: `calc(var(--kanban-row-width) + ${matrix.columns.length} * var(--kanban-column-width))` }}>
       <thead><tr>
         <th scope="col" className="kanban-matrix__corner">{columnField === 'workflow' ? 'Stage' : 'Workflow'}</th>
         {matrix.columns.map(col => (
