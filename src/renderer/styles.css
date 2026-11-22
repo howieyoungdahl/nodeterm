@@ -8595,10 +8595,12 @@ button.group-node__setup:disabled {
 .kanban-header {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  height: 46px;
-  padding: 0 18px;
+  box-sizing: border-box;
+  min-height: 46px;
+  padding: 6px 18px;
   padding-right: 300px; /* keep a long project name from running under the cluster icons */
   border-bottom: 1px solid rgba(var(--tint-rgb), 0.08);
 }
@@ -8845,10 +8847,8 @@ button.group-node__setup:disabled {
 }
 @media (max-width: 900px) {
   .kanban-header {
-    height: auto;
-    min-height: 46px;
-    flex-wrap: wrap;
-    padding: 6px 12px;
+    /* The floating workspace controls occupy the top strip even on a narrow canvas. */
+    padding: 46px 12px 8px;
   }
 }
 .kanban-col__issue-group {
