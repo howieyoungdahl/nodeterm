@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { useExternalBoardSync } from './state/externalTaskBoard'
 import { ReactFlowProvider } from '@xyflow/react'
 import { Canvas } from './canvas/Canvas'
 import { PromptDialogHost } from './components/promptDialog'
@@ -19,6 +20,7 @@ import { useAppTheme } from './state/useAppTheme'
 import { AppearanceLayer } from './components/AppearanceLayer'
 
 export default function App() {
+  useExternalBoardSync()
   // Apply the terminal-rendering setting to the two GPU coordinators, live. 'auto' is
   // per-terminal WebGL on every platform (see `resolveTerminalRenderer` for the history of the
   // macOS branch and the evidence that collapsed it). 'off' reclaims every context; 'shared'

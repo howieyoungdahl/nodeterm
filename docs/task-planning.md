@@ -67,6 +67,16 @@ identity at a deadline threshold.
 
 ## Visibility and preservation
 
+Server Edition can show a linked workflow board in the Kanban header. An operator
+can place `external-task-boards.json` in the server data directory. It maps each
+runtime project ID to a dashboard `url`, a same-origin HTTPS `feed`, and an
+absolute `tokenFile` holding a read-only bearer. The server reads that file locally
+and adds its host name to the feed query. Return cards in the order the board uses for urgency. An optional boolean `urgent` marks supporting sessions that need immediate attention. The feed returns `asOf` (an ISO timestamp)
+and `cards` with `nodeId`, `task`, `workflow`, `stage`, `urgency`, `reason` and
+`priority`. Unassigned fields are null. Only confirmed bindings from the selected
+project reach its signed-in browser. Badges use the task's recorded urgency and
+priority through a handoff. The link opens the operator dashboard for edits.
+
 Only an explicit supporting relationship with exactly one present independent parent on
 the same board folds by default. The parent's expandable list opens each child's existing
 card/session. The complete session collection, saved nodes and history remain available;

@@ -438,6 +438,10 @@ of surviving successors, including group children, so legacy saves preserve canv
 
 ## Testing
 
+The optional Server Edition task board reads an operator-configured feed. Keep
+its read credential in the server data plane and its card bindings scoped to
+the active project. See [creation-time work planning](docs/task-planning.md).
+
 Missing workspace publications, outside file notifications and same-build browser reconnects
 request a full workspace read and merge it against the last adopted durable content. Keep that
 baseline separate from locally committed canvas edits. A read raced by a save or publication

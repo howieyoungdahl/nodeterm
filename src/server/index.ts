@@ -19,6 +19,7 @@ import { createOperatorConversationApi } from './operator-conversation-api'
 import { ServerPlatform } from './platform-server'
 import { Auth } from './auth'
 import { createHttpHandler } from './http'
+import { createExternalTaskBoard } from './external-task-board'
 import { attachWsServer } from './ws'
 import { describeTrustedNets } from './proxy-trust'
 import type { ServerConfig } from './config'
@@ -1038,6 +1039,10 @@ export async function startServer(
       rendererDir: config.rendererDir,
       trustProxy: config.trustProxy,
       downloadTickets,
+      taskBoard: createExternalTaskBoard(config.dataDir, (id) => {
+        const project = workspaceStore.persistedCanvases().find(p => p.id === id)
+        return project ? new Set(project.nodes.map(n => n.id)) : null
+      }),
       opsApi
     })
   )

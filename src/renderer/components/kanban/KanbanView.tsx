@@ -3,6 +3,7 @@ import type { KanbanLabel, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
+import { useExternalBoard } from '../../state/externalTaskBoard'
 import { useSettings } from '../../state/settings'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
@@ -142,6 +143,7 @@ export const KanbanView = memo(function KanbanView({
   // show everything; otherwise a card must carry at least one selected label (cardMatchesLabelFilter).
   const [labelFilter, setLabelFilter] = useState<string[]>([])
   const [categoryFilter, setCategoryFilter] = useState<TaskCategory | 'all'>('all')
+  const [workflowFilter, setWorkflowFilter] = useState('')
   const [filterOpen, setFilterOpen] = useState(false)
   const [source, setSource] = useState<KanbanSource>('all')
   const [modalIssue, setModalIssue] = useState<GitHubIssueCardView | null>(null)
@@ -152,6 +154,11 @@ export const KanbanView = memo(function KanbanView({
   >(null)
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectId = useProjects((s) => s.activeProjectId)
+  const workflowBoard = useExternalBoard(s => s.project === projectId ? s.url : null)
+  const externalTasks = useExternalBoard(s => s.tasks)
+  const workflowOptions = useMemo(() => Array.from(new Set(
+    Array.from(externalTasks.values(), t => t.workflow).filter((w): w is string => Boolean(w))
+  )).sort(), [externalTasks])
   const sortMode = useViewMode(s => s.kanbanSortByProject[projectId] ?? 'manual')
   const setKanbanSort = useViewMode(s => s.setKanbanSort)
   // One sampled clock for badges, sorting and supporting-session urgency, without a timer.
@@ -360,24 +367,32 @@ export const KanbanView = memo(function KanbanView({
   // them per column — and their identities hold across renders that change neither the board,
   // the sessions, nor the filter, which is what lets the memoized columns skip.
   const columnCards = useMemo(() => {
+    const externalOrder = new Map(Array.from(externalTasks.keys(), (id, index) => [id, index]))
+    const workflow = workflowOptions.includes(workflowFilter) ? workflowFilter : ''
     const vis = (ids: string[]): string[] =>
       activeLocalFilter.length ? ids.filter((id) => cardMatchesLabelFilter(board, id, activeLocalFilter)) : ids
     const toCards = (ids: string[]): KanbanSession[] => {
       const cards = ids.flatMap((id) => {
         const card = byId.get(id)
         if (!card || taskVisibility.hidden.has(id)) return []
+        if (workflowBoard) {
+          const matchesWorkflow = (entry: KanbanSession) => externalTasks.get(entry.id)?.workflow === workflow
+          return !workflow || matchesWorkflow(card) || taskVisibility.supports.get(id)?.some(matchesWorkflow) ? [card] : []
+        }
         const matches = (entry: KanbanSession) => (cardMeta(board, entry.id)?.category ?? parseTaskPlanning(entry.taskPlanning)?.category ?? 'needs-classification') === categoryFilter
         return categoryFilter === 'all' || matches(card) || taskVisibility.supports.get(id)?.some(matches) ? [card] : []
       })
-      return cards.length ? (sortMode === 'priority'
-        ? sortByPriority(cards, card => effectivePriority(cardMeta(board, card.id), card.taskPlanning, priorityNow))
-        : cards) : NO_CARDS
+      if (!cards.length) return NO_CARDS
+      if (sortMode !== 'priority') return cards
+      if (workflowBoard) return cards.sort((a, b) =>
+        (externalOrder.get(a.id) ?? Infinity) - (externalOrder.get(b.id) ?? Infinity))
+      return sortByPriority(cards, card => effectivePriority(cardMeta(board, card.id), card.taskPlanning, priorityNow))
     }
     return {
       ungrouped: toCards(vis(unassigned(board, sessionIds))),
       byColumn: new Map(board.columns.map((c) => [c.id, toCards(vis(assignedTo(board, c.id)))]))
     }
-  }, [board, byId, sessionIds, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow])
+  }, [board, byId, sessionIds, activeLocalFilter, taskVisibility, categoryFilter, sortMode, priorityNow, workflowBoard, externalTasks, workflowOptions, workflowFilter])
 
   // Stable column/card plumbing — every handler the memoized columns receive is identity-stable
   // across renders (the column binds its own id; cards bind theirs).
@@ -452,6 +467,7 @@ export const KanbanView = memo(function KanbanView({
             labels={labelsOf(s.id)}
             supportingSessions={taskVisibility.supports.get(s.id)}
             urgentSupportingCount={(taskVisibility.supports.get(s.id) ?? []).filter(child => {
+              if (workflowBoard) return externalTasks.get(child.id)?.urgent === true
               return effectivePriority(metaOf(child.id), child.taskPlanning, priorityNow) === 'urgent'
             }).length}
             supportsExpanded={expandedSupport.has(s.id)}
@@ -520,7 +536,12 @@ export const KanbanView = memo(function KanbanView({
       ...(moveTargets.length
         ? ([{ type: 'submenu', label: 'Move to', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
         : []),
-      { type: 'submenu', label: 'Priority', children: [
+      workflowBoard ? { label: 'Open workflow board', icon: <IconExternal />, onClick: () => {
+        const url = new URL(workflowBoard)
+        const linked = externalTasks.get(nodeId)
+        if (linked) url.searchParams.set('task', linked.task)
+        window.open(url.toString(), '_blank', 'noopener,noreferrer')
+      }} : { type: 'submenu', label: 'Priority', children: [
         ...PRIORITIES.map(priority => ({
           label: priority.label,
           icon: <span style={{ color: priority.color }}>●</span>,
@@ -540,16 +561,21 @@ export const KanbanView = memo(function KanbanView({
       <div className="kanban-header">
         <span className="kanban-header__dot" style={{ background: projectColor }} />
         <span className="kanban-header__name">{projectName}</span>
+        {workflowBoard && <a className="kanban-github-status" href={workflowBoard} target="_blank" rel="noreferrer">Workflow board ↗</a>}
         <select aria-label="Card order" value={sortMode} title="Priority view uses derived order. Choose Manual order to drag cards; Move to remains available in the card menu."
           onChange={e => { const mode = e.target.value; if (mode === 'manual' || mode === 'priority') setKanbanSort(projectId, mode) }}>
           <option value="manual">Manual order</option>
-          <option value="priority">Priority</option>
+          <option value="priority">{workflowBoard ? 'Work Board urgency' : 'Priority'}</option>
         </select>
         {board.github && <KanbanSourceFilter value={source} onChange={setSource} />}
-        <select aria-label="Work category" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value as TaskCategory | 'all')}>
+        {workflowBoard ? <select aria-label="Workflow" value={workflowOptions.includes(workflowFilter) ? workflowFilter : ''}
+          onChange={e => setWorkflowFilter(e.target.value)}>
+          <option value="">All workflows</option>
+          {workflowOptions.map(workflow => <option key={workflow}>{workflow}</option>)}
+        </select> : <select aria-label="Work category" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value as TaskCategory | 'all')}>
           <option value="all">All work categories</option>
           {TASK_CATEGORIES.map(category => <option key={category} value={category}>{category.replaceAll('-', ' ')}</option>)}
-        </select>
+        </select>}
         {board.github && github?.loading && <span className="kanban-github-status">Loading GitHub issues…</span>}
         {board.github && github?.error && (
           <button
