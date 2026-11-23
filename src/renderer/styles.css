@@ -8912,24 +8912,19 @@ button.group-node__setup:disabled {
   align-items: baseline;
   gap: 4px 8px;
   margin-top: 8px;
-  font-size: 13px;
+  font-size: 11px;
   color: var(--muted);
 }
 .kanban-card__status .nt-status, .kanban-featured .nt-status {
   margin: 0;
-  font-size: 12px;
   letter-spacing: 0.02em;
 }
 .kanban-card__status .nt-status__age, .kanban-featured .nt-status__age { opacity: 0.9; }
 .kanban-card__task {
   color: var(--accent-text);
-  font-size: 13px;
+  font-size: 11px;
   overflow-wrap: anywhere;
   text-underline-offset: 2px;
-}
-.kanban-card--session .task-planning-facts,
-.kanban-card--session :is(.task-planning-timing, .task-planning-rank, .task-planning-note) {
-  font-size: 13px;
 }
 .kanban-card--session .node-account-chip {
   margin: 0;
@@ -8938,7 +8933,6 @@ button.group-node__setup:disabled {
   flex-shrink: 1;
   white-space: normal;
   overflow-wrap: anywhere;
-  font-size: 12px;
 }
 .kanban-card__detail {
   display: flex;
@@ -8954,11 +8948,11 @@ button.group-node__setup:disabled {
 .kanban-card__session {
   flex: 1 1 12ch;
   min-width: 0;
-  font-size: 12px;
+  font-size: 10px;
   color: var(--muted);
   overflow-wrap: anywhere;
 }
-.kanban-card__detail .ctx-pill { height: auto; min-height: 20px; font-size: 12px; }
+.kanban-card__detail .ctx-pill { height: auto; min-height: 18px; }
 .kanban-card__detail .ctx-pill__model { max-width: none; }
 .kanban-card__kindlabel {
   flex: 1;

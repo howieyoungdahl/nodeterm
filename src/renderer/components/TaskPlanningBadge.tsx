@@ -3,10 +3,11 @@ import type { TaskPlanning } from '@shared/task-planning'
 import { useProjects } from '../state/projects'
 import { useProjectTaskLink } from '../state/externalTaskBoard'
 
-export function TaskPlanningBadge({ planning, nodeId }: { planning?: TaskPlanning; nodeId?: string }): JSX.Element {
+export function TaskPlanningBadge({ planning, nodeId, boardHasStatus }: { planning?: TaskPlanning; nodeId?: string; boardHasStatus?: boolean }): JSX.Element | null {
   const external = useProjectTaskLink(nodeId)
   const meta = useProjects(s => s.projects.find(p => p.nodes.some(n => n.id === nodeId))?.kanban?.meta?.find(m => m.nodeId === nodeId))
   if (external) {
+    if (boardHasStatus && !external.available) return null
     const task = external.task
     if (!task) return <span className="task-planning-facts">
       {meta?.category && meta.category !== 'needs-classification' && <span className="task-planning-chip"

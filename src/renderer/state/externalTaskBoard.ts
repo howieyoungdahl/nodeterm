@@ -8,13 +8,15 @@ interface BoardView {
   project: string
   url: string | null
   available: boolean
+  reading: boolean
+  lastPlacement: Map<string, ExternalTask>
   columns: ExternalTaskColumns | null
   backgroundNodeIds: string[]
   featuredSession: ExternalTaskBoard['featuredSession']
   tasks: Map<string, ExternalTask>
 }
 export const NO_BACKGROUND: string[] = []
-const empty = { project: '', url: null, available: false, columns: null, backgroundNodeIds: NO_BACKGROUND, featuredSession: undefined, tasks: new Map<string, ExternalTask>() }
+const empty = { project: '', url: null, available: false, reading: false, lastPlacement: new Map<string, ExternalTask>(), columns: null, backgroundNodeIds: NO_BACKGROUND, featuredSession: undefined, tasks: new Map<string, ExternalTask>() }
 export const useExternalBoard = create<BoardView>(() => empty)
 
 export interface ProjectTaskLink {
@@ -53,7 +55,7 @@ export function useExternalBoardSync() {
     if (!isBrowserRuntime() || !project) return
     let timer: ReturnType<typeof setTimeout>
     const controller = new AbortController()
-    useExternalBoard.setState({ ...empty, project })
+    useExternalBoard.setState({ ...empty, project, reading: true })
     async function refresh() {
       try {
         const res = await fetch('/task-board?project=' + encodeURIComponent(project), {
@@ -63,16 +65,16 @@ export function useExternalBoardSync() {
         if (!res.ok) throw new Error('Task board unavailable')
         const { board }: { board: ExternalTaskBoard | null } = await res.json()
         if (!controller.signal.aborted)
-          useExternalBoard.setState(previous => ({
-            project,
-            url: board?.url ?? null,
-            available: board?.available ?? false,
-            featuredSession: board?.featuredSession,
-            backgroundNodeIds: board?.backgroundNodeIds ?? NO_BACKGROUND,
-            columns: board && !board.available && previous.project === project && previous.url === board.url
-              ? previous.columns : board?.columns ?? null,
-            tasks: new Map(board?.cards.map((card) => [card.nodeId, card]))
-          }))
+          useExternalBoard.setState(previous => {
+            const tasks = new Map(board?.cards.map(card => [card.nodeId, card]))
+            const offline = board && !board.available && previous.project === project && previous.url === board.url
+            return {
+              project, reading: false, url: board?.url ?? null, available: board?.available ?? false,
+              featuredSession: board?.featuredSession, backgroundNodeIds: board?.backgroundNodeIds ?? NO_BACKGROUND,
+              columns: offline ? previous.columns : board?.columns ?? null,
+              lastPlacement: offline ? previous.lastPlacement : tasks, tasks
+            }
+          })
       } catch {
         if (!controller.signal.aborted)
           useExternalBoard.setState(previous => previous.project === project ? {

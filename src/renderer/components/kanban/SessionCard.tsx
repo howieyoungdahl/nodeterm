@@ -151,7 +151,7 @@ export const SessionCard = memo(function SessionCard({
         {externalBoard && linkedTask && <a className="kanban-card__task" href={taskBoardHref(externalBoard, linkedTask.task)}
           target="_blank" rel="noreferrer" draggable={false} onClick={e => e.stopPropagation()}
           title={linkedTask.taskTitle ?? linkedTask.task}>Task {linkedTask.task}</a>}
-        <TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} />
+        <TaskPlanningBadge boardHasStatus planning={session.taskPlanning} nodeId={session.id} />
       </div>}
       {session.organization && <div className="kanban-card__metarow"><OrganizationBadge organization={session.organization} nodeId={session.id} /></div>}
       {(showStatus || sleeping) && <div className="kanban-card__status">
@@ -176,7 +176,7 @@ export const SessionCard = memo(function SessionCard({
         </button>
         {supportsExpanded && <ul>{supportingSessions.map(child => <li key={child.id}>
           <button type="button" draggable={false} onClick={() => onOpen(child.id)}>{titleFor(child)}</button>
-          <TaskPlanningBadge planning={child.taskPlanning} nodeId={child.id} />
+          <TaskPlanningBadge boardHasStatus planning={child.taskPlanning} nodeId={child.id} />
         </li>)}</ul>}
       </div>}
       {(labels.length > 0 || assignees.length > 0 || due !== undefined || priority !== undefined) && (
