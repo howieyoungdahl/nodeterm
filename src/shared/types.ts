@@ -608,6 +608,8 @@ export interface ProjectKanban {
   manualAssignmentVersions?: Record<string, string>
   columns: KanbanColumn[]
   assignments: KanbanAssignment[]
+  /** Explicit order in the virtual Ungrouped column. Unlisted cards follow canvas order. */
+  ungroupedOrder?: string[]
   /** Optional card metadata; tolerated as absent/malformed by every reader (lib normalizes). */
   meta?: KanbanCardMeta[]
   /** Board-level label palette (Notion-style). Cards reference these by id in `meta[].labels`;

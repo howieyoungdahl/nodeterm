@@ -81,7 +81,9 @@ Set an optional HTTPS `homeUrl` for the **Work Board** button in the header. Car
 
 A feed can advertise a same-origin task picker with a root-relative `linkPage`. **Link to task…** opens that signed-in page for the exact host and terminal. The operator can choose, replace or clear the task. Dragging an unlinked terminal onto a linked card in Workflow or Stage opens a review of that exact task.
 
-Feeds can supply ordered `workflows` and `stages` arrays of display names. Kanban then opens with workflows across the top and stages down the side, including empty cells. Choose Stage under Columns to swap the axes. Each cell follows the feed's urgency order. Unlinked cards appear beneath the table. **Arrange canvas cards** opens Canvas groups with manual ordering so you can drag cards immediately. The browser remembers the choice per project. During a feed outage it keeps the most recent positions from that board and labels them as last known. If no positions have loaded yet, sessions remain accessible in a single list until the feed recovers.
+Kanban opens in **Groups** unless the browser remembers a different choice for that project. Use **New group** and drag cards between groups or to a position within a group, including Ungrouped. A drag switches priority order to manual order so the new position is visible.
+
+Feeds can supply ordered `workflows` and `stages` arrays of display names. **Workflow** puts workflows across the top and stages down the side. **Stage** swaps the axes. Each cell follows the feed's urgency order. Unlinked cards appear beneath the table. During a feed outage those views keep the most recent positions and label them as last known. If positions have yet to load, sessions remain accessible in a single list.
 
 The Kanban header's **+ New terminal** button creates and opens a shell in the active
 project. **Agents & more** opens the session-type menu. Both controls stay visible while

@@ -7,7 +7,7 @@ import { cardLinkHref, NO_BACKGROUND, taskBoardHref, taskDisplayTitle, useExtern
 import { useSettings } from '../../state/settings'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
-  deleteColumn, labelsForCard, moveColumn,
+  deleteColumn, labelsForCard, moveColumn, placeInUngrouped,
   nextColumnColor, pruneAssignments, recolorColumn, renameColumn, setCardPriority, unassigned
 } from '../../lib/kanban'
 import { effectivePriority, sortByPriority } from '../../lib/kanbanPriority'
@@ -178,7 +178,7 @@ export const KanbanView = memo(function KanbanView({
     ...(catalog?.workflows ?? []),
     ...Array.from(placement.values(), t => t.workflow).filter((w): w is string => Boolean(w)).sort()
   ])), [catalog, placement])
-  const preferredColumns = useViewMode(s => s.kanbanColumnsByProject[projectId] ?? 'workflow')
+  const preferredColumns = useViewMode(s => s.kanbanColumnsByProject[projectId] ?? 'canvas')
   const setKanbanColumns = useViewMode(s => s.setKanbanColumns)
   const columnMode = (reading || (workflowBoard && (catalog || !feedAvailable))) && source !== 'github' ? preferredColumns : 'canvas'
   const canvasSort = useViewMode(s => s.kanbanSortByProject[projectId] ?? 'manual')
@@ -359,6 +359,15 @@ export const KanbanView = memo(function KanbanView({
     [api.githubIssues, board.github?.completionColumnId, githubReadOnly, moveGitHubState, projectId]
   )
 
+  const placeSession = useCallback((nodeId: string, columnId: string | null, beforeId: string | null) => {
+    const next = columnId === null
+      ? placeInUngrouped(board, sessionIds, nodeId, beforeId)
+      : assignNode(board, nodeId, columnId, beforeId)
+    if (next === board) return
+    if (canvasSort === 'priority') setKanbanSort(projectId, 'manual')
+    commit(next)
+  }, [board, sessionIds, canvasSort, setKanbanSort, projectId, commit])
+
   // columnId null = the virtual Ungrouped column.
   const dropOnColumn = useCallback(
     (columnId: string | null) => {
@@ -368,9 +377,9 @@ export const KanbanView = memo(function KanbanView({
         if (columnId !== null) commit(moveColumn(board, drag.id, columnId))
         // a column dropped on Ungrouped is a no-op — Ungrouped is always first
       } else if (isProviderDrag(drag)) requestGitHubMove(drag.issue, columnId)
-      else if (sortMode === 'manual') commit(assignNode(board, drag.id, columnId, null))
+      else placeSession(drag.id, columnId, null)
     },
-    [board, commit, requestGitHubMove, sortMode, columnMode]
+    [board, commit, requestGitHubMove, placeSession, columnMode]
   )
 
   const dropAtCard = useCallback(
@@ -385,7 +394,7 @@ export const KanbanView = memo(function KanbanView({
         requestGitHubMove(drag.issue, columnId)
         return
       }
-      if (sortMode === 'priority') return
+      if (drag.id === targetNodeId) return
       // "after this card" = "before the NEXT card in the column" (null = end of column).
       const ids = columnId === null ? unassigned(board, sessionIds) : assignedTo(board, columnId)
       let beforeId: string | null = targetNodeId
@@ -393,9 +402,9 @@ export const KanbanView = memo(function KanbanView({
         const i = ids.indexOf(targetNodeId)
         beforeId = i >= 0 && i + 1 < ids.length ? ids[i + 1] : null
       }
-      commit(assignNode(board, drag.id, columnId, beforeId))
+      placeSession(drag.id, columnId, beforeId)
     },
-    [board, commit, requestGitHubMove, sessionIds, sortMode, columnMode]
+    [board, commit, requestGitHubMove, sessionIds, placeSession, columnMode]
   )
 
   // Per-column card lists in one pass, so a board render doesn't re-derive (and re-allocate)
@@ -502,7 +511,7 @@ export const KanbanView = memo(function KanbanView({
       <SessionCard
         key={s.id}
         session={s}
-        reorderEnabled={sortMode === 'manual'}
+        reorderEnabled={columnMode === 'canvas'}
         linkDrag={Boolean(columnMode !== 'canvas' && linkPage && s.kind === 'terminal' && !externalTasks.has(s.id))}
         onLinkDrop={columnMode !== 'canvas' && linkPage && externalTasks.has(s.id) ? dropOnTask : undefined}
         priorityNow={priorityNow}
@@ -620,6 +629,22 @@ export const KanbanView = memo(function KanbanView({
       <div className="kanban-header">
         <span className="kanban-header__dot" style={{ background: projectColor }} />
         <span className="kanban-header__name">{projectName}</span>
+        {workflowBoard && (catalog || !feedAvailable) && source !== 'github' && (
+          <div className="kanban-board-view" role="group" aria-label="Board view">
+            <button type="button" aria-pressed={columnMode === 'canvas'}
+              title="Drag cards to arrange your groups" onClick={() => setKanbanColumns(projectId, 'canvas')}>Groups</button>
+            <button type="button" aria-pressed={columnMode === 'workflow'}
+              title="Group by Work Board workflow" onClick={() => setKanbanColumns(projectId, 'workflow')}>Workflow</button>
+            <button type="button" aria-pressed={columnMode === 'stage'}
+              title="Group by Work Board stage" onClick={() => setKanbanColumns(projectId, 'stage')}>Stage</button>
+          </div>
+        )}
+        {workflowBoard && columnMode === 'canvas' && source !== 'github' && (
+          <button type="button" className="kanban-header__new-group" onClick={() => {
+            const next = addColumn(board, 'New group', nextColumnColor(board))
+            commit(moveColumn(next, next.columns[next.columns.length - 1].id, board.columns[0]?.id ?? null))
+          }}>+ New group</button>
+        )}
         <button type="button" className="kanban-header__new-terminal" onClick={() => {
           const id = onCreateNode({ kind: 'terminal' }, null)
           if (id) setModalNodeId(id)
@@ -651,25 +676,8 @@ export const KanbanView = memo(function KanbanView({
         {workflowBoard && <a className="kanban-github-status" href={workBoardHome ?? workflowBoard} target="_blank" rel="noreferrer">
           {workBoardHome ? 'Work Board' : 'Workflow board'} ↗
         </a>}
-        {workflowBoard && (catalog || !feedAvailable) && <label className="kanban-column-mode">Columns
-          <select aria-label="Columns" value={columnMode} disabled={source === 'github'}
-            onChange={e => {
-              const mode = e.target.value
-              if (mode === 'workflow' || mode === 'stage' || mode === 'canvas') setKanbanColumns(projectId, mode)
-            }}>
-            <option value="workflow">Workflow</option>
-            <option value="stage">Stage</option>
-            <option value="canvas">Canvas groups</option>
-          </select>
-        </label>}
-        {workflowBoard && source !== 'github' && (columnMode !== 'canvas' || sortMode !== 'manual') && (
-          <button type="button" className="kanban-github-status" onClick={() => {
-            setKanbanColumns(projectId, 'canvas')
-            setKanbanSort(projectId, 'manual')
-          }} title="Drag sessions between canvas groups or reorder them within a group">Arrange canvas cards</button>
-        )}
         {workflowBoard && !feedAvailable && <span className="kanban-github-status" role="status">{catalog ? 'Work Board unavailable. Showing last known positions.' : 'Work Board unavailable. Reconnecting…'}</span>}
-        {columnMode === 'canvas' && <select aria-label="Card order" value={sortMode} title="Priority view uses derived order. Choose Manual order to drag cards; Move to remains available in the card menu."
+        {columnMode === 'canvas' && <select aria-label="Card order" value={sortMode} title="Dragging a card switches to Manual order."
           onChange={e => { const mode = e.target.value; if (mode === 'manual' || mode === 'priority') setKanbanSort(projectId, mode) }}>
           <option value="manual">Manual order</option>
           <option value="priority">{workflowBoard ? 'Work Board urgency' : 'Priority'}</option>
@@ -786,12 +794,12 @@ export const KanbanView = memo(function KanbanView({
                 onDropOnColumn={dropOnColumn}
               />
             ))}
-            <button
+            {(!workflowBoard || source === 'github') && <button
               className="kanban-add-col"
               onClick={() => commit(addColumn(board, 'New column', nextColumnColor(board)))}
             >
               + Add column
-            </button>
+            </button>}
           </div>}
       </div>
       {cardMenu && byId.has(cardMenu.nodeId) && (
