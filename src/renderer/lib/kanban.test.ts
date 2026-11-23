@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { ProjectKanban } from '@shared/types'
 import {
   addColumn, assignNode, assignedTo, defaultKanban, deleteColumn, moveColumn,
-  cardMeta, columnForNode, nextColumnColor, pruneAssignments, recolorColumn, renameColumn,
+  cardMeta, columnForNode, nextColumnColor, placeInUngrouped, pruneAssignments, recolorColumn, renameColumn,
   setCardDue, setCardPriority, toggleAssignee, unassigned,
   boardLabels, cardMatchesLabelFilter, createLabel, deleteLabel, labelColor, labelsForCard,
   recolorLabel, renameLabel, reorderLabels, toggleCardLabel,
@@ -115,6 +115,14 @@ describe('assignments', () => {
   it('assignNode with columnId null removes the assignment (back to Ungrouped)', () => {
     const k = assignNode(board(), 'n1', null, null)
     expect(k.assignments.map((a) => a.nodeId)).toEqual(['n2', 'n3'])
+  })
+  it('moves cards to an exact position in Ungrouped and retains the order for newly opened cards', () => {
+    const ids = ['n1', 'n2', 'n3', 'n4', 'n5']
+    const k = placeInUngrouped(board(), ids, 'n1', 'n4')
+    expect(columnForNode(k, 'n1')).toBeUndefined()
+    const reordered = placeInUngrouped(k, ids, 'n5', 'n1')
+    expect(unassigned(reordered, ['n6', ...ids])).toEqual(['n5', 'n1', 'n4', 'n6'])
+    expect(pruneAssignments(reordered, ids.slice(0, -1)).ungroupedOrder).toEqual(['n1', 'n4'])
   })
   it('assignNode: beforeNode in a different column ⇒ end; unknown column ⇒ no-op; self-before ⇒ no-op', () => {
     const k = assignNode(board(), 'n1', 'b', 'n3')

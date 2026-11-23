@@ -6,8 +6,8 @@ import type { TaskCategory } from '@shared/task-planning'
 // Pure kanban board transforms — the ONLY place board structure changes. The UI computes
 // the next board here and hands it whole to setProjectKanban (no second live source).
 // Every function returns a new board; unknown ids are no-ops returning the input.
-// Cards are the project's SESSION NODES — the board stores only column assignments; a
-// session with no (or dangling) assignment sits in the virtual Ungrouped column.
+// Cards are the project's session nodes. A session without a valid assignment sits in
+// the virtual Ungrouped column.
 
 const kid = (prefix: string): string => `${prefix}-${Math.random().toString(36).slice(2, 10)}`
 
@@ -116,17 +116,20 @@ export function resolveColumnRef(k: ProjectKanban, ref: string): string | null |
 
 /** Ids from `sessionIds` with no live assignment — never assigned, or assigned to a column
  *  that no longer exists (e.g. a git merge kept the assignment but lost the column). Order
- *  follows `sessionIds` (= canvas order). */
+ *  follows any explicit board order, then canvas order for the rest. */
 export function unassigned(k: ProjectKanban, sessionIds: string[]): string[] {
   const cols = new Set(k.columns.map((c) => c.id))
   const assigned = new Set(
     k.assignments.filter((a) => cols.has(a.columnId)).map((a) => a.nodeId)
   )
-  return sessionIds.filter((id) => !assigned.has(id))
+  const ids = sessionIds.filter((id) => !assigned.has(id))
+  if (!Array.isArray(k.ungroupedOrder) || !k.ungroupedOrder.length) return ids
+  const eligible = new Set(ids)
+  const ordered = new Set(k.ungroupedOrder.filter(id => eligible.has(id)))
+  return [...ordered, ...ids.filter(id => !ordered.has(id))]
 }
 
-/** Assigns/moves a session card. `columnId` null = back to Ungrouped (assignment removed;
- *  Ungrouped order is canvas order, so `beforeNodeId` is ignored there). Inserts before
+/** Assigns/moves a session card. `columnId` null removes the assignment. Inserts before
  *  `beforeNodeId`'s assignment when that assignment is in the target column, else at the
  *  end. Unknown target column is a no-op. */
 export function assignNode(
@@ -150,6 +153,16 @@ export function assignNode(
   return withManualAssignment({ ...k, assignments: [...without.slice(0, at), moved, ...without.slice(at)] }, nodeId)
 }
 
+/** Place a card at a specific position in the virtual Ungrouped column. */
+export function placeInUngrouped(k: ProjectKanban, sessionIds: string[], nodeId: string, beforeId: string | null): ProjectKanban {
+  if (nodeId === beforeId || !sessionIds.includes(nodeId)) return k
+  const next = assignNode(k, nodeId, null, null)
+  const others = unassigned(next, sessionIds).filter(id => id !== nodeId)
+  const target = beforeId === null ? -1 : others.indexOf(beforeId)
+  others.splice(target < 0 ? others.length : target, 0, nodeId)
+  return { ...next, ungroupedOrder: others }
+}
+
 /** Drops assignments of nodes that no longer exist. Returns the SAME object when nothing
  *  changed, so callers can cheaply skip a no-op persist. */
 export function pruneAssignments(k: ProjectKanban, liveIds: string[]): ProjectKanban {
@@ -158,8 +171,11 @@ export function pruneAssignments(k: ProjectKanban, liveIds: string[]): ProjectKa
   const meta = metaList(k).filter((m) => m && live.has(m.nodeId))
   const sameAssignments = assignments.length === k.assignments.length
   const sameMeta = meta.length === metaList(k).length
-  if (sameAssignments && sameMeta) return k
+  const ungroupedOrder = Array.isArray(k.ungroupedOrder) ? k.ungroupedOrder.filter(id => live.has(id)) : []
+  if (sameAssignments && sameMeta && ungroupedOrder.length === (k.ungroupedOrder?.length ?? 0)) return k
   const next: ProjectKanban = { ...k, assignments }
+  if (ungroupedOrder.length) next.ungroupedOrder = ungroupedOrder
+  else delete next.ungroupedOrder
   if (Array.isArray(k.meta)) {
     if (meta.length) next.meta = meta
     else delete next.meta
