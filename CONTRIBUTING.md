@@ -592,6 +592,8 @@ workers into frames; grouping and organization require explicit commands. Existi
 pins and manual placement remain operator choices.
 Publication comparisons normalize only the node defaults `titleAuto: true` and `collapsed: false`
 to omitted persisted values. Defined drafts, metadata and geometry still conflict with deletion.
+When the host restores a terminal already open in the tab, keep its current presentation and
+merge compatible restored fields for that terminal ID.
 Per-bridge publication delivery waits for an in-flight save ACK, with a 64-event bound and
 unsubscribe cancellation. Observe complete publication receipts immediately for subsequent stamped
 canvas deltas; install content before advancing revision evidence. Delayed ACKs cannot rewind a

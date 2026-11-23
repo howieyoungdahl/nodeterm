@@ -114,6 +114,35 @@ it('refuses saved deletion of a card carrying a real unsaved draft despite retai
   expect(f.plan()).toEqual({ kind: 'conflict', reason: 'overlapping-content' })
   expect(f.live[0].data.text).toBe('unsent text must stay visible')
 })
+it.each(['publication', 'resync'])('reconciles a restored terminal already open in the tab via %s', delivery => {
+  const f = fixture()
+  const restored = { ...node('restored'), kind: 'terminal' as const, title: 'Previous title', cwd: '.' }
+  f.incoming.nodes.push(restored)
+  const liveTerminal = { ...restored, cwd: undefined, title: 'Current title', titleAuto: false,
+    position: { x: 123, y: 456 }, text: 'Unsaved draft', manualPlacement: true }
+  const live = nodeStatesToFlow([...f.base.nodes, liveTerminal])
+  live.at(-1)!.selected = true
+  const plan = planWorkspaceFlowPublication({ revision, projects: [f.base], activeProjectId: 'p', nodes: live,
+    change: { before: revision, after, changes: [{ before: f.base, after: f.incoming }] },
+    ...(delivery === 'resync' ? { resync: { base: [f.base], incoming: [f.incoming], revision: after } } : {}) })
+  expect(plan.kind).toBe('adopt'); if (plan.kind !== 'adopt') throw new Error('fixture')
+  expect(plan.nodes.filter(n => n.id === restored.id)).toHaveLength(1)
+  expect(plan.nodes.at(-1)?.selected).toBe(true)
+  expect(flowToNodeStates(plan.nodes).at(-1)).toMatchObject({ ...liveTerminal, cwd: '.' })
+  expect(plan.created).not.toContain(restored.id)
+  expect(plan.localEditsRemain).toBe(true)
+})
+
+it('keeps conflicting terminal launch data behind the recovery guard', () => {
+  const f = fixture()
+  const terminal = { ...node('restored'), kind: 'terminal' as const }
+  f.incoming.nodes.push({ ...terminal, cwd: '/incoming' })
+  const live = nodeStatesToFlow([...f.base.nodes, { ...terminal, cwd: '/different' }])
+  expect(planWorkspaceFlowPublication({ revision, projects: [f.base], activeProjectId: 'p', nodes: live,
+    change: { before: revision, after, changes: [{ before: f.base, after: f.incoming }] } }))
+    .toEqual({ kind: 'conflict', reason: 'overlapping-content' })
+})
+
 it('installs all content before acknowledging and defers the original node-created trigger', () => {
   const f = fixture(), order: string[] = [], deferred: Array<() => void> = []
   f.incoming.nodes.push(node('created'))

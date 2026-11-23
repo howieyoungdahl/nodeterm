@@ -189,6 +189,10 @@ requests workspace resync. Missing generations require a deliberate reload and n
 through reconnect. A changed renderer asset
 build leaves the workspace visible behind a deliberate reload notice rather than reloading it.
 
+A live recovery can publish a terminal whose ID already exists in the browser before its first
+save. The shared renderer reconciles that terminal in place, keeping the tab's presentation and
+compatible restored metadata. Conflicting launch information or drafts still require recovery.
+
 
 Recovery history maintenance is asynchronous and bounded. Versions keep a seven-day window, a
 200-version floor and the current published revision; only older completed operations expire.

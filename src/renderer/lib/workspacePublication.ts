@@ -28,6 +28,23 @@ const clean = (p: Project): Project => {
 const PRESENTATION = new Set(['position', 'size', 'compactRect', 'controlSize', 'title', 'titleAuto', 'color', 'group',
   'parentId', 'collapsed', 'pinned', 'manualPlacement', 'tags', 'hideFanout', 'taskFrame'])
 
+/** A host can restore a terminal the tab already holds but has not saved yet. The same ID
+ * names a single terminal in this project. Keep the tab's current presentation and retain
+ * complementary fields from the restore. Conflicting launch data or drafts still need recovery. */
+function mergeRestoredTerminal(local: Record<string, unknown>, incoming: Record<string, unknown>): Record<string, unknown> {
+  const fields: Array<[string, unknown]> = []
+  for (const key of new Set([...Object.keys(local), ...Object.keys(incoming)])) {
+    const current = Object.hasOwn(local, key) ? local[key] : undefined
+    const restored = Object.hasOwn(incoming, key) ? incoming[key] : undefined
+    const presentation = PRESENTATION.has(key)
+    if (!presentation && current !== undefined && restored !== undefined && !equal(current, restored))
+      throw new Error('overlapping-content')
+    const value = presentation ? current : current === undefined ? restored : current
+    if (value !== undefined) fields.push([key, value])
+  }
+  return Object.fromEntries(fields)
+}
+
 /** A close recorded with the incoming file (`deletedEntities`) beats a local presentation edit of
  * that card. Field 2026-11-17: the server closed a card the tab had just retitled, edit-vs-delete
  * raised the conflict bar, autosave stayed suspended for 64 minutes and a card opened meanwhile
@@ -50,6 +67,11 @@ function merge(base: unknown, local: unknown, incoming: unknown, path: string[] 
   const key = path.at(-1) ?? ''
   if (equal(base, incoming) || equal(local, incoming)) return local
   if (equal(base, local)) return incoming
+  const projectNode = path.length === 2 && path[0] === 'nodes' ||
+    path.length === 4 && path[0] === 'projects' && path[2] === 'nodes'
+  if (projectNode && base === undefined && object(local) && object(incoming) &&
+    local.kind === 'terminal' && incoming.kind === 'terminal' && local.id === key && incoming.id === key)
+    return mergeRestoredTerminal(local, incoming)
   if (object(base) && object(local) && object(incoming)) {
     const result: Record<string, unknown> = {}
     for (const k of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(incoming)])) {
