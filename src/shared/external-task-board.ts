@@ -19,6 +19,7 @@ export interface ExternalTaskColumns {
 
 export interface ExternalTaskBoard {
   url: string
+  homeUrl?: string
   available: boolean
   cards: ExternalTask[]
   columns?: ExternalTaskColumns

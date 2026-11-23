@@ -7,6 +7,7 @@ import { useProjects } from './projects'
 interface BoardView {
   project: string
   url: string | null
+  homeUrl?: string
   available: boolean
   reading: boolean
   linkPage?: string
@@ -17,7 +18,7 @@ interface BoardView {
   tasks: Map<string, ExternalTask>
 }
 export const NO_BACKGROUND: string[] = []
-const empty = { project: '', url: null, linkPage: undefined, available: false, reading: false, lastPlacement: new Map<string, ExternalTask>(), columns: null, backgroundNodeIds: NO_BACKGROUND, featuredSession: undefined, tasks: new Map<string, ExternalTask>() }
+const empty = { project: '', url: null, homeUrl: undefined, linkPage: undefined, available: false, reading: false, lastPlacement: new Map<string, ExternalTask>(), columns: null, backgroundNodeIds: NO_BACKGROUND, featuredSession: undefined, tasks: new Map<string, ExternalTask>() }
 export const useExternalBoard = create<BoardView>(() => empty)
 
 export interface ProjectTaskLink {
@@ -78,7 +79,8 @@ export function useExternalBoardSync() {
             const tasks = new Map(board?.cards.map(card => [card.nodeId, card]))
             const offline = board && !board.available && previous.project === project && previous.url === board.url
             return {
-              project, reading: false, linkPage: board?.available ? board.linkPage : undefined, url: board?.url ?? null, available: board?.available ?? false,
+              project, reading: false, linkPage: board?.available ? board.linkPage : undefined, url: board?.url ?? null,
+              homeUrl: board?.homeUrl, available: board?.available ?? false,
               featuredSession: board?.featuredSession, backgroundNodeIds: board?.backgroundNodeIds ?? NO_BACKGROUND,
               columns: offline ? previous.columns : board?.columns ?? null,
               lastPlacement: offline ? previous.lastPlacement : tasks, tasks

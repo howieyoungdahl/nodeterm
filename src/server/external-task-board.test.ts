@@ -118,6 +118,15 @@ describe('configured task board', () => {
       expect(new URL(picker!.linkPage!).searchParams.get('host')).toBe(hostname())
       expect(picker?.cards[0].manual).toBe(true)
       expect((await operator('//foreign.example/link')('one'))?.linkPage).toBeUndefined()
+      const homeUrl = 'https://workspace.example/work-board'
+      await writeFile(join(dir, 'external-task-boards.json'), JSON.stringify({ one: { ...config, homeUrl } }))
+      const withHome = await operator('/work/lanes/link')('one')
+      expect(withHome?.homeUrl).toBe(homeUrl)
+      expect(withHome?.url).toBe(config.url)
+      expect(new URL(withHome!.linkPage!).origin).toBe('https://board.example')
+      const offline = createExternalTaskBoard(dir, () => new Set(['node-one']), async () => Response.error())
+      expect(await offline('one')).toMatchObject({ homeUrl, available: false })
+      await writeFile(join(dir, 'external-task-boards.json'), JSON.stringify({ one: { ...config, homeUrl: 'http://insecure.example/' } }))
       const conflicting = createExternalTaskBoard(dir, () => new Set(['node-one']), request)
       expect(await conflicting('one')).toEqual({ url: config.url, available: true, cards: [] })
       payload.asOf = '2000-01-01T00:00:00Z'

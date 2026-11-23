@@ -11,6 +11,7 @@ interface NodePointer {
 }
 interface BoardConfig {
   url: string
+  homeUrl?: string
   feed: string
   tokenFile: string
   featuredSession?: NodePointer & { label: string }
@@ -148,6 +149,10 @@ export function createExternalTaskBoard(
     } catch {
       return null
     }
+    const links: Pick<ExternalTaskBoard, 'url' | 'homeUrl'> = { url: config.url }
+    if (bounded(config.homeUrl, 4096)) {
+      try { links.homeUrl = secureUrl(config.homeUrl).href } catch { /* Keep the dashboard link. */ }
+    }
     let roles: Pick<ExternalTaskBoard, 'featuredSession' | 'backgroundNodeIds'> = {}
     try {
       const ids = nodesFor(projectId)
@@ -175,9 +180,9 @@ export function createExternalTaskBoard(
           reason: c.reason,
           priority: c.priority
         }))
-      return { ...snapshot, url: config.url, available: true, cards, ...roles }
+      return { ...snapshot, ...links, available: true, cards, ...roles }
     } catch {
-      return { url: config.url, available: false, cards: [], ...roles }
+      return { ...links, available: false, cards: [], ...roles }
     }
   }
 }
