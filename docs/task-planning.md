@@ -77,7 +77,9 @@ and `cards` with `nodeId`, `task`, `workflow`, `stage`, `urgency`, `reason` and
 project reach its signed-in browser. Badges use the task's recorded urgency and
 priority through a handoff. Workflow and stage have separate, wrapping chips. The open card shows the same workflow, stage, urgency reason and assigned priority in its metadata. An unverified terminal keeps its local category and priority editors, labelled as local alongside the link status. Its column label names the physical location. The task link opens the operator dashboard for edits.
 
-Feeds can supply ordered `workflows` and `stages` arrays of display names. Kanban then opens with workflows across the top and stages down the side, including empty cells. Choose Stage under Columns to swap the axes. Each cell follows the feed's urgency order. Unlinked cards appear beneath the table. Canvas groups restores the manually arranged board. The browser remembers the choice per project.
+A feed can advertise a same-origin task picker with a root-relative `linkPage`. **Link to task…** opens that signed-in page for the exact host and terminal. The operator can choose, replace or clear the task. Dragging an unlinked terminal onto a linked card in Workflow or Stage opens a review of that exact task.
+
+Feeds can supply ordered `workflows` and `stages` arrays of display names. Kanban then opens with workflows across the top and stages down the side, including empty cells. Choose Stage under Columns to swap the axes. Each cell follows the feed's urgency order. Unlinked cards appear beneath the table. **Arrange canvas cards** opens Canvas groups with manual ordering so you can drag cards immediately. The browser remembers the choice per project. During a feed outage it keeps the most recent positions from that board and labels them as last known. If no positions have loaded yet, sessions remain accessible in a single list until the feed recovers.
 
 The Kanban header's **+ New terminal** button creates and opens a shell in the active
 project. **Agents & more** opens the session-type menu. Both controls stay visible while

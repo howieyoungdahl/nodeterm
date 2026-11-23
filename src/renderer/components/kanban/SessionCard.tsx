@@ -25,6 +25,8 @@ const PRIO_COLOR: Record<KanbanPriority, string> = {
 
 interface SessionCardProps {
   reorderEnabled?: boolean
+  linkDrag?: boolean
+  onLinkDrop?: (target: string) => void
   priorityNow?: number
   supportingSessions?: KanbanSession[]
   urgentSupportingCount?: number
@@ -47,7 +49,7 @@ interface SessionCardProps {
 }
 
 export const SessionCard = memo(function SessionCard({
-  session, meta, reorderEnabled = true, priorityNow = Date.now(), labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext,
+  session, meta, reorderEnabled = true, linkDrag = false, onLinkDrop, priorityNow = Date.now(), labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext,
   supportingSessions = [], urgentSupportingCount = 0, supportsExpanded = false, onToggleSupport
 }: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
@@ -103,9 +105,10 @@ export const SessionCard = memo(function SessionCard({
         dropSide ? ` kanban-card--drop-${dropSide}` : ''
       }`}
       data-node-id={session.id}
-      draggable={reorderEnabled}
+      draggable={reorderEnabled || linkDrag}
       onDragStart={(e) => {
-        if (!reorderEnabled) { e.preventDefault(); return }
+        if (!reorderEnabled && !linkDrag) { e.preventDefault(); return }
+        e.dataTransfer.setData(linkDrag ? 'application/x-nodeterm-task-link' : 'application/x-nodeterm-card', session.id)
         e.dataTransfer.effectAllowed = 'move'
         setDragging(true)
         onDragStart(session.id)
@@ -116,6 +119,11 @@ export const SessionCard = memo(function SessionCard({
         onDragEnd()
       }}
       onDragOver={(e) => {
+        if (onLinkDrop && e.dataTransfer.types.includes('application/x-nodeterm-task-link')) {
+          e.preventDefault()
+          setDropSide('before')
+          return
+        }
         if (!reorderEnabled) return
         e.preventDefault()
         const side = sideFor(e)
@@ -123,6 +131,13 @@ export const SessionCard = memo(function SessionCard({
       }}
       onDragLeave={() => setDropSide(null)}
       onDrop={(e) => {
+        if (onLinkDrop && e.dataTransfer.types.includes('application/x-nodeterm-task-link')) {
+          e.preventDefault()
+          e.stopPropagation()
+          setDropSide(null)
+          onLinkDrop(session.id)
+          return
+        }
         if (!reorderEnabled) return
         e.preventDefault()
         e.stopPropagation() // don't let the column's end-drop swallow a drop aimed at this card
@@ -151,7 +166,7 @@ export const SessionCard = memo(function SessionCard({
         {externalBoard && linkedTask && <a className="kanban-card__task" href={taskBoardHref(externalBoard, linkedTask.task)}
           target="_blank" rel="noreferrer" draggable={false} onClick={e => e.stopPropagation()}
           title={linkedTask.taskTitle ?? linkedTask.task}>Task {linkedTask.task}</a>}
-        <TaskPlanningBadge planning={session.taskPlanning} nodeId={session.id} />
+        <TaskPlanningBadge boardHasStatus planning={session.taskPlanning} nodeId={session.id} />
       </div>}
       {session.organization && <div className="kanban-card__metarow"><OrganizationBadge organization={session.organization} nodeId={session.id} /></div>}
       {(showStatus || sleeping) && <div className="kanban-card__status">
@@ -176,7 +191,7 @@ export const SessionCard = memo(function SessionCard({
         </button>
         {supportsExpanded && <ul>{supportingSessions.map(child => <li key={child.id}>
           <button type="button" draggable={false} onClick={() => onOpen(child.id)}>{titleFor(child)}</button>
-          <TaskPlanningBadge planning={child.taskPlanning} nodeId={child.id} />
+          <TaskPlanningBadge boardHasStatus planning={child.taskPlanning} nodeId={child.id} />
         </li>)}</ul>}
       </div>}
       {(labels.length > 0 || assignees.length > 0 || due !== undefined || priority !== undefined) && (

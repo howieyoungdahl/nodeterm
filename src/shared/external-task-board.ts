@@ -3,6 +3,7 @@ export interface ExternalTask {
   task: string
   displayName?: string | null
   taskTitle?: string | null
+  manual?: boolean
   workflow: string | null
   stage: string
   urgency: string | null
@@ -21,6 +22,7 @@ export interface ExternalTaskBoard {
   available: boolean
   cards: ExternalTask[]
   columns?: ExternalTaskColumns
+  linkPage?: string
   backgroundNodeIds?: string[]
   featuredSession?: { label: string; nodeId: string | null }
 }

@@ -8,18 +8,22 @@ interface BoardView {
   project: string
   url: string | null
   available: boolean
+  reading: boolean
+  linkPage?: string
+  lastPlacement: Map<string, ExternalTask>
   columns: ExternalTaskColumns | null
   backgroundNodeIds: string[]
   featuredSession: ExternalTaskBoard['featuredSession']
   tasks: Map<string, ExternalTask>
 }
 export const NO_BACKGROUND: string[] = []
-const empty = { project: '', url: null, available: false, columns: null, backgroundNodeIds: NO_BACKGROUND, featuredSession: undefined, tasks: new Map<string, ExternalTask>() }
+const empty = { project: '', url: null, linkPage: undefined, available: false, reading: false, lastPlacement: new Map<string, ExternalTask>(), columns: null, backgroundNodeIds: NO_BACKGROUND, featuredSession: undefined, tasks: new Map<string, ExternalTask>() }
 export const useExternalBoard = create<BoardView>(() => empty)
 
 export interface ProjectTaskLink {
   url: string
   available: boolean
+  manageUrl?: string
   task?: ExternalTask
 }
 
@@ -30,7 +34,14 @@ export function useProjectTaskLink(nodeId?: string): ProjectTaskLink | null {
   const url = useExternalBoard(s => s.project === projectId ? s.url : null)
   const task = useExternalBoard(s => nodeId && s.project === projectId ? s.tasks.get(nodeId) : undefined)
   const available = useExternalBoard(s => s.available)
-  return url ? { url, task, available } : null
+  const linkPage = useExternalBoard(s => s.project === projectId && s.available ? s.linkPage : undefined)
+  return url ? { url, task, available, manageUrl: nodeId && linkPage ? cardLinkHref(linkPage, nodeId) : undefined } : null
+}
+
+export function cardLinkHref(page: string, node: string): string {
+  const url = new URL(page)
+  url.searchParams.set('node', node)
+  return url.toString()
 }
 
 export function taskBoardHref(board: string, task?: string): string {
@@ -53,7 +64,7 @@ export function useExternalBoardSync() {
     if (!isBrowserRuntime() || !project) return
     let timer: ReturnType<typeof setTimeout>
     const controller = new AbortController()
-    useExternalBoard.setState({ ...empty, project })
+    useExternalBoard.setState({ ...empty, project, reading: true })
     async function refresh() {
       try {
         const res = await fetch('/task-board?project=' + encodeURIComponent(project), {
@@ -63,16 +74,16 @@ export function useExternalBoardSync() {
         if (!res.ok) throw new Error('Task board unavailable')
         const { board }: { board: ExternalTaskBoard | null } = await res.json()
         if (!controller.signal.aborted)
-          useExternalBoard.setState(previous => ({
-            project,
-            url: board?.url ?? null,
-            available: board?.available ?? false,
-            featuredSession: board?.featuredSession,
-            backgroundNodeIds: board?.backgroundNodeIds ?? NO_BACKGROUND,
-            columns: board && !board.available && previous.project === project && previous.url === board.url
-              ? previous.columns : board?.columns ?? null,
-            tasks: new Map(board?.cards.map((card) => [card.nodeId, card]))
-          }))
+          useExternalBoard.setState(previous => {
+            const tasks = new Map(board?.cards.map(card => [card.nodeId, card]))
+            const offline = board && !board.available && previous.project === project && previous.url === board.url
+            return {
+              project, reading: false, linkPage: board?.available ? board.linkPage : undefined, url: board?.url ?? null, available: board?.available ?? false,
+              featuredSession: board?.featuredSession, backgroundNodeIds: board?.backgroundNodeIds ?? NO_BACKGROUND,
+              columns: offline ? previous.columns : board?.columns ?? null,
+              lastPlacement: offline ? previous.lastPlacement : tasks, tasks
+            }
+          })
       } catch {
         if (!controller.signal.aborted)
           useExternalBoard.setState(previous => previous.project === project ? {

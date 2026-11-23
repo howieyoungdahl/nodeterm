@@ -8783,15 +8783,15 @@ button.group-node__setup:disabled {
 .kanban-featured:disabled { color: var(--muted); cursor: default; }
 .kanban-featured:not(:disabled):hover, .kanban-background:hover { border-color: var(--accent); }
 .kanban-board--matrix {
-  --kanban-row-width: 9rem;
-  --kanban-column-width: 18rem;
+  --kanban-row-width: 112px;
+  --kanban-column-width: 202px;
   overflow: auto;
 }
 .kanban-matrix {
   width: 100%;
   table-layout: fixed;
   border-spacing: 4px;
-  font-size: 16px;
+  font-size: 13px;
 }
 .kanban-matrix th, .kanban-matrix td {
   padding: 8px;
@@ -8811,7 +8811,6 @@ button.group-node__setup:disabled {
 .kanban-matrix thead th { position: sticky; top: 0; z-index: 2; vertical-align: middle; }
 .kanban-matrix thead .kanban-matrix__corner { z-index: 3; }
 .kanban-matrix .kanban-col__title {
-  font-size: 16px;
   color: var(--text-strong);
   cursor: default;
   white-space: normal;
@@ -8819,7 +8818,6 @@ button.group-node__setup:disabled {
 }
 .kanban-matrix .kanban-col__count, .kanban-board__other .kanban-col__count {
   margin-left: 6px;
-  font-size: 13px;
   color: var(--muted);
 }
 .kanban-matrix td {
@@ -8827,20 +8825,20 @@ button.group-node__setup:disabled {
   background: rgba(var(--tint-rgb), 0.035);
   border: 1px solid rgba(var(--tint-rgb), 0.065);
 }
-.kanban-matrix__cards, .kanban-board__other-cards { display: grid; gap: 8px; }
+.kanban-matrix__cards, .kanban-board__other-cards { display: grid; gap: 6px; }
 .kanban-matrix__cards { grid-template-columns: minmax(0, 1fr); }
 .kanban-board__other {
   position: sticky;
   left: 0;
-  margin: 20px 0;
+  margin: 16px 4px;
 }
-.kanban-board__other h2 { margin: 0 0 10px; font-size: 17px; }
+.kanban-board__other h2 { margin: 0 0 8px; font-size: 13px; }
 .kanban-board__other-cards {
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr));
   align-items: start;
 }
 @media (max-width: 600px) {
-  .kanban-board--matrix { --kanban-row-width: 7rem; --kanban-column-width: 15rem; padding-inline: 6px; }
+  .kanban-board--matrix { padding-inline: 6px; }
   .canvas-background-toggle { position: absolute; top: calc(100% + 6px); right: 0; }
 }
 @media (max-width: 900px) {
@@ -8914,24 +8912,19 @@ button.group-node__setup:disabled {
   align-items: baseline;
   gap: 4px 8px;
   margin-top: 8px;
-  font-size: 13px;
+  font-size: 11px;
   color: var(--muted);
 }
 .kanban-card__status .nt-status, .kanban-featured .nt-status {
   margin: 0;
-  font-size: 12px;
   letter-spacing: 0.02em;
 }
 .kanban-card__status .nt-status__age, .kanban-featured .nt-status__age { opacity: 0.9; }
 .kanban-card__task {
   color: var(--accent-text);
-  font-size: 13px;
+  font-size: 11px;
   overflow-wrap: anywhere;
   text-underline-offset: 2px;
-}
-.kanban-card--session .task-planning-facts,
-.kanban-card--session :is(.task-planning-timing, .task-planning-rank, .task-planning-note) {
-  font-size: 13px;
 }
 .kanban-card--session .node-account-chip {
   margin: 0;
@@ -8940,7 +8933,6 @@ button.group-node__setup:disabled {
   flex-shrink: 1;
   white-space: normal;
   overflow-wrap: anywhere;
-  font-size: 12px;
 }
 .kanban-card__detail {
   display: flex;
@@ -8956,11 +8948,11 @@ button.group-node__setup:disabled {
 .kanban-card__session {
   flex: 1 1 12ch;
   min-width: 0;
-  font-size: 12px;
+  font-size: 10px;
   color: var(--muted);
   overflow-wrap: anywhere;
 }
-.kanban-card__detail .ctx-pill { height: auto; min-height: 20px; font-size: 12px; }
+.kanban-card__detail .ctx-pill { height: auto; min-height: 18px; }
 .kanban-card__detail .ctx-pill__model { max-width: none; }
 .kanban-card__kindlabel {
   flex: 1;
@@ -9225,7 +9217,7 @@ button.group-node__setup:disabled {
   padding: 0;
   background: transparent;
   font: inherit;
-  font-size: 17px;
+  font-size: 13.5px;
   font-weight: 600;
   line-height: 1.35;
   text-align: left;
@@ -9234,7 +9226,7 @@ button.group-node__setup:disabled {
   cursor: pointer;
 }
 .kanban-card--session .kanban-card__nodedot, .kanban-card--session .kanban-card__unread {
-  margin-top: 7px;
+  margin-top: 5px;
 }
 .kanban-badge {
   font-size: 9px;

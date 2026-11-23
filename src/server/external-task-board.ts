@@ -18,6 +18,7 @@ interface BoardConfig {
 }
 interface Feed extends Partial<ExternalTaskColumns> {
   asOf: string
+  linkPage?: string
   cards: ExternalTask[]
 }
 const bounded = (v: unknown, max: number): v is string =>
@@ -93,7 +94,7 @@ export function createExternalTaskBoard(
   nodesFor: (projectId: string) => Set<string> | null,
   fetchFeed: typeof fetch = fetch
 ) {
-  type Snapshot = Pick<ExternalTaskBoard, 'cards' | 'columns'>
+  type Snapshot = Pick<ExternalTaskBoard, 'cards' | 'columns' | 'linkPage'>
   const cache = new Map<string, { signature: string; until: number; feed: Promise<Snapshot> }>()
   async function load(config: BoardConfig): Promise<Snapshot> {
     const endpoint = secureUrl(config.feed)
@@ -126,9 +127,15 @@ export function createExternalTaskBoard(
       seen.add(card.nodeId)
     }
     const cards = feed.cards.filter(card => !ambiguous.has(card.nodeId))
+    const snapshot: Snapshot = { cards }
     if (validNames(feed.workflows) && validNames(feed.stages))
-      return { cards, columns: { workflows: [...new Set(feed.workflows)], stages: [...new Set(feed.stages)] } }
-    return { cards }
+      snapshot.columns = { workflows: [...new Set(feed.workflows)], stages: [...new Set(feed.stages)] }
+    if (bounded(feed.linkPage, 512) && /^\/[a-zA-Z0-9/_-]+$/.test(feed.linkPage) && !feed.linkPage.startsWith('//')) {
+      const page = new URL(feed.linkPage, endpoint.origin)
+      page.searchParams.set('host', hostname())
+      snapshot.linkPage = page.toString()
+    }
+    return snapshot
   }
   return async function read(projectId: string): Promise<ExternalTaskBoard | null> {
     if (!isSafeNodeId(projectId)) return null
@@ -158,6 +165,7 @@ export function createExternalTaskBoard(
         .map((c) => ({
           nodeId: c.nodeId,
           task: c.task,
+          ...(c.manual === true ? { manual: true } : {}),
           ...(c.displayName ? { displayName: c.displayName } : {}),
           ...(c.taskTitle ? { taskTitle: c.taskTitle } : {}),
           workflow: c.workflow,
