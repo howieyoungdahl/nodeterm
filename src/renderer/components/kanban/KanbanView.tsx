@@ -164,6 +164,7 @@ export const KanbanView = memo(function KanbanView({
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectId = useProjects((s) => s.activeProjectId)
   const workflowBoard = useExternalBoard(s => s.project === projectId ? s.url : null)
+  const workBoardHome = useExternalBoard(s => s.project === projectId ? s.homeUrl : undefined)
   const linkPage = useExternalBoard(s => s.project === projectId && s.available ? s.linkPage : undefined)
   const catalog = useExternalBoard(s => s.project === projectId ? s.columns : null)
   const feedAvailable = useExternalBoard(s => s.project === projectId && s.available)
@@ -647,7 +648,9 @@ export const KanbanView = memo(function KanbanView({
             onClose={() => setBackgroundMenu(null)} />}
         </>}
         <NewSessionMenu columnId={null} createOptions={createOptions} onCreate={onCreateNode} label="Agents & more" />
-        {workflowBoard && <a className="kanban-github-status" href={workflowBoard} target="_blank" rel="noreferrer">Workflow board ↗</a>}
+        {workflowBoard && <a className="kanban-github-status" href={workBoardHome ?? workflowBoard} target="_blank" rel="noreferrer">
+          {workBoardHome ? 'Work Board' : 'Workflow board'} ↗
+        </a>}
         {workflowBoard && (catalog || !feedAvailable) && <label className="kanban-column-mode">Columns
           <select aria-label="Columns" value={columnMode} disabled={source === 'github'}
             onChange={e => {

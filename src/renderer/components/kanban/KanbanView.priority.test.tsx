@@ -113,10 +113,11 @@ it('groups native cards by the live task field and preserves saved canvas assign
   })
   try {
     useProjects.setState({ activeProjectId: project })
-    useExternalBoard.setState({ project, url: 'https://example.test/board', available: true,
+    useExternalBoard.setState({ project, url: 'https://example.test/board', homeUrl: 'https://workspace.example/work-board', available: true,
       columns: { workflows: ['Product', 'Tools', 'Empty workflow'], stages: ['Ready', 'Working', 'Waiting'] },
       tasks: new Map([['parent', parent], ['child', child]]) })
     act(() => root.render(<KanbanView {...props} board={board} sessions={sessions} onChange={onChange} />))
+    expect(host.querySelector<HTMLAnchorElement>('a[href="https://workspace.example/work-board"]')?.textContent?.trim()).toBe('Work Board ↗')
     expect(headings()).toEqual(['Product', 'Tools', 'Empty workflow'])
     expect(cardsIn('Tools', 'Waiting')).toEqual(['child'])
     expect(host.querySelector('section[aria-label="No linked task"] .kanban-card')?.getAttribute('data-node-id')).toBe('unlinked')
