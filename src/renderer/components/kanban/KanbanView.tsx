@@ -3,7 +3,7 @@ import type { KanbanLabel, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
-import { NO_BACKGROUND, taskBoardHref, taskDisplayTitle, useExternalBoard } from '../../state/externalTaskBoard'
+import { cardLinkHref, NO_BACKGROUND, taskBoardHref, taskDisplayTitle, useExternalBoard } from '../../state/externalTaskBoard'
 import { useSettings } from '../../state/settings'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
@@ -136,6 +136,7 @@ export const KanbanView = memo(function KanbanView({
 }: KanbanViewProps) {
   const { api } = useSession()
   const dragRef = useRef<Drag>(null)
+  const [linkDrop, setLinkDrop] = useState<{ node: string; target: string } | null>(null)
   // One card modal at a time; a deleted node closes it via the byId.has render guard.
   const [modalNodeId, setModalNodeId] = useState<string | null>(null)
   const [expandedSupport, setExpandedSupport] = useState<Set<string>>(new Set())
@@ -163,6 +164,7 @@ export const KanbanView = memo(function KanbanView({
   // Primitive selectors (not one object) — an object selector would re-render on every store set.
   const projectId = useProjects((s) => s.activeProjectId)
   const workflowBoard = useExternalBoard(s => s.project === projectId ? s.url : null)
+  const linkPage = useExternalBoard(s => s.project === projectId && s.available ? s.linkPage : undefined)
   const catalog = useExternalBoard(s => s.project === projectId ? s.columns : null)
   const feedAvailable = useExternalBoard(s => s.project === projectId && s.available)
   const backgroundIds = useExternalBoard(s => s.project === projectId ? s.backgroundNodeIds : NO_BACKGROUND)
@@ -484,6 +486,15 @@ export const KanbanView = memo(function KanbanView({
     }
   }, [dropAtCard])
 
+  function dropOnTask(target: string) {
+    const drag = takeDrag()
+    if (!linkPage || !externalTasks.has(target) || drag?.kind !== 'card' || drag.sourceId !== 'sessions' ||
+      drag.id === target || byId.get(drag.id)?.kind !== 'terminal' || externalTasks.has(drag.id)) return
+    setLinkDrop({ node: drag.id, target })
+  }
+  const dropTask = linkDrop && externalTasks.get(linkDrop.target)
+  const dropCard = linkDrop && byId.get(linkDrop.node)
+
   function sessionCards(cards: KanbanSession[], columnId: string | null) {
     const onDropAt = dropAtCardFor(columnId)
     return cards.map((s) => (
@@ -491,6 +502,8 @@ export const KanbanView = memo(function KanbanView({
         key={s.id}
         session={s}
         reorderEnabled={sortMode === 'manual'}
+        linkDrag={Boolean(columnMode !== 'canvas' && linkPage && s.kind === 'terminal' && !externalTasks.has(s.id))}
+        onLinkDrop={columnMode !== 'canvas' && linkPage && externalTasks.has(s.id) ? dropOnTask : undefined}
         priorityNow={priorityNow}
         meta={metaOf(s.id)}
         labels={labelsOf(s.id)}
@@ -579,6 +592,11 @@ export const KanbanView = memo(function KanbanView({
       ...(moveTargets.length
         ? ([{ type: 'submenu', label: columnMode === 'canvas' ? 'Move to' : 'Move to canvas group', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
         : []),
+      ...(linkPage && byId.get(nodeId)?.kind === 'terminal' ? [{
+        label: 'Link to task…', icon: <IconExternal />, onClick: () => {
+          window.open(cardLinkHref(linkPage, nodeId), '_blank', 'noopener,noreferrer')
+        }
+      }] : []),
       workflowBoard ? { label: 'Open workflow board', icon: <IconExternal />, onClick: () => {
         window.open(taskBoardHref(workflowBoard, externalTasks.get(nodeId)?.task), '_blank', 'noopener,noreferrer')
       }} : { type: 'submenu', label: 'Priority', children: [
@@ -782,6 +800,15 @@ export const KanbanView = memo(function KanbanView({
           onClose={() => setCardMenu(null)}
         />
       )}
+      {linkPage && dropTask && dropCard && !externalTasks.has(dropCard.id) && <ConfirmDialog
+        message={`Review the link from ${dropCard.title} to ${dropTask.task} on the Work Board.`}
+        confirmLabel="Open task link" danger={false}
+        onConfirm={() => {
+          const url = new URL(cardLinkHref(linkPage, dropCard.id))
+          url.searchParams.set('q', dropTask.task)
+          window.open(url.toString(), '_blank', 'noopener,noreferrer')
+          setLinkDrop(null)
+        }} onCancel={() => setLinkDrop(null)} />}
       {modalNodeId && byId.has(modalNodeId) && (
         <CardModal
           session={byId.get(modalNodeId)!}

@@ -68,6 +68,9 @@ export function CardMetaBar({ nodeId, board, onChange, external }: CardMetaBarPr
   const task = external?.task
   return (
     <div className={external ? "kanban-meta kanban-meta--workflow" : "kanban-meta"}>
+      {external?.manageUrl && <a href={external.manageUrl} target="_blank" rel="noreferrer">
+        {task?.manual ? 'Change manual task link…' : 'Link to task…'}
+      </a>}
       {external && <dl className="kanban-meta__task" aria-label="Work Board task details">
         <div><dt>{task ? 'Workflow' : 'Work board'}</dt><dd>{task ? task.workflow ?? 'Unassigned workflow' :
           external.available ? 'No verified task link' : 'Work board unavailable'}</dd></div>

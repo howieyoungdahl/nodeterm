@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createExternalTaskBoard } from './external-task-board'
 
@@ -111,6 +111,13 @@ describe('configured task board', () => {
         Response.json({ ...payload, ...columns }))
       expect(await withColumns('one')).toEqual({ url: config.url, available: true, cards: [], columns })
       payload.cards.push({...card, task: 'conflicting-task'})
+      const operator = (linkPage: string) => createExternalTaskBoard(dir, () => new Set(['node-one']),
+        async () => Response.json({ ...payload, cards: [{ ...card, manual: true }], linkPage }))
+      const picker = await operator('/work/lanes/link')('one')
+      expect(new URL(picker!.linkPage!).origin).toBe('https://board.example')
+      expect(new URL(picker!.linkPage!).searchParams.get('host')).toBe(hostname())
+      expect(picker?.cards[0].manual).toBe(true)
+      expect((await operator('//foreign.example/link')('one'))?.linkPage).toBeUndefined()
       const conflicting = createExternalTaskBoard(dir, () => new Set(['node-one']), request)
       expect(await conflicting('one')).toEqual({ url: config.url, available: true, cards: [] })
       payload.asOf = '2000-01-01T00:00:00Z'

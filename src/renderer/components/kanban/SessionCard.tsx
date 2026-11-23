@@ -25,6 +25,8 @@ const PRIO_COLOR: Record<KanbanPriority, string> = {
 
 interface SessionCardProps {
   reorderEnabled?: boolean
+  linkDrag?: boolean
+  onLinkDrop?: (target: string) => void
   priorityNow?: number
   supportingSessions?: KanbanSession[]
   urgentSupportingCount?: number
@@ -47,7 +49,7 @@ interface SessionCardProps {
 }
 
 export const SessionCard = memo(function SessionCard({
-  session, meta, reorderEnabled = true, priorityNow = Date.now(), labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext,
+  session, meta, reorderEnabled = true, linkDrag = false, onLinkDrop, priorityNow = Date.now(), labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext,
   supportingSessions = [], urgentSupportingCount = 0, supportsExpanded = false, onToggleSupport
 }: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
@@ -103,9 +105,10 @@ export const SessionCard = memo(function SessionCard({
         dropSide ? ` kanban-card--drop-${dropSide}` : ''
       }`}
       data-node-id={session.id}
-      draggable={reorderEnabled}
+      draggable={reorderEnabled || linkDrag}
       onDragStart={(e) => {
-        if (!reorderEnabled) { e.preventDefault(); return }
+        if (!reorderEnabled && !linkDrag) { e.preventDefault(); return }
+        e.dataTransfer.setData(linkDrag ? 'application/x-nodeterm-task-link' : 'application/x-nodeterm-card', session.id)
         e.dataTransfer.effectAllowed = 'move'
         setDragging(true)
         onDragStart(session.id)
@@ -116,6 +119,11 @@ export const SessionCard = memo(function SessionCard({
         onDragEnd()
       }}
       onDragOver={(e) => {
+        if (onLinkDrop && e.dataTransfer.types.includes('application/x-nodeterm-task-link')) {
+          e.preventDefault()
+          setDropSide('before')
+          return
+        }
         if (!reorderEnabled) return
         e.preventDefault()
         const side = sideFor(e)
@@ -123,6 +131,13 @@ export const SessionCard = memo(function SessionCard({
       }}
       onDragLeave={() => setDropSide(null)}
       onDrop={(e) => {
+        if (onLinkDrop && e.dataTransfer.types.includes('application/x-nodeterm-task-link')) {
+          e.preventDefault()
+          e.stopPropagation()
+          setDropSide(null)
+          onLinkDrop(session.id)
+          return
+        }
         if (!reorderEnabled) return
         e.preventDefault()
         e.stopPropagation() // don't let the column's end-drop swallow a drop aimed at this card

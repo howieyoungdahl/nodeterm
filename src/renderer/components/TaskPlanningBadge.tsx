@@ -12,7 +12,9 @@ export function TaskPlanningBadge({ planning, nodeId, boardHasStatus }: { planni
     if (!task) return <span className="task-planning-facts">
       {meta?.category && meta.category !== 'needs-classification' && <span className="task-planning-chip"
         title="Local category">{meta.category.replaceAll('-', ' ')}</span>}
-      <span className="task-planning-note">{external.available ? 'No verified task link' : 'Work board unavailable'}</span>
+      {external.manageUrl ? <a className="kanban-card__task" href={external.manageUrl} target="_blank" rel="noreferrer"
+        draggable={false} onClick={event => event.stopPropagation()}>Link to task…</a> :
+        <span className="task-planning-note">{external.available ? 'No verified task link' : 'Work board unavailable'}</span>}
     </span>
     return <span className="task-planning-facts" aria-label="Task details">
       <span className="task-planning-chip task-planning-chip--workflow" title={`Workflow for ${task.task}`}>
