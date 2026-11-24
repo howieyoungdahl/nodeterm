@@ -82,7 +82,7 @@ export const SessionCard = memo(function SessionCard({
   // must not speak in two voices). It replaces the card's own RUNNING / NEEDS YOU pair, which
   // could not say `failed`, could not say `unknown`, and carried no freshness at all. Compact: the
   // reason stays in the tooltip, because a card row is not a node header.
-  const showStatus = showsStatus({ type: session.kind, agentId: session.agentId as AgentId })
+  const showStatus = status?.antigravity?.active || showsStatus({ type: session.kind, agentId: session.agentId as AgentId })
   const stickyPreview = session.kind === 'sticky' ? (session.text ?? '').trim() : ''
   const assignees = meta?.assignees ?? []
   const due = meta?.dueAt

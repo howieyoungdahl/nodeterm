@@ -30,6 +30,11 @@ export function statusViewFor(
   now: number,
   staleMs: number = NODE_STATUS_STALE_MS
 ): NodeStatusView {
+  const observed = status?.antigravity
+  const superseded = observed && (status?.stateAt ?? 0) <= observed.observedAt
+  if (observed?.active || superseded) {
+    return deriveNodeStatus({ antigravityRunning: observed?.active, now })
+  }
   return deriveNodeStatus({
     state: status?.state,
     idleSince: status?.idleSince,

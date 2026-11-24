@@ -24,6 +24,21 @@ describe('statusViewFor', () => {
     expect(statusViewFor(status, NOW).age).toBe('2m')
   })
 
+  it('shows foreground Antigravity instead of an old turn from another agent', () => {
+    const status: AgentNodeStatus = {
+      unread: false,
+      agentId: 'codex',
+      state: 'done',
+      stateAt: NOW - 5 * 60 * 60_000,
+      antigravity: { active: true, observedAt: NOW }
+    }
+    expect(statusViewFor(status, NOW)).toMatchObject({ kind: 'running', age: '', stale: false })
+    const afterExit = { ...status, antigravity: { active: false, observedAt: NOW } }
+    expect(statusViewFor(afterExit, NOW + 1000)).toMatchObject({ kind: 'unknown', age: '', stale: false })
+    expect(statusViewFor({ ...afterExit, state: 'working', stateAt: NOW + 1000 }, NOW + 1000).kind)
+      .toBe('working')
+  })
+
   it('is unknown for a node the store has never heard of', () => {
     expect(statusViewFor(undefined, NOW).kind).toBe('unknown')
   })

@@ -564,6 +564,13 @@ Because the hook POST carries a `transcript_path`, a forged POST is defended by 
 that path to the system-default `~/.claude/projects` or a managed account dir
 (`isSafeLocalTranscriptPath`) before any tail reads it.
 
+On the board and canvas, a local Antigravity CLI (`agy`) in the foreground of a
+Nodeterm tmux pane shows **RUNNING**. The status comes from the pane's foreground
+command. This reports that the CLI is open, while its current turn remains unknown.
+The older hook status from another CLI is suppressed. The same display applies on
+desktop with local tmux. The phone's SSH-only mirror and terminals on other
+backends do not receive this live foreground observation.
+
 ### Context Link
 
 Context Link works in the Server Edition. The feature itself lives entirely in core
