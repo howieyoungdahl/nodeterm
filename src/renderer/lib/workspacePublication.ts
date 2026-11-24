@@ -73,9 +73,17 @@ function merge(base: unknown, local: unknown, incoming: unknown, path: string[] 
     local.kind === 'terminal' && incoming.kind === 'terminal' && local.id === key && incoming.id === key)
     return mergeRestoredTerminal(local, incoming)
   if (object(base) && object(local) && object(incoming)) {
+    // An automatic title update can race with a hand rename. Resolve the title
+    // and its mode together, while merging unrelated edits as usual.
+    const handTitle = projectNode && base.kind === 'terminal' && local.kind === 'terminal' &&
+      incoming.kind === 'terminal' && base.titleAuto === true && local.titleAuto !== incoming.titleAuto
+      ? local.titleAuto === false ? local : incoming
+      : undefined
     const result: Record<string, unknown> = {}
     for (const k of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(incoming)])) {
-      const value = merge(base[k], local[k], incoming[k], [...path, k])
+      const value = handTitle && (k === 'title' || k === 'titleAuto')
+        ? handTitle[k]
+        : merge(base[k], local[k], incoming[k], [...path, k])
       if (value !== undefined) result[k] = value
     }
     return result

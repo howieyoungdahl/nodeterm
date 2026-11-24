@@ -219,9 +219,6 @@ export function wireAgentStatus(
       // of grok's sessions tree, which is how one node would end up adopting another's name.
       // `grokSessionDir` returns null for a cwd grok stored under its slug+hash scheme instead, in
       // which case we learn nothing about this session rather than build half a path.
-      //
-      // The Server Edition populates it exactly as the desktop does; what it does not yet serve is
-      // the READ (IPC.ptyReadSessionName has no server handler — see the ws-bridge stub).
       if (g.sessionId && g.cwd) {
         const dir = grokSessionDir({
           sessionsDir: grokSessionsDir(),
