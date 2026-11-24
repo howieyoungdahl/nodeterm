@@ -48,6 +48,8 @@ import type { AgentStatusSnapshot, NodeTerminalApi, ObservedClaudeAccount } from
  */
 export interface AgentNodeStatus {
   idleSince?: number
+  /** Display-only foreground evidence for a CLI with no Nodeterm turn events. */
+  antigravity?: { active: boolean; observedAt: number }
   /**
    * When this node's agent ended its own session (mirror `endedAt`). Renders EXITED rather than
    * UNKNOWN; cleared by any later state or session start. Transient like `state`.
@@ -260,6 +262,7 @@ export interface AgentStatusStore {
   markFailed(id: string, at: number, reason?: string): void
   /** Record what a pane probe proved, per node id (see `pane`). Writes nothing to localStorage. */
   setPaneEvidence(evidence: Record<string, PaneEvidence>): void
+  setAntigravityPanes(nodeIds: readonly string[], observedAt: number): void
   /** Clear `working` entries whose last event is older than `staleMs` (lost-Stop safety net). */
   sweepStaleWorking(staleMs?: number): void
   /**
@@ -594,6 +597,26 @@ export function createAgentStatusSession(
         // has been demonstrably running since.
         if (alive && prev.hibernated) save(byId)
         return { byId }
+      }),
+
+    setAntigravityPanes: (nodeIds, observedAt) =>
+      set((s) => {
+        const active = new Set(nodeIds)
+        const byId = { ...s.byId }
+        let changed = false
+        for (const id of new Set([...nodeIds, ...Object.keys(s.byId)])) {
+          const status = s.byId[id]
+          const prior = status?.antigravity
+          const running = active.has(id)
+          if (!running && !prior?.active) continue
+          if (running && prior?.active) {
+            prior.observedAt = observedAt
+          } else {
+            byId[id] = { ...(status ?? EMPTY), antigravity: { active: running, observedAt: prior && !running ? prior.observedAt : observedAt } }
+            changed = true
+          }
+        }
+        return changed ? { byId } : s
       }),
 
     setPaneEvidence: (evidence) =>

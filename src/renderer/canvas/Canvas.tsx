@@ -10807,6 +10807,33 @@ export function Canvas() {
     return unsubscribe
   }, [])
 
+  useEffect(() => {
+    const read = api.pty.antigravityPanes
+    if (!read) return
+    let inFlight = false
+    let disposed = false
+    const poll = async () => {
+      if (inFlight || disposed) return
+      inFlight = true
+      const observedAt = Date.now()
+      try {
+        const active = await read().catch(() => [])
+        if (!disposed) useAgentStatus.getState().setAntigravityPanes(active, observedAt)
+      } finally {
+        inFlight = false
+      }
+    }
+    void poll()
+    const timer = setInterval(() => void poll(), 10_000)
+    window.addEventListener('focus', poll)
+    return () => {
+      disposed = true
+      clearInterval(timer)
+      window.removeEventListener('focus', poll)
+      useAgentStatus.getState().setAntigravityPanes([], Date.now())
+    }
+  }, [api])
+
   // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
   // event at all for STALE_WORKING_MS (the sweep itself is cheap; see agentStatus.ts).
   useEffect(() => {

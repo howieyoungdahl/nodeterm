@@ -29,6 +29,7 @@ import type { AgentState } from './agents/normalize'
  */
 export type NodeStatusKind =
   | 'working'
+  | 'running'
   | 'idle'
   | 'waiting'
   | 'blocked'
@@ -101,6 +102,7 @@ export const NODE_STATUS_PRESENTATION: Record<
   { glyph: string; word: string }
 > = {
   working: { glyph: '▶', word: 'WORKING' },
+  running: { glyph: '●', word: 'RUNNING' },
   idle: { glyph: '○', word: 'IDLE' },
   waiting: { glyph: '?', word: 'WAITING' },
   blocked: { glyph: '!', word: 'BLOCKED' },
@@ -126,6 +128,7 @@ export const NODE_STATUS_SEVERITY: readonly NodeStatusKind[] = [
   'waiting',
   'unknown',
   'working',
+  'running',
   'idle',
   'completed',
   'exited'
@@ -142,6 +145,8 @@ export interface NodeFailureFact {
 }
 
 export interface NodeStatusInput {
+  /** Foreground Antigravity was observed on this node by its terminal host. */
+  antigravityRunning?: boolean
   /** Last hook-fed state. `undefined` = nothing has ever reported for this node. */
   state?: AgentState
   idleSince?: number
@@ -242,6 +247,17 @@ export function truncateReason(text: string | undefined, max = STATUS_REASON_MAX
 const ATTENTION_KINDS = new Set<NodeStatusKind>(['blocked', 'waiting', 'failed'])
 
 export function deriveNodeStatus(input: NodeStatusInput): NodeStatusView {
+  if (input.antigravityRunning) {
+    return {
+      kind: 'running',
+      ...NODE_STATUS_PRESENTATION.running,
+      age: '',
+      ageMs: null,
+      stale: false,
+      reason: '',
+      detail: 'Antigravity is running in this terminal. Turn status is unavailable.'
+    }
+  }
   const staleMs = input.staleMs ?? NODE_STATUS_STALE_MS
   const ageMs =
     typeof input.updatedAt === 'number' ? Math.max(0, input.now - input.updatedAt) : null

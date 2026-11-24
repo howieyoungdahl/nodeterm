@@ -1799,6 +1799,7 @@ export class PtyManager {
     )
     platform().handle(IPC.ptyTmuxStatus, () => this.tmuxStatus())
     platform().handle(IPC.ptyPaneCommand, (persistKey: string) => this.paneCommand(persistKey))
+    platform().handle(IPC.ptyAntigravityPanes, () => this.listAntigravityPanes())
     platform().handle(IPC.ptyTerminateForeground, (persistKey: string, expectedAgentId?: string) =>
       this.terminateForeground(persistKey, expectedAgentId)
     )
@@ -4522,6 +4523,25 @@ export class PtyManager {
         : Promise.resolve([] as string[])
     const [tmux, host] = await Promise.all([tmuxSessions, hostSessions])
     return [...new Set([...tmux, ...host])]
+  }
+
+  /** One read of our tmux socket. The active pane of the active window is the same pane
+   * targeted by paneCommand. Foreground presence says the CLI is running, not that a turn is busy. */
+  async listAntigravityPanes(): Promise<string[]> {
+    if (!this.tmuxPath) return []
+    try {
+      const format = '#{session_name}|#{window_active}|#{pane_active}|#{pane_dead}|#{pane_current_command}'
+      const { stdout } = await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'list-panes', '-a', '-F', format],
+        { timeout: PROBE_TIMEOUT_MS })
+      return stdout.split('\n').flatMap(line => {
+        const [session, windowActive, paneActive, dead, command] = line.trim().split('|')
+        return isSessionName(session) && windowActive === '1' && paneActive === '1' && dead === '0' && command === 'agy'
+          ? [session.slice(3)]
+          : []
+      })
+    } catch {
+      return []
+    }
   }
 
   /**

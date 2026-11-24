@@ -4680,7 +4680,7 @@ export function TerminalNode({
             approval from a question. `unknown` is rendered as a word, so a hook-capable node this
             surface has heard nothing about says so instead of looking idle. See
             shared/node-status.ts; nothing here is written to disk (plan decision D4). */}
-        {showStatus && (
+        {(showStatus || status?.antigravity?.active) && (
           <NodeStatusBadge nodeId={id} agentId={agentId} agentLabel={agentLabel} />
         )}
         {/* Eco: this node's CLI was exited to reclaim its RAM while nobody was looking. The tmux

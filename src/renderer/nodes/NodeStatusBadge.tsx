@@ -31,7 +31,7 @@ export function NodeStatusBadge({
   return (
     <StatusBadge
       view={view}
-      agentLabel={agentLabel}
+      agentLabel={view.kind === 'running' ? undefined : agentLabel}
       compact={compact}
       // The walking mascot the RUNNING chip always carried, kept where it belongs: on the one
       // state that is actually in motion.
