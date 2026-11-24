@@ -342,12 +342,7 @@ export async function startServer(
   // tmux — the current screen — rather than replayed. See platform-server.ts dropOrDesync.
   platform.setResyncProvider((sid) => ptyManager.captureForResync(sid))
 
-  // Desktop's src/main/index.ts registers a few pty handlers outside PtyManager. Of those,
-  // ptyCapture delegates purely to core (ptyManager.captureSession), so it belongs here.
-  // The others (ptyGenerateName / ptyGenerateGroupName → commit-message.ts; ptyReadSessionName
-  // → transcript-reader.ts) depend on src/main-resident modules and are stubbed by the bridge
-  // in Task 8. readScrollback + sendText + paneCommand are already registered inside
-  // PtyManager.registerIpc().
+  // Capture delegates to core. AI-generated names use desktop-only services.
   platform.handle(IPC.ptyCapture, (persistKey: string, full?: boolean) =>
     ptyManager.captureSession(persistKey, full)
   )
@@ -438,28 +433,6 @@ export async function startServer(
   // the main HTTP server below.
   initAgentStatusMirror()
 
-  // Keep every agent node's session name fresh in the mirror — including nodes no canvas has
-  // mounted (the phone lists them all; see core/session-name-sweep.ts).
-  startSessionNameSweep({
-    entries: sessionNameSweepEntries,
-    node: (nodeId) => {
-      const n = workspaceStore.getNode(nodeId)
-      return n ? { accountId: n.accountId, titleAuto: n.titleAuto } : undefined
-    },
-    // The per-agent router (core/agent-session-name.ts), same as the desktop's sweep and its
-    // ptyReadSessionName handler: a grok node's name is in its session metadata, and resolving it
-    // through claude's reader would scan ~/.claude/projects once a minute for a guaranteed miss.
-    // Gemini's leg needs the transcript path its context tail tracks; that tail is created by
-    // `wireAgentStatus` below, so it is dereferenced lazily — the sweep's first pass is 5s after
-    // boot, long after wiring.
-    resolve: (sessionId, accountId, agentId) =>
-      readAgentSessionName(sessionId, accountId, agentId, {
-        geminiPathFor: (id) => geminiContextTail.pathFor(id)
-      }),
-    publish: setNodeSessionName
-    // No `supports`: core's `supportsTitleRead` (TITLE_READ_CAPABLE) is the rule, and duplicating
-    // it here is how the two shells drift — see the note in core/session-name-sweep.ts.
-  })
   // Advertise launch settings to the mobile companion through the mirror (same provider the
   // desktop wires in src/main/index.ts). No SSH push exists server-side, so only the local
   // provider applies. The provider is consulted at every flush (heartbeat ≤60s), so a settings
@@ -604,6 +577,24 @@ export async function startServer(
     },
     onSessionHook: (agentId, nodeId, payload, verified, transcriptPath) =>
       operatorBindings.observeHook(agentId, nodeId, payload, verified, transcriptPath)
+  })
+  const resolveSessionName = (sessionId: string, accountId?: string, agentId?: string) =>
+    readAgentSessionName(sessionId, accountId, agentId, {
+      geminiPathFor: (id) => geminiContextTail.pathFor(id)
+    })
+  platform.handle(IPC.ptyReadSessionName, resolveSessionName)
+  // Keep every agent node's session name fresh in the mirror — including nodes no canvas has
+  // mounted (the phone lists them all; see core/session-name-sweep.ts).
+  startSessionNameSweep({
+    entries: sessionNameSweepEntries,
+    node: (nodeId) => {
+      const n = workspaceStore.getNode(nodeId)
+      return n ? { accountId: n.accountId, titleAuto: n.titleAuto } : undefined
+    },
+    resolve: resolveSessionName,
+    publish: setNodeSessionName
+    // No `supports`: core's `supportsTitleRead` (TITLE_READ_CAPABLE) is the rule, and duplicating
+    // it here is how the two shells drift — see the note in core/session-name-sweep.ts.
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote

@@ -463,7 +463,8 @@ durability is available; version retention still applies.
 
 Terminal and board-modal headers reserve a row for the title; put badges and secondary actions
 in the wrapping toolbar. Collapsed terminals keep the title row and close button within 40px.
-Automatic names follow the exact agent session and respect `titleAuto: false`. Codex can use a
+Desktop and browser automatic names follow the exact agent session. A manual rename wins over a
+concurrent automatic title update during workspace reconciliation. Codex can use a
 bounded task preview when no explicit or relayed name exists; this never sends input to the agent.
 Worker organization is an explicit, confirmed command enabled in the canvas menu, command palette,
 and Behavior settings. Automatic creation, status and rule-change triggers are retired, including

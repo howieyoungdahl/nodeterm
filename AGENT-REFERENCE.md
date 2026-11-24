@@ -1457,6 +1457,9 @@ else, and its context links must keep classifying across restarts).
     one-way bridge as Branch's `/branch`; works whether or not the node is mounted).
   - The launch command is left bare (no `-n`) — Claude's own name is canonical until the user
     overrides it; `titleAuto` is persisted so an overridden name survives reload/resume.
+    Server Edition serves the same session-name router to the browser poll and to its status
+    mirror sweep. Workspace reconciliation merges title and tracking mode together when a hand
+    rename races an automatic update, preserving the hand title and merging unrelated edits.
   - **Codex automatic names:** `readCodexSessionNameAt` requires the returned thread id to match,
     prefers its explicit name, then the relay name, then a bounded 72-character task preview.
     Setup-only previews fall back to the first actual user task in a bounded 256KiB head of the
