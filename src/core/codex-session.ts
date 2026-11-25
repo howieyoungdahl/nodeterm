@@ -6,6 +6,7 @@
 // Codex is the only agent that states its OWN context window in its transcript
 // (`model_context_window`), which is strictly better than inferring one: claude's window has to be
 // guessed from the model family (core/model-window.ts) and gemini's from its model id.
+import fs from 'fs'
 import { latestJsonLineWhere, type AgentUsage } from './gemini-session'
 
 export type { AgentUsage }
@@ -66,10 +67,7 @@ export function pickCodexUsage(rollout: string | string[]): AgentUsage | null {
  * (`"gpt-5.6-sol"` in the fixture). A SEPARATE line from the usage, so it needs its own scan —
  * `turn_context` is written once per turn, near its start, and `token_count` events follow it.
  *
- * Null when this chunk holds no `turn_context`: `createContextTail` keeps the last model it was
- * told (`t.model = latest.model ?? t.model`), and the tail's first read covers up to
- * INITIAL_READ_CAP of the file, so in practice the model is settled on the very first tick and
- * sticks. Claiming a model we did not read would be worse than reporting none.
+ * The tail keeps the last known model when a later chunk contains only usage.
  */
 function codexModel(text: string | string[]): string | null {
   return latestJsonLineWhere(text, '"turn_context"', (o) => {
@@ -82,8 +80,42 @@ function codexModel(text: string | string[]): string | null {
 /** `pickCodexUsage` plus the model — the exact shape `createContextTail`'s `parse` dep consumes. */
 export function codexContextParse(
   text: string | string[]
-): { used: number; window: number | null; model: string | null } | null {
+): { used: number | null; window: number | null; model: string | null } | null {
   const u = pickCodexUsage(text)
-  if (!u) return null
-  return { used: u.usedTokens, window: u.windowTokens, model: codexModel(text) }
+  const model = codexModel(text)
+  if (!u && !model) return null
+  return { used: u?.usedTokens ?? null, window: u?.windowTokens ?? null, model }
+}
+
+const MODEL_SCAN_CHUNK = 256 * 1024
+const MODEL_SCAN_CAP = 8 * 1024 * 1024
+
+/** Recover the newest model on attach when the initial tail read missed its turn_context. */
+export async function scanCodexModel(path: string, end: number): Promise<string | null> {
+  const limit = Math.max(0, end - MODEL_SCAN_CAP)
+  const file = await fs.promises.open(path, 'r')
+  try {
+    // Keep fragments as bytes until the whole line is available, including split UTF-8.
+    let fragments: Buffer[] = []
+    while (end > limit) {
+      const start = Math.max(limit, end - MODEL_SCAN_CHUNK)
+      const chunk = Buffer.alloc(end - start)
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, start)
+      if (bytesRead !== chunk.length) return null
+      const firstNewline = start === 0 ? -1 : chunk.indexOf(10)
+      if (start === 0 || firstNewline !== -1) {
+        const complete = chunk.subarray(firstNewline + 1)
+        const model = codexModel(Buffer.concat([complete, ...fragments.reverse()]).toString('utf8'))
+        if (model) return model
+        fragments = []
+      }
+      if (start > limit) {
+        fragments.push(firstNewline === -1 ? chunk : chunk.subarray(0, firstNewline + 1))
+      }
+      end = start
+    }
+    return null
+  } finally {
+    await file.close()
+  }
 }

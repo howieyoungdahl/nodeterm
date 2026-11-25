@@ -156,7 +156,9 @@ export interface ContextTailOptions {
    */
   parse?: (
     text: string | string[]
-  ) => { used: number; window?: number | null; model: string | null } | null
+  ) => { used: number | null; window?: number | null; model: string | null } | null
+  /** Recover a model from older transcript bytes when the initial read missed it. */
+  scanInitialModel?: (path: string, size: number) => Promise<string | null>
 }
 
 interface Tracked {
@@ -242,6 +244,7 @@ export function createContextTail(
         if (size - t.offset > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP
         if (t.offset !== before) t.carry = null // offset jumped — the held bytes don't precede it
         if (size > t.offset) {
+          const initialReadWasCapped = before === 0 && t.offset > 0
           let buf: Buffer
           try {
             const fd = await fs.promises.open(t.path, 'r')
@@ -267,9 +270,15 @@ export function createContextTail(
           const completeLines = lines.slice(0, -1)
           const latest = parse(lines)
           if (latest) {
-            t.used = latest.used
+            t.used = latest.used ?? t.used
             t.model = latest.model ?? t.model
             t.parsedWindow = latest.window ?? t.parsedWindow
+          }
+          if (initialReadWasCapped && !t.model && opts?.scanInitialModel) {
+            const path = t.path
+            const model = await opts.scanInitialModel(path, size).catch(() => null)
+            if (t.path !== path) return
+            t.model = model
           }
           if (opts?.onTaskNotification) {
             for (const n of parseTaskNotifications(completeLines))
