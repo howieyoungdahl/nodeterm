@@ -65,6 +65,7 @@ import {
 } from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
 import { releasePty, type ReleasablePty } from './pty-release'
+import { TerminalReplies } from './terminal-replies'
 import { terminateWindowsProcessTree } from '../session-host/windows-process-tree'
 import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
@@ -617,6 +618,7 @@ function normalizeSize(cols: number, rows: number): PtySize {
 
 interface Session {
   proc: pty.IPty
+  terminalReplies: TerminalReplies
   /** Every VIEW watching this session, keyed by the composite `(ClientId, viewerId)` (`SubKey`).
    *  Co-attach: ONE pty and ONE tmux client, N subscribers — a second client on the same persistKey
    *  (or the SAME client's second view, e.g. the kanban card modal) joins this set instead of
@@ -3378,6 +3380,7 @@ export class PtyManager {
     const spawnSub = clientId === null ? null : subKey(clientId, options.viewerId ?? PRIMARY_VIEWER)
     const session: Session = {
       proc,
+      terminalReplies: new TerminalReplies(),
       subscribers: spawnSub === null ? new Set<SubKey>() : new Set<SubKey>([spawnSub]),
       sizes:
         spawnSub === null
@@ -3444,6 +3447,7 @@ export class PtyManager {
       // rollback removes this exact generation, late callbacks must not recreate its flush timer
       // or leak bytes into a replacement that happens to reuse the same node id.
       if (this.sessions.get(sessionId) !== session) return
+      session.terminalReplies.observe(data)
       this.queueData(sessionId, session, data)
     })
 
@@ -3808,14 +3812,15 @@ export class PtyManager {
    * The hub throttles the broadcast (1 per 500 ms per client+node), so PtyManager does no
    * throttling of its own — but it does skip presence entirely when the user is ALONE: with one
    * peer in the table the only recipient would be the typist, whose own badge is never drawn, so a
-   * solo keystroke burst must not cost a presence fan-out. The single-user path stays exactly the
-   * old `sessions.get(id)?.proc.write(data)`.
+   * solo keystroke burst must not cost a presence fan-out. Terminal replies share a per-pty
+   * allowance across viewers and do not reach a released pane.
    *
    * No locking — concurrent writers interleave characters in the one tmux session. That is the
    * documented v1 behavior (docs/team-presence.md, "No locking"); the badge IS the warning.
    */
   write(clientId: ClientId | null, sessionId: string, data: string): void {
     const session = this.sessions.get(sessionId)
+    if (!TerminalReplies.allow(data, session?.terminalReplies)) return
     if (!session) return this.backgroundWriteBySessionId(sessionId, data)
     if (clientId !== null && session.nodeId && presenceHub.peerCount() > 1)
       presenceHub.noteTyping(clientId, session.nodeId)
