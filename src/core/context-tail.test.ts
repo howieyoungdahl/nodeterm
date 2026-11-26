@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { codexContextParse, scanCodexModel } from './codex-session'
 import { createContextTail, parseLatestUsage, parseTaskNotifications, hasToolResult } from './context-tail'
 
 describe('parseLatestUsage', () => {
@@ -151,6 +152,54 @@ describe('createContextTail — the `parse` dep (gemini/codex)', () => {
       windowTokens: 258400,
       model: 'gpt-5.6-sol'
     })
+  }, 8000)
+
+  it('keeps Codex models across separate polls and recovers the newest model on attach', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctxtail-codex-'))
+    const file = path.join(dir, 'rollout.jsonl')
+    const turn = (model: string) =>
+      JSON.stringify({ type: 'turn_context', payload: { model } }) + '\n'
+    const count = JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          last_token_usage: { input_tokens: 100 },
+          model_context_window: 258400
+        }
+      }
+    }) + '\n'
+    fs.writeFileSync(file, turn('gpt-5.6-sol'))
+    const send = vi.fn()
+    const parse = vi.fn(codexContextParse)
+    const tail = createContextTail(send, { parse, scanInitialModel: scanCodexModel })
+    try {
+      tail.track('live', file)
+      await vi.waitFor(() => expect(parse).toHaveBeenCalled())
+      expect(send).not.toHaveBeenCalled()
+
+      fs.appendFileSync(file, count)
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'live', model: 'gpt-5.6-sol', usedTokens: 100, windowTokens: 258400
+      })), { timeout: 2500 })
+
+      fs.appendFileSync(file, turn('gpt-6.2-sol'))
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'live', model: 'gpt-6.2-sol', usedTokens: 100, windowTokens: 258400
+      })), { timeout: 2500 })
+      tail.untrack('live')
+
+      // A large synthetic record puts both turns outside the initial 1 MiB read.
+      fs.appendFileSync(file, JSON.stringify({ type: 'response_item', payload: 'x'.repeat(1100000) }) + '\n' + count)
+      tail.track('resumed', file)
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'resumed', model: 'gpt-6.2-sol', usedTokens: 100, windowTokens: 258400
+      })), { timeout: 2500 })
+    } finally {
+      tail.untrack('live')
+      tail.untrack('resumed')
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   }, 8000)
 
   it('claude keeps its model-family window when NO parser is injected', async () => {

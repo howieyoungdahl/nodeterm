@@ -188,7 +188,7 @@ import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { safeLocalTranscriptPathFollowingLinks } from '../core/transcript-jail'
 import { geminiContextParse } from '../core/gemini-session'
-import { codexContextParse } from '../core/codex-session'
+import { codexContextParse, scanCodexModel } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
@@ -2153,7 +2153,10 @@ app.whenReady().then(async () => {
   // Hand the gemini session-name reader its path authority (declared above the handlers that use
   // it, assigned here where the tail exists).
   geminiTranscriptPathFor = (sessionId) => geminiContextTail.pathFor(sessionId)
-  const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
+  const codexContextTail = createContextTail(pushContextUpdate, {
+    parse: codexContextParse,
+    scanInitialModel: scanCodexModel
+  })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner

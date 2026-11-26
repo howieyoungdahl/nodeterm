@@ -18,7 +18,7 @@ import { recordAgentEvent, recordRawToolEvent, recordContextUsage,
 import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
-import { codexContextParse } from '../core/codex-session'
+import { codexContextParse, scanCodexModel } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { setNodeTranscript } from '../core/context-link'
@@ -157,7 +157,10 @@ export function wireAgentStatus(
   // SubagentStop hook IS the real end, so its subagent cards need no transcript sniffing —
   // and the declined-ask rescue is claude-only too).
   const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
-  const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
+  const codexContextTail = createContextTail(pushContextUpdate, {
+    parse: codexContextParse,
+    scanInitialModel: scanCodexModel
+  })
 
   hooks.setListener((e) => {
     // Queue registration before the same event reaches the delivery/arming consumer below. Stop
