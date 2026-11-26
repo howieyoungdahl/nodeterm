@@ -59,6 +59,7 @@ function harness(opts: {
   }) => Promise<{ sessionId: string; fresh: boolean }>
   sendText?: (nodeId: string, text: string) => Promise<boolean>
   noCreateSession?: boolean
+  otherProject?: Project
 } = {}) {
   let workspace: Workspace = {
     version: 2,
@@ -76,7 +77,8 @@ function harness(opts: {
         ...(opts.remote
           ? { ssh: { server: { host: 'remote.test', user: 'ops' }, remoteCwd: '/srv/app' } }
           : {})
-      }
+      },
+      ...(opts.otherProject ? [opts.otherProject] : [])
     ]
   }
   let saves = 0
@@ -89,6 +91,7 @@ function harness(opts: {
   // Existing cleanup fixtures represent delegated workers; human/unknown cases clear this proof.
   for (const n of opts.nodes ?? []) if (n.kind === 'terminal') ownership.record(n.id, { sourceNodeId: 'fixture-director', projectId: 'p1' })
   const sessionsCreated: string[] = []
+  const published: CanvasNodeState[] = []
   const createSessionCwds: Array<string | undefined> = []
   const sentText: Array<[string, string]> = []
   const store: NodeOpsWorkspace = {
@@ -142,6 +145,7 @@ function harness(opts: {
         return true
       }),
     onRemoved: (ids) => removed.push(...ids),
+    publishNode: (_projectId, node) => published.push(node),
     now: () => 1_800_000_000_000,
     ...(opts.massLimit ? { massLimit: opts.massLimit } : {}),
     warn: (message) => warnings.push(message)
@@ -162,6 +166,7 @@ function harness(opts: {
     probes,
     warnings,
     sessionsCreated,
+    published,
     createSessionCwds,
     sentText
   }
@@ -370,6 +375,29 @@ describe('ServerNodeOps.create', () => {
       projectId: 'p1', assistantCreationId: receipt.creationReceiptId })
     expect(h.sessionsCreated).toEqual([result.id])
     expect(h.sentText).toEqual([])
+  })
+
+  it('validates, saves, publishes and lists launch lineage without changing ownership or grouping', async () => {
+    const h = harness({ nodes: [node('director', 'terminal')], otherProject: {
+      id: 'p2', name: 'Two', color: '#0a84ff', viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [node('other-project', 'terminal')], bridges: [], ropes: []
+    } })
+
+    for (const parentNodeId of ['missing', 'other-project']) {
+      expect(await h.create({ parentNodeId })).toMatchObject({
+        ok: false, status: 400, error: expect.stringContaining('parentNodeId')
+      })
+    }
+    expect(h.saves()).toBe(0)
+    expect(h.published).toEqual([])
+
+    const result = await h.create({ parentNodeId: 'director' })
+    if (!result.ok) throw new Error(result.error)
+    expect(h.workspace().projects[0].nodes.find(n => n.id === result.id)?.parentNodeId).toBe('director')
+    expect(h.published).toContainEqual(expect.objectContaining({ id: result.id, parentNodeId: 'director' }))
+    expect((await h.service.list()).find(n => n.id === result.id)).toMatchObject({
+      parentNodeId: 'director', groupId: null, ownerSession: OPS_OPERATOR_SOURCE_ID
+    })
   })
 
   it('honors an explicit projectId, title, size and cmd', async () => {

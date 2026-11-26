@@ -13,11 +13,14 @@ export function taskBoardVisibility(sessions: KanbanSession[], board: ProjectKan
     const task = planning.get(session.id)
     if (task?.relationship === 'independent') roots.set(task.taskId, [...(roots.get(task.taskId) ?? []), session])
   }
+  // Launch-linked cards need their own rows so the board can show the parent and its workers.
+  const launchParents = new Set(sessions.flatMap(s => s.parentNodeId ? [s.parentNodeId] : []))
   const hidden = new Set<string>()
   const supports = new Map<string, KanbanSession[]>()
   for (const session of sessions) {
     const task = planning.get(session.id)
     if (task?.relationship !== 'support' || session.pinned || session.manualPlacement || board.manualAssignments?.[session.id]) continue
+    if (session.parentNodeId || launchParents.has(session.id)) continue
     const parents = roots.get(task.parentTaskId!)
     if (parents?.length !== 1 || parents[0].id === session.id) continue
     // A support session with a different verified outcome belongs in its own task column.

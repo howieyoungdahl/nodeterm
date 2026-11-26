@@ -300,7 +300,7 @@ export function createOpsApiHandler(
             return
           }
           const raw = body as Record<string, unknown>
-          const allowed = new Set(['projectId', 'cmd', 'cwd', 'title', 'width', 'height', 'organization', 'organizationPolicy', 'expectedRevision', 'idempotencyKey', 'creation'])
+          const allowed = new Set(['projectId', 'parentNodeId', 'cmd', 'cwd', 'title', 'width', 'height', 'organization', 'organizationPolicy', 'expectedRevision', 'idempotencyKey', 'creation'])
           const unknownKey = Object.keys(raw).find((key) => !allowed.has(key))
           if (unknownKey) {
             sendJson(res, 400, { error: `unknown_field: ${unknownKey}` })
@@ -318,6 +318,10 @@ export function createOpsApiHandler(
           if (raw.projectId !== undefined) {
             if (validString(raw.projectId, OPS_CREATE_STRING_MAX)) input.projectId = raw.projectId
             else invalid.push('projectId')
+          }
+          if (raw.parentNodeId !== undefined) {
+            if (validString(raw.parentNodeId, OPS_CREATE_STRING_MAX)) input.parentNodeId = raw.parentNodeId
+            else invalid.push('parentNodeId')
           }
           if (raw.cmd !== undefined) {
             if (validString(raw.cmd, OPS_CREATE_CMD_MAX)) input.cmd = raw.cmd

@@ -48,6 +48,7 @@ export interface KanbanSession {
   taskPlanning?: import('@shared/task-planning').TaskPlanning
   pinned?: boolean
   manualPlacement?: boolean
+  parentNodeId?: string
   organization?: import('@shared/kanban-organization').NodeOrganization
   id: string
   title: string
@@ -85,6 +86,7 @@ export interface KanbanCreateOption {
 }
 
 export interface KanbanViewProps {
+  workspaceSessionId?: string
   board: ProjectKanban
   sessions: KanbanSession[]
   onChange: (next: ProjectKanban) => void
@@ -132,7 +134,7 @@ const NO_TASKS = new Map<string, ExternalTask>()
  *  renders stop at this boundary. */
 export const KanbanView = memo(function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
-  onModalNodeChange, onBrowserNav
+  onModalNodeChange, onBrowserNav, workspaceSessionId = 'local'
 }: KanbanViewProps) {
   const { api } = useSession()
   const dragRef = useRef<Drag>(null)
@@ -295,6 +297,16 @@ export const KanbanView = memo(function KanbanView({
     [customAgents, disabledAgents]
   )
   const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
+  const childrenByParent = useMemo(() => {
+    const result = new Map<string, string[]>()
+    for (const card of sessions) {
+      if (!card.parentNodeId) continue
+      const siblings = result.get(card.parentNodeId) ?? []
+      siblings.push(card.id)
+      result.set(card.parentNodeId, siblings)
+    }
+    return result
+  }, [sessions])
   const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
   const candidate = featured?.nodeId ? byId.get(featured.nodeId) : undefined
   const featuredCard = candidate?.kind === 'terminal' ? candidate : undefined
@@ -507,10 +519,36 @@ export const KanbanView = memo(function KanbanView({
 
   function sessionCards(cards: KanbanSession[], columnId: string | null) {
     const onDropAt = dropAtCardFor(columnId)
-    return cards.map((s) => (
+    const inColumn = new Set(cards.map(card => card.id))
+    const children = new Map<string, KanbanSession[]>()
+    for (const card of cards) {
+      if (!card.parentNodeId || !inColumn.has(card.parentNodeId)) continue
+      const siblings = children.get(card.parentNodeId) ?? []
+      siblings.push(card)
+      children.set(card.parentNodeId, siblings)
+    }
+    const ordered: { card: KanbanSession; indented: boolean }[] = []
+    const visited = new Set<string>()
+    const add = (card: KanbanSession, indented = false): void => {
+      if (visited.has(card.id)) return
+      visited.add(card.id)
+      ordered.push({ card, indented })
+      for (const child of children.get(card.id) ?? []) add(child, true)
+    }
+    for (const card of cards) {
+      if (!card.parentNodeId || !inColumn.has(card.parentNodeId)) add(card)
+    }
+    // Keep imported cards visible even if a hand-edited link forms a cycle.
+    for (const card of cards) add(card)
+    return ordered.map(({ card: s, indented }) => (
       <SessionCard
         key={s.id}
         session={s}
+        workspaceSessionId={workspaceSessionId}
+        parent={s.parentNodeId ? byId.get(s.parentNodeId) : undefined}
+        childIds={childrenByParent.get(s.id)}
+        indented={indented}
+        onOpenParent={onOpenNode}
         reorderEnabled={columnMode === 'canvas'}
         linkDrag={Boolean(columnMode !== 'canvas' && linkPage && s.kind === 'terminal' && !externalTasks.has(s.id))}
         onLinkDrop={columnMode !== 'canvas' && linkPage && externalTasks.has(s.id) ? dropOnTask : undefined}

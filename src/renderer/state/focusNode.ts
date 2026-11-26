@@ -1,4 +1,8 @@
+import { createContext } from 'react'
 import { create } from 'zustand'
+
+/** Standard canvas selection and navigation for controls inside a node. */
+export const CanvasNodeNavigation = createContext<((id: string) => void) | undefined>(undefined)
 
 // Focus mode (issue #78): ONE terminal/agent node fills the window; the canvas chrome gets out
 // of the way and reappears on hover. Session-only on purpose — no localStorage: restoring into

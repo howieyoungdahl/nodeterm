@@ -338,6 +338,8 @@ export interface PendingLaunch {
 }
 
 export interface CanvasNodeState {
+  /** Launch lineage for display. Canvas groups and ownership use separate fields. */
+  parentNodeId?: string
   /** Creation-time work intent; presentation only, never creator/session authority. */
   taskPlanning?: import('./task-planning').TaskPlanning
   assistantCreation?: AssistantCreation

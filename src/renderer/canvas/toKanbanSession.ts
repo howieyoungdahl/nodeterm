@@ -52,6 +52,7 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
     color: (n.data.color as string) ?? NODE_COLORS[0],
     kind: 'terminal',
     organization: n.data.organization,
+    parentNodeId: n.data.parentNodeId,
     taskPlanning: n.data.taskPlanning,
     pinned: n.data.pinned,
     manualPlacement: n.data.manualPlacement,

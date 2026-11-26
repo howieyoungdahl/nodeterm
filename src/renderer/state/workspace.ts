@@ -80,6 +80,7 @@ export interface NodeData {
   cleanupArchiveId?: string
   assistantCreation?: CanvasNodeState['assistantCreation']
   taskPlanning?: CanvasNodeState['taskPlanning']
+  parentNodeId?: string
   organization?: import('@shared/kanban-organization').NodeOrganization
   title: string
   /**
@@ -1654,7 +1655,7 @@ export function duplicateNode(node: CanvasNode, offset = 28): CanvasNode {
     selected: true,
     parentId: undefined,
     extent: undefined,
-    data: { ...node.data, initialCommand: undefined, organization: undefined, assistantCreation: undefined,
+    data: { ...node.data, initialCommand: undefined, organization: undefined, assistantCreation: undefined, parentNodeId: undefined,
       taskPlanning: kind === 'terminal' ? defaultTaskPlanning(id) : undefined }
   }
 }
@@ -1934,6 +1935,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         organization: n.organization,
         assistantCreation: n.assistantCreation,
         taskPlanning: n.taskPlanning,
+        parentNodeId: n.parentNodeId,
         taskFrame: n.taskFrame,
         pinned: n.pinned,
         manualPlacement: n.manualPlacement,
@@ -2022,6 +2024,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         organization: n.data.organization,
         assistantCreation: n.data.assistantCreation,
         taskPlanning: n.data.taskPlanning,
+        parentNodeId: n.data.parentNodeId,
         taskFrame: n.data.taskFrame,
         pinned: n.data.pinned,
         manualPlacement: n.data.manualPlacement,

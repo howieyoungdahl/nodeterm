@@ -1350,7 +1350,7 @@ export class WorkspaceStore {
     this.lastWritten.set(projectFilePath(folder), read.raw)
     const project = fileToProject(read.file, { id: freshProjectId(), cwd: folder })
     // A cloned/imported file supplies content, never another project's management receipts.
-    project.nodes = project.nodes.map(({ organization: _origin, assistantCreation: _task, taskPlanning: _planning, ...node }) => node)
+    project.nodes = project.nodes.map(({ organization: _origin, assistantCreation: _task, taskPlanning: _planning, parentNodeId: _parent, ...node }) => node)
     delete project.kanbanOrganization
     return project
   }
