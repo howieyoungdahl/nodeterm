@@ -265,12 +265,14 @@ printf 'FAKE_AGENT_REGISTERED_%s\\n' "$nt_code"
     expect(sessionId).not.toBe('')
 
     // Prevent the terminal driver's command echo from satisfying marker waits before a command
-    // actually runs. This changes only the disposable pane.
+    // actually runs. This changes only the disposable pane. Under host load `stty -echo` can land
+    // after the next command is echoed, so every marker is also printed in two pieces: the echoed
+    // command line never contains the joined marker, only the command's real output does.
     cast(IPC.ptyWrite, [sessionId, 'stty -echo\r'])
     await new Promise((resolve) => setTimeout(resolve, 200))
 
     const registered = await runInPane(
-      `${shellQuote(fakeAgent)}; printf 'FIRST_HOOK_DONE\\n'`,
+      `${shellQuote(fakeAgent)}; printf 'FIRST_HOOK_%s\\n' DONE`,
       'FIRST_HOOK_DONE'
     )
     expect(registered).toContain(`FAKE_AGENT_ENV:${SOURCE_ID}:unset`)
@@ -316,7 +318,7 @@ printf 'FAKE_AGENT_REGISTERED_%s\\n' "$nt_code"
     // save may publish it. A verified hook must therefore mint nothing — the recovery that used to
     // run here relocated and renamed cards a browser tab had created seconds earlier.
     const recoveredHook = await runInPane(
-      `${shellQuote(fakeAgent)}; printf 'RECOVERY_HOOK_DONE\\n'`,
+      `${shellQuote(fakeAgent)}; printf 'RECOVERY_HOOK_%s\\n' DONE`,
       'RECOVERY_HOOK_DONE'
     )
     expect(recoveredHook).toContain('FAKE_AGENT_REGISTERED_204')
