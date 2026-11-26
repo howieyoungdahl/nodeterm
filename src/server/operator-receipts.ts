@@ -136,7 +136,7 @@ export class OperatorReceiptStore {
 
 export interface OperatorAuditEntry {
   caller: string
-  operation: 'targets' | 'read' | 'message' | 'receipt' | 'delivery'
+  operation: 'targets' | 'status' | 'read' | 'message' | 'receipt' | 'delivery'
   target?: OperatorSessionTarget
   receiptId?: string
   outcome: string

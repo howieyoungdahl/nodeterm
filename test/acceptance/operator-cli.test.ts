@@ -43,6 +43,31 @@ afterEach(() => {
 })
 
 describe('external operator CLI', () => {
+  it('requests a diagnostic for the exact target without sending a message', async () => {
+    const f = fixture()
+    const url = await server((req, res) => {
+      expect(req.method).toBe('GET')
+      expect(req.url).toContain('/opsapi/v1/session-status?')
+      expect(req.url).toContain('generation=generation1234')
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ version: 1, observation: 'expired', diagnosticOnly: true }))
+    })
+    const result = await run([...baseArgs(url, f), '--target-file', f.targetFile, 'status'])
+    expect(result.code).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ observation: 'expired', diagnosticOnly: true })
+  })
+
+  it('reports an older server that does not support status without sending anything', async () => {
+    const f = fixture()
+    const url = await server((req, res) => {
+      expect(req.method).toBe('GET')
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ version: 1, error: 'not_found' }))
+    })
+    const result = await run([...baseArgs(url, f), '--target-file', f.targetFile, 'status'])
+    expect(result.code).toBe(2)
+    expect(JSON.parse(result.stderr).error).toBe('not_found')
+  })
   it('calls capabilities and sessions with the separate credential, returning JSON', async () => {
     const f = fixture()
     const url = await server((req, res) => {
