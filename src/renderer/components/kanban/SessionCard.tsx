@@ -8,6 +8,7 @@ import type { KanbanSession } from './KanbanView'
 import type { AgentId } from '@shared/agents/config'
 import { NodeStatusBadge } from '../../nodes/NodeStatusBadge'
 import { showsStatus } from '../../lib/nodeStatusView'
+import { CardRoleChip } from '../CardRoleChip'
 import { OrganizationBadge } from '../OrganizationBadge'
 import { TaskPlanningBadge } from '../TaskPlanningBadge'
 import { assessTaskUrgency, parseTaskPlanning } from '@shared/task-planning'
@@ -24,6 +25,11 @@ const PRIO_COLOR: Record<KanbanPriority, string> = {
 }
 
 interface SessionCardProps {
+  workspaceSessionId?: string
+  parent?: KanbanSession
+  childIds?: readonly string[]
+  indented?: boolean
+  onOpenParent?: (id: string) => void
   reorderEnabled?: boolean
   linkDrag?: boolean
   onLinkDrop?: (target: string) => void
@@ -50,7 +56,7 @@ interface SessionCardProps {
 
 export const SessionCard = memo(function SessionCard({
   session, meta, reorderEnabled = true, linkDrag = false, onLinkDrop, priorityNow = Date.now(), labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext,
-  supportingSessions = [], urgentSupportingCount = 0, supportsExpanded = false, onToggleSupport
+  workspaceSessionId = 'local', parent, childIds, indented, onOpenParent, supportingSessions = [], urgentSupportingCount = 0, supportsExpanded = false, onToggleSupport
 }: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
   // KanbanView used to hold `useAgentStatus((s) => s.byId)` and pass the map through the column:
@@ -94,16 +100,18 @@ export const SessionCard = memo(function SessionCard({
   const linkedTasks = useExternalBoard(s => s.project === project ? s.tasks : null)
   const linkedTask = linkedTasks?.get(session.id)
   const titleFor = (card: KanbanSession) => taskDisplayTitle(card.title, card.titleAuto, linkedTasks?.get(card.id))
+  const sessionLabel = status?.session !== titleFor(session) && status?.session !== session.title ? status?.session : undefined
   const priority = externalBoard ? undefined : effectivePriority(meta, session.taskPlanning, priorityNow)
   // The account chip counts as detail in its own right: a card whose only thing to say is "this
   // one is on the other Claude login" is exactly the card that must say it.
   const hasDetail =
-    !!status?.sessionId || !!status?.session || !!accountChip || stickyPreview.includes('\n')
+    !!status?.sessionId || !!sessionLabel || !!accountChip || stickyPreview.includes('\n')
   return (
     <div
       className={`kanban-card kanban-card--session${dragging ? ' kanban-card--dragging' : ''}${
         dropSide ? ` kanban-card--drop-${dropSide}` : ''
       }`}
+      style={indented ? { marginInlineStart: 12 } : undefined}
       data-node-id={session.id}
       draggable={reorderEnabled || linkDrag}
       onDragStart={(e) => {
@@ -166,6 +174,13 @@ export const SessionCard = memo(function SessionCard({
         {externalBoard && linkedTask && <a className="kanban-card__task" href={taskBoardHref(externalBoard, linkedTask.task)}
           target="_blank" rel="noreferrer" draggable={false} onClick={e => e.stopPropagation()}
           title={linkedTask.taskTitle ?? linkedTask.task}>Task {linkedTask.task}</a>}
+        <CardRoleChip
+          sessionId={workspaceSessionId}
+          parentId={session.parentNodeId}
+          parentTitle={parent && titleFor(parent)}
+          childIds={childIds}
+          onOpenParent={onOpenParent}
+        />
         <TaskPlanningBadge boardHasStatus planning={session.taskPlanning} nodeId={session.id} />
       </div>}
       {session.organization && <div className="kanban-card__metarow"><OrganizationBadge organization={session.organization} nodeId={session.id} /></div>}
@@ -236,9 +251,9 @@ export const SessionCard = memo(function SessionCard({
             <>
               <ContextMeter sessionId={status?.sessionId ?? null} />
               <AccountChip chip={accountChip} />
-              {status?.session && (
-                <span className="kanban-card__session" title={status.session}>
-                  {status.session}
+              {sessionLabel && (
+                <span className="kanban-card__session" title={sessionLabel}>
+                  {sessionLabel}
                 </span>
               )}
             </>

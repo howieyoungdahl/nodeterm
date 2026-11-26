@@ -1,5 +1,9 @@
-import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
+import { useShallow } from 'zustand/react/shallow'
+import { normalizeSessionLabel } from '../lib/sessionLabel'
+import { CardRoleChip } from '../components/CardRoleChip'
+import { setTerminalUnavailable } from '../state/terminalAvailability'
 import { OrganizationBadge } from '../components/OrganizationBadge'
 import { TaskPlanningBadge } from '../components/TaskPlanningBadge'
 import { taskDisplayTitle, useProjectTaskLink } from '../state/externalTaskBoard'
@@ -8,6 +12,7 @@ import {
   NodeResizer,
   Position,
   useReactFlow,
+  useStore,
   useUpdateNodeInternals,
   type NodeProps
 } from '@xyflow/react'
@@ -25,7 +30,7 @@ import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../ter
 import type { TerminalTransport } from '../terminal/transport'
 import { guardMiddleClickPaste } from '../terminal/middle-click'
 import { patchTerminalScale } from '../terminal/scale-fix'
-import { focusedNodeId, subscribeFocusedNode, focusSurfaceEl } from '../state/focusNode'
+import { CanvasNodeNavigation, focusedNodeId, subscribeFocusedNode, focusSurfaceEl } from '../state/focusNode'
 import { appearanceAttrs, useNodeAppearance } from '../state/appearance'
 import { AppearanceGlow } from '../components/AppearanceGlow'
 import { NodeBorderPicker } from '../components/NodeBorderPicker'
@@ -523,6 +528,7 @@ export function disposeTerminalOnUnmount(sessionId: string, nodeId: string): voi
   noParkIds.add(key)
   disposeParkedTerminal(key)
   coStates.delete(key)
+  setTerminalUnavailable(key, false)
   forgetNodeTermState(nodeId)
 }
 
@@ -972,6 +978,9 @@ function setCo(key: string, patch: Partial<CoState>): void {
   )
     return
   coStates.set(key, next)
+  if (next.closed !== prev.closed || next.ended !== prev.ended || next.deadCard !== prev.deadCard) {
+    setTerminalUnavailable(key, !!(next.closed || next.ended || next.deadCard))
+  }
   coSubs.get(key)?.(next)
 }
 
@@ -999,6 +1008,13 @@ export function TerminalNode({
   positionAbsoluteY
 }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements, getZoom, setNodes, getNode } = useReactFlow()
+  const parentTitle = useStore((s) => data.parentNodeId
+    ? s.nodeLookup.get(data.parentNodeId)?.data.title as string | undefined
+    : undefined)
+  const childIds = useStore(useShallow((s) => s.nodes
+    .filter(node => node.type === 'terminal' && node.data.parentNodeId === id && !node.data.cleanupArchiveId)
+    .map(node => node.id)))
+  const openParent = useContext(CanvasNodeNavigation)
   // This node's core api (a context read — stable for the session's lifetime, so using it
   // inside the once-mounted lifecycle effect is safe and never re-runs that effect). Core-bound
   // namespaces (pty, fs) go through it; app-global ones (clipboard, shell) stay on the global.
@@ -2686,11 +2702,14 @@ export function TerminalNode({
     if (!parked && showStatus) {
       cleanups.push(
         term.onTitleChange((t) => {
-          const title = t.trim()
+          const title = normalizeSessionLabel(t)
           // Ignore path/prompt-like titles (e.g. "user@host: ~/dir") which aren't session names.
           // This feeds the `session` chip only; the node title is synced from the transcript's
           // authoritative session name instead (see the readSessionName effect below).
-          if (title && !/[/:~]/.test(title)) useAgentStatus.getState().setSession(id, title)
+          const agentStatus = useAgentStatus.getState()
+          if (title.trim() && !/[/:~]/.test(title) && agentStatus.byId[id]?.session !== title) {
+            agentStatus.setSession(id, title)
+          }
         }).dispose
       )
     }
@@ -3048,6 +3067,7 @@ export function TerminalNode({
           // Seed written — release the PTY output that arrived while it was in flight.
           if (!toreDown) gate.open()
         }
+        setTerminalUnavailable(termKey, false)
         cleanups.push(
           transport.onExit(sid, (code) => {
             term.write(`\r\n\x1b[90m[process exited with code ${code}]\x1b[0m\r\n`)
@@ -3055,6 +3075,7 @@ export function TerminalNode({
             // network change, NAT idle) — the remote tmux session survives. Report it so the
             // reconnect coordinator can re-establish the master and respawn this node.
             if (code === 255 && sshProjectId) sshDropHandler?.(sshProjectId, id)
+            else setTerminalUnavailable(termKey, true)
           })
         )
         cleanups.push(
@@ -4630,9 +4651,16 @@ export function TerminalNode({
         </button>
         </div>
         <div className="term-node__toolbar">
+        <CardRoleChip
+          sessionId={session.id}
+          parentId={data.parentNodeId}
+          parentTitle={parentTitle}
+          childIds={childIds}
+          onOpenParent={openParent}
+        />
         <OrganizationBadge organization={data.organization} nodeId={id} />
         <TaskPlanningBadge planning={data.taskPlanning} nodeId={id} />
-        {status?.session && status.session !== data.title && (
+        {status?.session && status.session !== data.title && status.session !== displayTitle && (
           <span className="term-node__session" title={status.session}>
             {status.session}
           </span>

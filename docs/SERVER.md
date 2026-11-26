@@ -293,7 +293,7 @@ The v1 contract is deliberately narrow:
   from nodeterm's timestamped id, otherwise `null`), `paneState`, `agentStatus`, `lastActivityAt`,
   and the current-run creator `ownerSession`. Terminal pane state is `alive`, `dead`, or `unknown`;
   non-terminal cards say `none`. Agent state is normalized to `working`, `idle`, or `blocked` when
-  the hook mirror knows it.
+  the hook mirror knows it. Cards created with a launch parent also include `parentNodeId`.
 - `POST /opsapi/sweep` requires `{ "dryRun": true|false }` and accepts an optional
   `"force": true|false` (default `false`); no other key is allowed. It returns
   `{dryRun, affectedIds, scanned}`, plus `refused` when the mass-sweep guard blocked the pass. It
@@ -344,6 +344,8 @@ Before POST, callers authenticate read-only `GET /opsapi/creation-contract` and
 require its private receipt-before-save/spawn promise plus `receiptPublication`:
 Linux `file-and-directory-sync`, native Windows `file-flush-visibility` with no
 directory/power-loss claim. Missing or weaker capabilities refuse before launch.
+An optional `parentNodeId` must identify a node in the target project, or creation returns HTTP 400.
+It records launch lineage for the role chips and carries no control permissions.
 Manual browser creation stays on its ordinary workspace/terminal path.
 Exact per-project column-ID policy remains optional. The private creator ledger attests new assistant opt-in;
 old operator cards and hand-edited metadata are not adopted. Missing policy/columns stay Ungrouped.

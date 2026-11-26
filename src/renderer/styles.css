@@ -1380,6 +1380,12 @@ body,
   border-radius: 6px;
 }
 
+button.card-role-chip {
+  max-width: 210px;
+  border: 0;
+  cursor: pointer;
+}
+
 .task-planning-facts {
   display: inline-flex;
   align-items: baseline;

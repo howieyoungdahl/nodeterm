@@ -123,6 +123,7 @@ export interface OpsNodeInventoryItem {
   title: string
   projectId: string
   groupId: string | null
+  parentNodeId?: string
   /** Epoch milliseconds recovered from nodeterm's timestamped id; null for legacy/foreign ids. */
   createdAt: number | null
   paneState: OpsPaneState
@@ -300,6 +301,7 @@ export type OpsRemoveResult =
   | { ok: false; status: number; error: string; paneState?: OpsPaneState }
 
 export interface OpsCreateInput {
+  parentNodeId?: string
   creation?: AssistantCreation
   idempotencyKey?: string
   organization?: OrganizationMetadata
@@ -498,6 +500,7 @@ export class ServerNodeOps {
             title: node.title,
             projectId: project.id,
             groupId: node.parentId ?? null,
+            parentNodeId: node.parentNodeId,
             createdAt: createdAtFromNodeId(node.id, this.now()),
             paneState: await this.paneState(project, node),
             agentStatus: normalizedAgentStatus(status),
@@ -1152,6 +1155,7 @@ export class ServerNodeOps {
     // Fixed field order; private command/title/cwd bytes never enter the journal or audit.
     const fingerprint = createHash('sha256').update(JSON.stringify({ projectId: input.projectId,
       cmd: input.cmd, cwd: input.cwd, title: input.title, width: input.width, height: input.height,
+      parentNodeId: input.parentNodeId,
       creation: input.creation,
       organization: input.organization && parseOrganizationMetadata(input.organization),
       organizationPolicy: input.organizationPolicy && parseOrganizationPolicy(input.organizationPolicy),
@@ -1196,6 +1200,10 @@ export class ServerNodeOps {
           catch (error) { return { ok: false as const, status: 400, error:
             `${(error as NodeJS.ErrnoException).code === 'ENOENT' ? 'cwd_not_found' : 'cwd_unreadable'}: ${input.cwd}` } }
         }
+        const alreadySaved = reservation && project.nodes.some(node => node.id === reservation?.nodeId)
+        if (!alreadySaved && input.parentNodeId !== undefined && !project.nodes.some(node => node.id === input.parentNodeId)) {
+          return { ok: false as const, status: 400, error: 'invalid_parent_node_id: parentNodeId must name an existing node in the same project' }
+        }
         if (!reservation) {
           reservation = { id: randomUUID(), nodeId: nextOperatorNodeId(), projectId: project.id,
             fingerprint, assistant: !!input.organization, stage: 'reserved' }
@@ -1215,6 +1223,7 @@ export class ServerNodeOps {
           const size = { width: input.width ?? OPERATOR_DEFAULT_NODE_SIZE.width, height: input.height ?? OPERATOR_DEFAULT_NODE_SIZE.height }
           node = { id: reservation.nodeId, kind: 'terminal', position: placeFromOrigin(project, size), size,
             title: input.title ?? `Operator ${reservation.nodeId}`, titleAuto: false, role: 'worker',
+            ...(input.parentNodeId !== undefined ? { parentNodeId: input.parentNodeId } : {}),
             assistantCreation: completeCreationPlanning(input.creation!, input.organization!),
             taskPlanning: planningAtCreation(input.creation!.taskId, input.organization!.functionalRole, input.creation!.planning),
             color: OPERATOR_NODE_COLOR, group: null, tags: [], ...(input.cwd !== undefined ? { cwd: input.cwd } : {}) }

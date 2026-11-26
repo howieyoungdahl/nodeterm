@@ -550,6 +550,7 @@ export const useProjects = create<ProjectsState>((set, get) => ({
         const copy: CanvasNodeState = {
           ...src,
           organization: undefined,
+          parentNodeId: undefined,
           id: `${src.kind}-${Math.random().toString(36).slice(2, 10)}`,
           title: `${src.title} copy`,
           position: { x: src.position.x + 24, y: src.position.y + 24 }

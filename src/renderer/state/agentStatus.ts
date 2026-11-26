@@ -1,3 +1,4 @@
+import { normalizeSessionLabel } from '../lib/sessionLabel'
 import { reportsSessionEnd } from '@shared/agents/normalize'
 import { create, type StoreApi, type UseBoundStore } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
@@ -378,15 +379,20 @@ export function createAgentStatusSession(
 ): AgentStatusSession {
   if (persistKey === KEY) migrateLegacyKey()
 
+  type SavedStatus = Partial<AgentNodeStatus> & { sessionLabelVersion?: 1 }
+
   function load(): Record<string, AgentNodeStatus> {
     if (!persistKey) return {}
     try {
       const raw = localStorage.getItem(persistKey)
       if (!raw) return {}
-      const data = JSON.parse(raw) as Record<string, Partial<AgentNodeStatus>>
+      const data = JSON.parse(raw) as Record<string, SavedStatus>
       const out: Record<string, AgentNodeStatus> = {}
       for (const [id, v] of Object.entries(data)) {
-        out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId, agentId: v.agentId }
+        const session = typeof v.session === 'string'
+          ? (v.sessionLabelVersion === 1 ? v.session : normalizeSessionLabel(v.session))
+          : undefined
+        out[id] = { unread: !!v.unread, session, sessionId: v.sessionId, agentId: v.agentId }
         // Minimal shape check, like `loop` below: this file is on disk and hand-editable, and a
         // half-written entry must not put a chip on a node claiming an identity it never had.
         if (
@@ -433,12 +439,13 @@ export function createAgentStatusSession(
   function save(byId: Record<string, AgentNodeStatus>): void {
     if (!persistKey) return
     try {
-      const out: Record<string, Partial<AgentNodeStatus>> = {}
+      const out: Record<string, SavedStatus> = {}
       for (const [id, v] of Object.entries(byId)) {
         if (v.unread || v.session || v.sessionId || v.loop || v.agentId || v.account || v.hibernated) {
           out[id] = {
             unread: v.unread,
             session: v.session,
+            sessionLabelVersion: v.session ? 1 : undefined,
             sessionId: v.sessionId,
             agentId: v.agentId,
             // Durable beside `agentId`, and for the same reason (see the field comment): a plain

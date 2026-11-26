@@ -316,6 +316,7 @@ import {
 import { useProjects } from '../state/projects'
 import { NO_BACKGROUND, useExternalBoard } from '../state/externalTaskBoard'
 import { useAgentStatus } from '../state/agentStatus'
+import { normalizeSessionLabel } from '../lib/sessionLabel'
 import { seedAgentStatusFromHost } from '../lib/seedAgentStatus'
 import { runFailureProbe } from '../lib/failureProbe'
 import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
@@ -431,7 +432,7 @@ import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
 import { useBoardLog } from '../state/boardLog'
 import { isKanbanOpen, useViewMode, viewFor } from '../state/viewMode'
-import { useFocusNode, FOCUS_SURFACE_ID } from '../state/focusNode'
+import { CanvasNodeNavigation, useFocusNode, FOCUS_SURFACE_ID } from '../state/focusNode'
 import { focusTargetId } from '../lib/focusTarget'
 import {
   createCanvasPublisher,
@@ -10767,7 +10768,10 @@ export function Canvas() {
           }
           break
         case 'session':
-          if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
+          if (e.sessionTitle) {
+            const label = normalizeSessionLabel(e.sessionTitle)
+            if (label.trim() && cs.byId[e.nodeId]?.session !== label) cs.setSession(e.nodeId, label)
+          }
           if (e.sessionPhase === 'start' && e.sessionSource !== 'compact') {
             cs.setSessionPhase(e.nodeId, 'start', e.agentId)
             // A SessionStart is proof a CLI just LAUNCHED in that pane, so a hibernated flag on
@@ -12076,6 +12080,7 @@ export function Canvas() {
       </div>
       {kanbanOpen && (
         <KanbanView
+          workspaceSessionId={sessionForProject(activeProjectId || '').id}
           board={projectKanban ?? seedBoard}
           sessions={kanbanSessions}
           onChange={onKanbanChange}
@@ -12196,6 +12201,7 @@ export function Canvas() {
             api change must remount them or they keep talking to the old core. For an all-local user
             the key is always 'local', so this never remounts — zero behavior change. */}
         <SessionProvider session={sessionForProject(activeProjectId || '')} key={sessionForProject(activeProjectId || '').id}>
+        <CanvasNodeNavigation.Provider value={focusNodeById}>
         <ReactFlow
           nodes={allNodes}
           edges={visibleEdges}
@@ -12297,6 +12303,7 @@ export function Canvas() {
           <PresenceLayer />
           <StatusAwareMiniMap onNodeDoubleClick={goToNode} />
         </ReactFlow>
+        </CanvasNodeNavigation.Provider>
         </SessionProvider>
 
         {/* MUST stay OUTSIDE <ReactFlow>. The library's wrapper carries inline
